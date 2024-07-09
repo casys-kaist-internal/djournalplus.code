@@ -1,0 +1,3 @@
+[submodule "djournalplus-kernel.code"]
+	path = djournalplus-kernel.code
+	url = git@github.com:casys-kaist-internal/djournalplus-kernel.code.git
