@@ -1,3 +1,6 @@
 [submodule "djournalplus-kernel.code"]
 	path = djournalplus-kernel.code
 	url = git@github.com:casys-kaist-internal/djournalplus-kernel.code.git
+[submodule "spdk"]
+	path = spdk
+	url = https://github.com/spdk/spdk
