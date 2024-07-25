@@ -17,6 +17,7 @@ git submodule update --recursive --init
 
 Develop data journal modules (jbd2) in kernel code.
 Modify code and build on host. Then reboot on QEMU.
+HIGHLY recommend you to use gcc-9 (gcc-13 makes compile error)
 
 ```shell
 cp ./VM_kernel.config ./djournalplus-kernel.code/.config
@@ -29,6 +30,24 @@ sudo make install
 
 ## PCIe Passthrough to QEMU
 
+Before setting Passthrough, check memlock of user by following command
+
+```shell
+ulimit -l
+```
+
+If it is not "unlimited" then modify "/etc/security/limits.conf" file.
+
+For example add follow lines to the file.
+jhlee    soft    memlock    unlimited
+jhlee    hard    memlock    unlimited
+
+Then applying the changes
+```shell
+sudo systemctl restart systemd-logind
+```
+
+After checking memlock, follow below steps
 
 ### 1. Enable Vt-d at BIOS setup
 
@@ -48,6 +67,7 @@ DO NOT build SPDK on host machine.
 cd ./spdk
 sudo ./scripts/setup.sh
 ```
+
 You may see "0000:86:00.0 (144d a824): nvme -> vfio-pci"
 86.00.0 will be PCIe address of NVMe drive, used in QEMU
 
