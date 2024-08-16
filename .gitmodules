@@ -4,3 +4,6 @@
 [submodule "spdk"]
 	path = spdk
 	url = https://github.com/spdk/spdk
+[submodule "fs_microbench"]
+	path = fs_microbench
+	url = git@github.com:leesecre/fs_microbench.git
