@@ -2,8 +2,11 @@
 	path = djournalplus-kernel.code
 	url = git@github.com:casys-kaist-internal/djournalplus-kernel.code.git
 [submodule "spdk"]
-	path = spdk
+	path = tools/spdk
 	url = https://github.com/spdk/spdk
 [submodule "fs_microbench"]
-	path = fs_microbench
+	path = bench/fs_microbench
 	url = git@github.com:leesecre/fs_microbench.git
+[submodule "bench/fs_fio"]
+	path = bench/fs_fio
+	url = git@github.com:leesecre/fs_fio.git

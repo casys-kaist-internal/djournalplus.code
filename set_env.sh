@@ -8,4 +8,4 @@ export DJPLUS_ROOT=$PWD
 export DJPLUS_KERNEL=$DJPLUS_ROOT/djournalplus-kernel.code
 
 # Add binary to env path
-export PATH=$DJPLUS_ROOT/bin:$PATH
+export PATH=$DJPLUS_ROOT/tools/bin:$PATH
