@@ -10,3 +10,9 @@
 [submodule "bench/fs_fio"]
 	path = bench/fs_fio
 	url = git@github.com:leesecre/fs_fio.git
+[submodule "bench/micro"]
+	path = bench/micro
+	url = git@github.com:yulistic-benchmarks/FS_microbench.git
+[submodule "bench/postgresql"]
+	path = bench/postgresql
+	url = git@github.com:leesecre/PostgreSQL.git
