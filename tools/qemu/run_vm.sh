@@ -6,7 +6,7 @@ NVME_PCIE_ADDR="" # Set proper PCIE address for your NVMe device.
 # NVME_PCIE_ADDR="d8:00.0"
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then # script is executed directly.
-	qemu-system-x86_64	-kernel $DJPLUS_KERNEL/arch/x86/boot/bzImage \
+	qemu-system-x86_64	-kernel $TAUFS_KERNEL/arch/x86/boot/bzImage \
 				-initrd /boot/initrd.img-6.2.10djplus+ \
 				-cpu host \
 				-smp cpus=32 \

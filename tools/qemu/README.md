@@ -22,7 +22,7 @@ sudo usermod -a -G kvm $USER
 
 ## Build kernel
 
-`run_vm.sh` script run qemu using kernel image in $DJPLUS_KERNEL path.
+`run_vm.sh` script run qemu using kernel image in $TAUFS_KERNEL path.
 So, you have to build the kernel first.
 Refer to the README.md file in the project root directory.
 
@@ -56,7 +56,7 @@ sudo pkill -9 qemu-system-x86
 After boot qemu image, attach gdb client. You can run `gdb.sh`.
 
 ```shell
-gdb $DJPLUS_KERNEL/vmlinux -ex 'target remote localhost:1234'
+gdb $TAUFS_KERNEL/vmlinux -ex 'target remote localhost:1234'
 ```
 
 ## Access guest VM via SSH

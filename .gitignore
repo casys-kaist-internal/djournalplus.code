@@ -1,3 +1,5 @@
 bin*
 qemu-7.2.1*
 *qcow2*
+bench/workspace
+
