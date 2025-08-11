@@ -16,9 +16,6 @@
 [submodule "bench/postgresql"]
 	path = bench/postgresql
 	url = git@github.com:leesecre/PostgreSQL.git
-[submodule "bench/benchbase"]
-	path = bench/benchbase
-	url = https://github.com/cmu-db/benchbase.git
 [submodule "bench/mysql-server"]
 	path = bench/mysql-server
 	url = git@github.com:leesecre/mysql-server.git
