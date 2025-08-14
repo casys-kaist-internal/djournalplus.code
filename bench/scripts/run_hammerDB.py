@@ -4,30 +4,31 @@ from pathlib import Path
 import sys
 import time
 import shutil
-import threading
 import pexpect
 
 if "TAUFS_ENV_SOURCED" not in os.environ:
     print("Please source set_env.sh first. (TAUFS_ENV_SOURCED not set)")
     sys.exit(1)
 
-MODE = "IOVOLUME"
-# MODE = "PERFORMANCE"
+#MODE = "IOVOLUME"
+MODE = "PERFORMANCE"
+# MODE = "TRIAL"
 
 FS_GROUPS = {
-    "on": ["ext4", "btrfs", "f2fs"],        # full_page_writes: on
-    "off": ["ext4", "taujournal", "zfs", "zfs8k"]  # full_page_writes: off
+    # "on": [],        # full_page_writes: on
+    # "off": ["zfs8k", "taujournal"]  # full_page_writes: off
+    # "on": ["ext4", "f2fs"],        # full_page_writes: on
+    # "off": ["ext4", "taujournal"]  # full_page_writes: off
 
-    # "on": ["ext4"],
-    # "off": ["ext4"]
+    "on": ["ext4", "btrfs", "f2fs"],
+    "off": ["ext4", "taujournal"]
 }
 
 # VU_LIST = [1, 32]
 # WAREHOUSE_LIST = [10]
 
 VU_LIST = [8, 16, 24, 32, 48, 64]
-# VU_LIST = [1, 32, 64]
-WAREHOUSE_LIST = [100] # 256 --> 25GB 정도인 듯
+WAREHOUSE_LIST = [256] # 256 --> 25GB 정도인 듯
 
 
 STOREDPROCS = [True] # default 
@@ -39,13 +40,17 @@ elif MODE == "PERFORMANCE":
     TOTAL_ITERATION=100000000
     DURATION=10
     RAMPUP=5
+elif MODE == "TRIAL":
+    TOTAL_ITERATION=10000
+    DURATION=1
+    RAMPUP=1
 else:
     print(f"Unsupported mode: {MODE}")
     sys.exit(1)
 
 
 FULL_PAGE_WRITES = ["on", "off"]
-TAU_DEVICE = os.environ.get("TAU_DEVICE", "/dev/nvme1n1")
+TAU_DEVICE = os.environ.get("TAU_DEVICE")
 TAUFS_BENCH = Path(os.environ["TAUFS_BENCH"])
 TAUFS_BENCH_WS = Path(os.environ["TAUFS_BENCH_WS"])
 HAMMERDB = TAUFS_BENCH_WS / "HammerDB-5.0"
@@ -83,10 +88,10 @@ def setup_filesystem(fs_type):
         run(f"sudo mke2fs -t ext4 -J size=40000 -E lazy_itable_init=0,lazy_journal_init=0 -F {TAU_DEVICE}")
     elif fs_type == "zfs":
         print(f"[+] Formatting {TAU_DEVICE} to ZFS")
-        run(f"sudo zpool create zfspool {TAU_DEVICE} -f")
+        run(f"sudo zpool create zfspool {TAU_DEVICE}")
     elif fs_type == "zfs8k":
         print(f"[+] Formatting {TAU_DEVICE} to ZFS with 8K block size")
-        run(f"sudo zpool create zfs8kpool {TAU_DEVICE} -f")
+        run(f"sudo zpool create zfs8kpool {TAU_DEVICE}")
         run(f"sudo zfs set recordsize=8K zfs8kpool")
     else:
         raise ValueError(f"Unsupported filesystem type: {fs_type}")
@@ -213,14 +218,15 @@ def run_hammerdb(vu, run_tcl_path, result_dir):
         run_hammerdb_interactive(vu, run_tcl_path, result_dir)
         return
 
-    iostat_log = result_dir / f"run_vu{vu}_iostat.log"
-    iostat_proc = iostat_start(TAU_DEVICE, iostat_log)
-    try:
-        run(f"./hammerdbcli auto {run_tcl_path.name} > {result_dir}/hmdb_run_vu{vu}.log")
-    finally:
-        iostat_proc.terminate()
-        iostat_proc.wait()
-        print(f"[+] iostat logging complete.")
+    run(f"./hammerdbcli auto {run_tcl_path.name} > {result_dir}/hmdb_run_vu{vu}.log")
+    # iostat_log = result_dir / f"run_vu{vu}_iostat.log"
+    # iostat_proc = iostat_start(TAU_DEVICE, iostat_log)
+    # try:
+    #     run(f"./hammerdbcli auto {run_tcl_path.name} > {result_dir}/hmdb_run_vu{vu}.log")
+    # finally:
+    #     iostat_proc.terminate()
+    #     iostat_proc.wait()
+    #     print(f"[+] iostat logging complete.")
 
 def setup_pg_users_and_db():
     run(f"{PG_INSTALL}/bin/psql -p {PG_PORT} -h localhost -U postgres -c \"CREATE USER {PG_APP_USER} WITH SUPERUSER PASSWORD '{PG_APP_PASS}';\"")

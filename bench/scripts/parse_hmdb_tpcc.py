@@ -84,7 +84,8 @@ def collect_benchmark_summary(results_root: Path, device: str = "nvme1n1", outpu
 # 환경변수에서 경로 얻기
 results_dir = Path(os.environ["TAUFS_BENCH_WS"]) / "results"
 summary_csv_path = results_dir / "tpcc_iostat_summary.csv"
+DEVICE_NAME = str(Path(os.getenv("TAU_DEVICE_NAME")))  
 
 # 결과 파싱 및 저장
-summary = collect_benchmark_summary(results_dir, device="nvme1n1", output_csv=summary_csv_path)
+summary = collect_benchmark_summary(results_dir, DEVICE_NAME, output_csv=summary_csv_path)
 print(f"✅ Summary saved to {summary_csv_path}")
