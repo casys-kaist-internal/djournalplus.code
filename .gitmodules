@@ -19,3 +19,6 @@
 [submodule "bench/mysql-server"]
 	path = bench/mysql-server
 	url = git@github.com:leesecre/mysql-server.git
+[submodule "e2fsprogs"]
+	path = e2fsprogs
+	url = git@github.com:leesecre/e2fsprogs.git
