@@ -1,24 +1,48 @@
 #!/bin/bash
 
 # For checking this file is sourced.
-export TAUFS_ENV_SOURCED=1
+export TAU_USERNAME=$(whoami)
 
 # Set directory paths.
 export TAUFS_ROOT=$PWD
 export TAUFS_KERNEL=$TAUFS_ROOT/djournalplus-kernel.code
 export TAUFS_BENCH=$TAUFS_ROOT/bench
 export TAUFS_BENCH_WS=$TAUFS_BENCH/workspace
-export PATH=$TAUFS_BENCH_WS/pg_install/bin:$PATH
+export TAU_BACKUP_ROOT=/mnt/tau_backup
+
 
 # Add binary to env path
 export PATH=$TAUFS_ROOT/tools/bin:$PATH
 export LD_LIBRARY_PATH=$TAUFS_BENCH/workspace/pg_install/lib:$LD_LIBRARY_PATH
 
-
-#TARGET_DISK="SAMSUNG MZPLJ3T2HBJR-00007"
-TARGET_DISK="Samsung SSD 980 PRO"
+# Test Device
+# TARGET_DISK="Samsung SSD 980 PRO"
+TARGET_DISK="SAMSUNG MZPLJ3T2HBJR-00007"
 TAU_DEVICE=$(nvme list | awk -v model="$TARGET_DISK" '$0 ~ model {print $1; exit}')
-#TAU_DEVICE="/dev/nvme0n1"
-
-export TAU_DEVICE
+if [[ -z "$TAU_DEVICE" ]]; then
+  echo "[ERR] cannot find device: $TARGET_DISK" >&2
+fi
 echo "TAU_DEVICE set to: $TAU_DEVICE"
+TAU_DEVICE_NAME="${TAU_DEVICE##*/}"
+export TAU_DEVICE
+export TAU_DEVICE_NAME
+
+# Backup Device for file system images
+BACKUP_DISK="PM1753V8TLC"
+TAU_BACKUP_DEVICE=$(nvme list | awk -v model="$BACKUP_DISK" '$0 ~ model {print $1}')
+echo "TAU_BACKUP_DEVICE set to: $TAU_BACKUP_DEVICE"
+if [[ -z "$TAU_BACKUP_DEVICE" ]]; then
+  echo "[ERR] cannot find backup device: $BACKUP_DISK" >&2
+fi
+export TAU_BACKUP_DEVICE
+
+sudo mkdir -p $TAU_BACKUP_ROOT
+if ! sudo mount "$TAU_BACKUP_DEVICE" "$TAU_BACKUP_ROOT"; then
+    echo "mount failed! $TAU_BACKUP_DEVICE"
+    return 1
+fi
+sudo chown $TAU_USERNAME:$TAU_USERNAME $TAU_BACKUP_ROOT
+echo "TAU_BACKUP_ROOT set to: $TAU_BACKUP_ROOT"
+
+# All setting done!
+export TAUFS_ENV_SOURCED=1
