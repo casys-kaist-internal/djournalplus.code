@@ -14,6 +14,7 @@ export TAU_BACKUP_ROOT=/mnt/tau_backup
 # Add binary to env path
 export PATH=$TAUFS_ROOT/tools/bin:$PATH
 export LD_LIBRARY_PATH=$TAUFS_BENCH/workspace/pg_install/lib:$LD_LIBRARY_PATH
+export PATH=$TAUFS_BENCH_WS/pg_install/bin:$PATH
 
 # Test Device
 # TARGET_DISK="Samsung SSD 980 PRO"

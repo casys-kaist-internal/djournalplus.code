@@ -97,3 +97,8 @@ umount_fs() {
   MOUNT_DIR=$1
   sudo umount $MOUNT_DIR || sudo zfs umount -a
 }
+
+drop_caches() {
+  echo "[+] Dropping caches"
+  sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
+}

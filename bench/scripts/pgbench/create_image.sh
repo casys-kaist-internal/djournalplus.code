@@ -6,30 +6,11 @@ if [ -z "$TAUFS_ENV_SOURCED" ]; then
 	exit
 fi
 
-SCALE_LIST=(1000)
+SCALE_LIST=(5000 10000 20000)
 TARGET_FILESYSTEM="ext4"
-
-PG_BIN="$TAUFS_BENCH_WS/pg_install/bin"
-PGUSER=$TAU_USERNAME
-DEVICE=$TAU_DEVICE
-BACKUP_DIR=$TAU_BACKUP_ROOT/pgbench
-MOUNT_DIR="/mnt/temp"
 
 source "$TAUFS_BENCH/scripts/common.sh"
 source "$TAUFS_BENCH/scripts/pgbench/pg_ctl.sh"
-
-start_postgres() {
-  $PG_BIN/pg_ctl -D $PG_DATA start
-}
-
-stop_postgres() {
-  $PG_BIN/pg_ctl -D $PG_DATA stop
-}
-
-init_postgres() {
-  $PG_BIN/initdb -D $PG_DATA
-  start_postgres
-}
 
 sudo mkdir -p "$BACKUP_DIR"
 
