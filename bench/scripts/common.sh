@@ -17,13 +17,9 @@ do_mkfs() {
     btrfs)
       sudo mkfs.btrfs -f $DEVICE
       ;;
-    zfs8k)
-      sudo zpool destroy -f zfs8kpool || true
-      sudo zpool create zfs8kpool $DEVICE
-      ;;
-    zfs128k)
-      sudo zpool destroy -f zfs128kpool || true
-      sudo zpool create zfs128kpool $DEVICE
+    zfs)
+      sudo zpool destroy -f zfspool || true
+      sudo zpool create zfspool $DEVICE
       ;;
     taujournal)
       sudo mke2fs -t ext4 -J size=40000 -E lazy_itable_init=0,lazy_journal_init=0 -F $DEVICE
@@ -49,13 +45,9 @@ mount_fs() {
     btrfs)
       sudo mount -t btrfs $DEVICE $MOUNT_DIR
       ;;
-    zfs8k)
-      sudo zfs set recordsize=8k zfs8kpool
-      sudo zfs set mountpoint=$MOUNT_DIR zfs8kpool
-      ;;
-    zfs128k)
-      sudo zfs set recordsize=128k zfs128kpool
-      sudo zfs set mountpoint=$MOUNT_DIR zfs128kpool
+    zfs)
+      sudo zfs set recordsize=8k zfspool
+      sudo zfs set mountpoint=$MOUNT_DIR zfspool
       ;;
     taujournal)
       # sudo mount -t ext4 -o data=journal,tjournal $DEVICE $MOUNT_DIR
@@ -77,11 +69,8 @@ clear_fs() {
       ;;
     btrfs)
       ;;
-    zfs8k)
-      sudo zpool export zfs8kpool || true
-      ;;
-    zfs128k)
-      sudo zpool export zfs128kpool || true
+    zfs)
+      sudo zpool export zfspool || true
       ;;
     taujournal)
       ;;

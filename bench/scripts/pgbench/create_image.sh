@@ -7,10 +7,32 @@ if [ -z "$TAUFS_ENV_SOURCED" ]; then
 fi
 
 SCALE_LIST=(5000 10000 20000)
-TARGET_FILESYSTEM="ext4"
+TARGET_FILESYSTEM="ext4 zfs"
 
 source "$TAUFS_BENCH/scripts/common.sh"
 source "$TAUFS_BENCH/scripts/pgbench/pg_ctl.sh"
+
+create_backup_fs_image()
+{
+  FS=$1
+  SCALE=$2
+  case $FS in
+    ext4)
+      sudo partclone.ext4 -c -s $DEVICE -o "$BACKUP_DIR/${FS}_s${SCALE}.img"
+      ;;
+    zfs)
+      mount_fs $FS $MOUNT_DIR
+      sudo zfs snapshot zfspool@pgbackup
+      sudo sh -c "zfs send zfspool@pgbackup > '$BACKUP_DIR/${FS}_s${SCALE}.img'"
+      umount_fs $MOUNT_DIR
+      ;;
+    taujournal)
+      sudo partclone.ext4 -c -s $DEVICE -o "$BACKUP_DIR/${FS}_s${SCALE}.img"
+      ;;
+    *)
+      echo "Unknown FS: $FS"; exit 1;;
+  esac
+}
 
 sudo mkdir -p "$BACKUP_DIR"
 
@@ -28,7 +50,7 @@ for FS in ${TARGET_FILESYSTEM}; do
     PGDB="pgbench_s${SCALE}"
     echo "[+] Initializing PostgreSQL: scale=$SCALE"
     $PG_BIN/initdb -D $PG_DATA
-    pg_fpw_off $PG_DATA
+    pg_fpw $PG_DATA "off"
     $PG_BIN/pg_ctl -D $PG_DATA start
     echo "[+] Creating database: $PGDB"
     $PG_BIN/createdb $PGDB
@@ -38,7 +60,7 @@ for FS in ${TARGET_FILESYSTEM}; do
     sleep 1
     umount_fs $MOUNT_DIR
     sleep 1
-    sudo partclone.ext4 -c -s $DEVICE -o "$BACKUP_DIR/${FS}_s${SCALE}.img"
+    create_backup_fs_image $FS $SCALE
   done
   echo "=== FS: $FS Done ==="
   clear_fs $FS $DEVICE

@@ -21,7 +21,7 @@ TX_COUNT=100000 # for check IO Volume
 declare -A FS_GROUPS
 
 FS_GROUPS[on]="ext4"
-FS_GROUPS[off]="ext4"
+FS_GROUPS[off]="ext4 zfs"
 
 source "$TAUFS_BENCH/scripts/common.sh"
 source "$TAUFS_BENCH/scripts/pgbench/pg_ctl.sh"
@@ -47,7 +47,22 @@ restore_filesystem() {
   FS=$1
   SCALE=$2
   echo "[+] Restoring filesystem: $FS"
-  sudo partclone.$FS -r -s $BACKUP_DIR/${FS}_s${SCALE}.img -o $TAU_DEVICE
+  case $FS in
+    ext4)
+      sudo partclone.$FS -r -s $BACKUP_DIR/${FS}_s${SCALE}.img -o $TAU_DEVICE
+      ;;
+    zfs)
+      do_mkfs $FS $DEVICE
+      mount_fs $FS $MOUNT_DIR
+      sudo sh -c "zfs receive -F zfspool < '$BACKUP_DIR/${FS}_s${SCALE}.img'"
+      umount_fs $MOUNT_DIR
+      ;;
+    taujournal)
+      sudo partclone.ext4 -r -s $BACKUP_DIR/${FS}_s${SCALE}.img -o $TAU_DEVICE
+      ;;
+    *)
+      echo "Unknown FS: $FS"; exit 1;;
+  esac
   sleep 1
   drop_caches
 }
@@ -64,6 +79,7 @@ for FPW in on off; do
         IOLOG="$RESULT_DIR/${LABEL}_iostat.log"
 
         echo "=== Setting up FS: $FS (FPW=$FPW) in device($DEVICE) ==="
+        restore_filesystem $FS $SCALE
         mount_fs $FS $MOUNT_DIR
         PG_DATA="$MOUNT_DIR/postgre"
         PGDB="pgbench_s${SCALE}"
@@ -88,7 +104,7 @@ for FPW in on off; do
       done
     done
     echo "=== FS: $FS Done ==="
-    clear_fs $FS
+    clear_fs $FS $DEVICE
   done
 done
 
