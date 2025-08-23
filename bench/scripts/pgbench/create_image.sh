@@ -5,7 +5,8 @@ SCALE_LIST=(5000 10000 20000)
 TARGET_FILESYSTEM="ext4 zfs"
 
 source "$TAUFS_BENCH/scripts/common.sh"
-source "$TAUFS_BENCH/scripts/pgbench/pg_ctl.sh"
+source "$TAUFS_BENCH/scripts/postgres/api.sh"
+
 BACKUP_DIR=$TAU_BACKUP_ROOT/pgbench
 
 create_backup_fs_image()

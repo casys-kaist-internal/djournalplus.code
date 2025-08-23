@@ -10,7 +10,7 @@ fi
 # DB_TUNING="min"
 
 # scale=1000 ≈ 16 GB
-SCALE_LIST=(5000 10000 20000)
+SCALE_LIST=(10000 20000)
 CLIENT_LIST=(16 32 64)
 THREADS=32 # fixed
 RUNNING_TIME=1800
@@ -20,11 +20,11 @@ TX_COUNT=100000 # for check IO Volume
 # Filesystem groups
 declare -A FS_GROUPS
 
-FS_GROUPS[on]="ext4"
-FS_GROUPS[off]="ext4 zfs"
+FS_GROUPS[on]=""
+FS_GROUPS[off]="zfs"
 
 source "$TAUFS_BENCH/scripts/common.sh"
-source "$TAUFS_BENCH/scripts/pgbench/pg_ctl.sh"
+source "$TAUFS_BENCH/scripts/postgres/setup.sh"
 
 DATE=$(date +%Y%m%d_%H%M%S)
 RESULT_DIR="$TAUFS_BENCH_WS/results/pgbench/$DATE"
