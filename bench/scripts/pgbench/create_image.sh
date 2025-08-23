@@ -1,16 +1,12 @@
 #!/bin/bash
 set -e
 
-if [ -z "$TAUFS_ENV_SOURCED" ]; then
-	echo "Do source set_env.sh first."
-	exit
-fi
-
 SCALE_LIST=(5000 10000 20000)
 TARGET_FILESYSTEM="ext4 zfs"
 
 source "$TAUFS_BENCH/scripts/common.sh"
 source "$TAUFS_BENCH/scripts/pgbench/pg_ctl.sh"
+BACKUP_DIR=$TAU_BACKUP_ROOT/pgbench
 
 create_backup_fs_image()
 {
