@@ -10,18 +10,19 @@ if "TAUFS_ENV_SOURCED" not in os.environ:
     print("Please source set_env.sh first. (TAUFS_ENV_SOURCED not set)")
     sys.exit(1)
 
-#MODE = "IOVOLUME"
+# MODE = "IOVOLUME"
 MODE = "PERFORMANCE"
 # MODE = "TRIAL"
 
 FS_GROUPS = {
-    # "on": [],        # full_page_writes: on
+    "on": [],        # full_page_writes: on
     # "off": ["zfs8k", "taujournal"]  # full_page_writes: off
     # "on": ["ext4", "f2fs"],        # full_page_writes: on
     # "off": ["ext4", "taujournal"]  # full_page_writes: off
 
-    "on": ["ext4", "btrfs", "f2fs"],
-    "off": ["ext4", "taujournal"]
+    # "on": ["ext4", "btrfs", "f2fs"],
+    # "off": ["ext4", "taujournal"]
+    "off": ["zfs8k"]
 }
 
 # VU_LIST = [1, 32]
