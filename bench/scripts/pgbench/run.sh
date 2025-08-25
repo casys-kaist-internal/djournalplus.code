@@ -43,29 +43,6 @@ iostat_end() {
         wait "$IOSTAT_PID" 2>/dev/null || true
     fi
 }
-restore_filesystem() {
-  FS=$1
-  SCALE=$2
-  echo "[+] Restoring filesystem: $FS"
-  case $FS in
-    ext4)
-      sudo partclone.$FS -r -s $BACKUP_DIR/${FS}_s${SCALE}.img -o $TAU_DEVICE
-      ;;
-    zfs)
-      do_mkfs $FS $DEVICE
-      mount_fs $FS $MOUNT_DIR
-      sudo sh -c "zfs receive -F zfspool < '$BACKUP_DIR/${FS}_s${SCALE}.img'"
-      umount_fs $MOUNT_DIR
-      ;;
-    taujournal)
-      sudo partclone.ext4 -r -s $BACKUP_DIR/${FS}_s${SCALE}.img -o $TAU_DEVICE
-      ;;
-    *)
-      echo "Unknown FS: $FS"; exit 1;;
-  esac
-  sleep 1
-  drop_caches
-}
 
 ## Start here
 # MAIN LOOP
@@ -79,7 +56,7 @@ for FPW in on off; do
         IOLOG="$RESULT_DIR/${LABEL}_iostat.log"
 
         echo "=== Setting up FS: $FS (FPW=$FPW) in device($DEVICE) ==="
-        restore_filesystem $FS $SCALE
+        restore_filesystem $FS $SCALE $BACKUP_DIR
         mount_fs $FS $MOUNT_DIR
         PG_DATA="$MOUNT_DIR/postgre"
         PGDB="pgbench_s${SCALE}"

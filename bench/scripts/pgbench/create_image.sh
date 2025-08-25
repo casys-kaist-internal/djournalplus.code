@@ -9,28 +9,6 @@ source "$TAUFS_BENCH/scripts/postgres/api.sh"
 
 BACKUP_DIR=$TAU_BACKUP_ROOT/pgbench
 
-create_backup_fs_image()
-{
-  FS=$1
-  SCALE=$2
-  case $FS in
-    ext4)
-      sudo partclone.ext4 -c -s $DEVICE -o "$BACKUP_DIR/${FS}_s${SCALE}.img"
-      ;;
-    zfs)
-      mount_fs $FS $MOUNT_DIR
-      sudo zfs snapshot zfspool@pgbackup
-      sudo sh -c "zfs send zfspool@pgbackup > '$BACKUP_DIR/${FS}_s${SCALE}.img'"
-      umount_fs $MOUNT_DIR
-      ;;
-    taujournal)
-      sudo partclone.ext4 -c -s $DEVICE -o "$BACKUP_DIR/${FS}_s${SCALE}.img"
-      ;;
-    *)
-      echo "Unknown FS: $FS"; exit 1;;
-  esac
-}
-
 sudo mkdir -p "$BACKUP_DIR"
 
 # MAIN LOOP
@@ -40,7 +18,7 @@ for FS in ${TARGET_FILESYSTEM}; do
     do_mkfs $FS $DEVICE
     mount_fs $FS $MOUNT_DIR
   
-    PG_DATA="$MOUNT_DIR/postgre"
+    PG_DATA="$MOUNT_DIR/postgre" # Caution.. other use postgres
     sudo mkdir -p $PG_DATA
     sudo chown -R $PGUSER:$PGUSER $PG_DATA
 
@@ -57,7 +35,7 @@ for FS in ${TARGET_FILESYSTEM}; do
     sleep 1
     umount_fs $MOUNT_DIR
     sleep 1
-    create_backup_fs_image $FS $SCALE
+    create_backup_fs_image $FS $SCALE $BACKUP_DIR
   done
   echo "=== FS: $FS Done ==="
   clear_fs $FS $DEVICE

@@ -7,8 +7,11 @@ if [[ "$MODE" != "postgres" && "$MODE" != "mysql" ]]; then
   exit 1
 fi
 
-SCALE_LIST=(5000 10000 20000)
+SCALE_LIST=(2500)
 TARGET_FILESYSTEM="ext4 zfs"
+
+# SCALE_LIST=(5000 10000 20000)
+# TARGET_FILESYSTEM="ext4 zfs"
 
 SB_TABLES=32
 
@@ -17,27 +20,6 @@ source "$TAUFS_BENCH/scripts/$MODE/api.sh"
 
 BACKUP_DIR=$TAU_BACKUP_ROOT/sysbench/$MODE
 
-create_backup_fs_image()
-{
-  FS=$1
-  SCALE=$2
-  case $FS in
-    ext4)
-      sudo partclone.ext4 -c -s $DEVICE -o "$BACKUP_DIR/${FS}_s${SCALE}.img"
-      ;;
-    zfs)
-      mount_fs $FS $MOUNT_DIR
-      sudo zfs snapshot zfspool@pgbackup
-      sudo sh -c "zfs send zfspool@pgbackup > '$BACKUP_DIR/${FS}_s${SCALE}.img'"
-      umount_fs $MOUNT_DIR
-      ;;
-    taujournal)
-      sudo partclone.ext4 -c -s $DEVICE -o "$BACKUP_DIR/${FS}_s${SCALE}.img"
-      ;;
-    *)
-      echo "Unknown FS: $FS"; exit 1;;
-  esac
-}
 
 command -v sysbench >/dev/null || { echo "sysbench not found"; exit 1; }
 command -v partclone.ext4 >/dev/null || { echo "partclone.ext4 not found"; exit 1; }
@@ -52,7 +34,7 @@ for FS in ${TARGET_FILESYSTEM}; do
     case "$MODE" in
       postgres)
       DBNAME="sbtest_s${SCALE}"
-      ROWS=$(rows_per_table "$SCALE")
+      ROWS=$(sysbench_rows_per_table "$SCALE")
 
       PG_DATA="$MOUNT_DIR/postgres"
       sudo mkdir -p $PG_DATA
@@ -79,7 +61,7 @@ for FS in ${TARGET_FILESYSTEM}; do
       MY_DATA="$MOUNT_DIR/mysql"
       MY_SOCK="$MY_DATA/mysql.sock"
       DBNAME="sbtest_s${SCALE}"
-      ROWS=$(rows_per_table "$SCALE")
+      ROWS=$(sysbench_rows_per_table "$SCALE")
 
       echo "[*] Initialize MySQL datadir"
       sudo mkdir -p $MY_DATA
@@ -112,7 +94,7 @@ for FS in ${TARGET_FILESYSTEM}; do
     echo "[*] Unmount before imaging"
     umount_fs "$MOUNT_DIR"
     sleep 1
-    create_backup_fs_image $FS $SCALE
+    create_backup_fs_image $FS $SCALE $BACKUP_DIR
 
     echo "[✓] Done: $OUT_IMG"
   done

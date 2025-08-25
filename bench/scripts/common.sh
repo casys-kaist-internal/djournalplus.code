@@ -100,3 +100,61 @@ drop_caches() {
   echo "[+] Dropping caches"
   sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
 }
+
+create_backup_fs_image()
+{
+  FS=$1
+  SCALE=$2
+  BACKUP_DIR=$3
+  case $FS in
+    ext4)
+      sudo partclone.ext4 -c -s $DEVICE -o "$BACKUP_DIR/${FS}_s${SCALE}.img"
+      ;;
+    zfs)
+      mount_fs $FS $MOUNT_DIR
+      sudo zfs snapshot zfspool@pgbackup
+      sudo sh -c "zfs send zfspool@pgbackup > '$BACKUP_DIR/${FS}_s${SCALE}.img'"
+      umount_fs $MOUNT_DIR
+      ;;
+    taujournal)
+      sudo partclone.ext4 -c -s $DEVICE -o "$BACKUP_DIR/${FS}_s${SCALE}.img"
+      ;;
+    *)
+      echo "Unknown FS: $FS"; exit 1;;
+  esac
+}
+
+restore_filesystem() {
+  FS=$1
+  SCALE=$2
+  BACKUP_DIR=$3
+  echo "[+] Restoring filesystem: $FS"
+  case $FS in
+    ext4)
+      sudo partclone.$FS -r -s $BACKUP_DIR/${FS}_s${SCALE}.img -o $TAU_DEVICE
+      ;;
+    zfs)
+      do_mkfs $FS $DEVICE
+      mount_fs $FS $MOUNT_DIR
+      sudo sh -c "zfs receive -F zfspool < '$BACKUP_DIR/${FS}_s${SCALE}.img'"
+      umount_fs $MOUNT_DIR
+      ;;
+    taujournal)
+      sudo partclone.ext4 -r -s $BACKUP_DIR/${FS}_s${SCALE}.img -o $TAU_DEVICE
+      ;;
+    *)
+      echo "Unknown FS: $FS"; exit 1;;
+  esac
+  sleep 1
+  drop_caches
+}
+
+# SCALE 5000≈80GB, 10000≈160GB, 20000≈320GB  for PGBENCH in postgres
+# But the differs in sysbench.
+# postgres -- scale 500=17GB, 2500=85GB 5000=170GB, 10000=340GB
+# MySQL    -- scale 500=14GB, 2500=72GB
+
+sysbench_rows_per_table () { 
+  local s="$1"
+  echo $(( 4480 * s ))
+}
