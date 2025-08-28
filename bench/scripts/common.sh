@@ -12,8 +12,8 @@ MOUNT_DIR="/mnt/temp"
 
 
 do_mkfs() {
-  FS=$1
-  DEVICE=$2
+  local FS=$1
+  local DEVICE=$2
   echo "[+] Formatting $FS on $DEVICE"
 
   case $FS in
@@ -29,6 +29,12 @@ do_mkfs() {
     zfs)
       sudo zpool destroy -f zfspool || true
       sudo zpool create zfspool $DEVICE
+      sudo zfs set recordsize=8k zfspool
+      ;;
+    zfs-16k)
+      sudo zpool destroy -f zfspool || true
+      sudo zpool create zfspool $DEVICE
+      sudo zfs set recordsize=16k zfspool
       ;;
     taujournal)
       sudo mke2fs -t ext4 -J size=40000 -E lazy_itable_init=0,lazy_journal_init=0 -F $DEVICE
@@ -39,8 +45,8 @@ do_mkfs() {
 }
 
 mount_fs() {
-  FS=$1
-  MOUNT_DIR=$2
+  local FS=$1
+  local MOUNT_DIR=$2
   sudo mkdir -p $MOUNT_DIR
   echo "[+] Mounting $FS on $MOUNT_DIR"
 
@@ -55,7 +61,6 @@ mount_fs() {
       sudo mount -t btrfs $DEVICE $MOUNT_DIR
       ;;
     zfs)
-      sudo zfs set recordsize=8k zfspool
       sudo zfs set mountpoint=$MOUNT_DIR zfspool
       ;;
     taujournal)
@@ -68,8 +73,8 @@ mount_fs() {
 }
 
 clear_fs() {
-  FS=$1
-  DEVICE=$2
+  local FS=$1
+  local DEVICE=$2
 
   case $FS in
     ext4)
@@ -103,21 +108,21 @@ drop_caches() {
 
 create_backup_fs_image()
 {
-  FS=$1
-  SCALE=$2
-  BACKUP_DIR=$3
+  local FS=$1
+  local KEY=$2
+  local BACKUP_DIR=$3
   case $FS in
     ext4)
-      sudo partclone.ext4 -c -s $DEVICE -o "$BACKUP_DIR/${FS}_s${SCALE}.img"
+      sudo partclone.ext4 -c -s $DEVICE -o "$BACKUP_DIR/${FS}_${KEY}.img"
       ;;
     zfs)
       mount_fs $FS $MOUNT_DIR
       sudo zfs snapshot zfspool@pgbackup
-      sudo sh -c "zfs send zfspool@pgbackup > '$BACKUP_DIR/${FS}_s${SCALE}.img'"
+      sudo sh -c "zfs send zfspool@pgbackup > '$BACKUP_DIR/${FS}_${KEY}.img'"
       umount_fs $MOUNT_DIR
       ;;
     taujournal)
-      sudo partclone.ext4 -c -s $DEVICE -o "$BACKUP_DIR/${FS}_s${SCALE}.img"
+      sudo partclone.ext4 -c -s $DEVICE -o "$BACKUP_DIR/${FS}_${KEY}.img"
       ;;
     *)
       echo "Unknown FS: $FS"; exit 1;;
@@ -125,22 +130,22 @@ create_backup_fs_image()
 }
 
 restore_filesystem() {
-  FS=$1
-  SCALE=$2
-  BACKUP_DIR=$3
+  local FS=$1
+  local KEY=$2
+  local BACKUP_DIR=$3
   echo "[+] Restoring filesystem: $FS"
   case $FS in
     ext4)
-      sudo partclone.$FS -r -s $BACKUP_DIR/${FS}_s${SCALE}.img -o $TAU_DEVICE
+      sudo partclone.$FS -r -s $BACKUP_DIR/${FS}_${KEY}.img -o $TAU_DEVICE
       ;;
     zfs)
       do_mkfs $FS $DEVICE
       mount_fs $FS $MOUNT_DIR
-      sudo sh -c "zfs receive -F zfspool < '$BACKUP_DIR/${FS}_s${SCALE}.img'"
+      sudo sh -c "zfs receive -F zfspool < '$BACKUP_DIR/${FS}_${KEY}.img'"
       umount_fs $MOUNT_DIR
       ;;
     taujournal)
-      sudo partclone.ext4 -r -s $BACKUP_DIR/${FS}_s${SCALE}.img -o $TAU_DEVICE
+      sudo partclone.ext4 -r -s $BACKUP_DIR/${FS}_${KEY}.img -o $TAU_DEVICE
       ;;
     *)
       echo "Unknown FS: $FS"; exit 1;;

@@ -26,7 +26,7 @@ log_mysql_specs() {
     date
 
     echo -e "\n-- Version --"
-    mysql -uroot --socket="$sock" -e "SELECT VERSION() AS version\G"
+    $MYSQL_BIN/mysql -uroot --socket="$sock" -e "SELECT VERSION() AS version\G"
 
     echo -e "\n-- InnoDB Config --"
     $MYSQL_BIN/mysql -uroot --socket="$sock" -e "

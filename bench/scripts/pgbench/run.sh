@@ -56,7 +56,7 @@ for FPW in on off; do
         IOLOG="$RESULT_DIR/${LABEL}_iostat.log"
 
         echo "=== Setting up FS: $FS (FPW=$FPW) in device($DEVICE) ==="
-        restore_filesystem $FS $SCALE $BACKUP_DIR
+        restore_filesystem $FS "s$SCALE" $BACKUP_DIR
         mount_fs $FS $MOUNT_DIR
         PG_DATA="$MOUNT_DIR/postgre"
         PGDB="pgbench_s${SCALE}"

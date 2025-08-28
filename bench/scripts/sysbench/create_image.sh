@@ -94,7 +94,7 @@ for FS in ${TARGET_FILESYSTEM}; do
     echo "[*] Unmount before imaging"
     umount_fs "$MOUNT_DIR"
     sleep 1
-    create_backup_fs_image $FS $SCALE $BACKUP_DIR
+    create_backup_fs_image $FS "s$SCALE" $BACKUP_DIR
 
     echo "[✓] Done: $OUT_IMG"
   done

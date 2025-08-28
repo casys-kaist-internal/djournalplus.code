@@ -35,7 +35,7 @@ for FS in ${TARGET_FILESYSTEM}; do
     sleep 1
     umount_fs $MOUNT_DIR
     sleep 1
-    create_backup_fs_image $FS $SCALE $BACKUP_DIR
+    create_backup_fs_image $FS "s$SCALE" $BACKUP_DIR
   done
   echo "=== FS: $FS Done ==="
   clear_fs $FS $DEVICE

@@ -31,7 +31,9 @@ rm -f "$ARCHIVE_NAME"
 echo "HammerDB build complete."
 
 cd $EXTRACTED_DIR
-cp $TAUFS_BENCH/hammerDB/build_template.tcl ./
-cp $TAUFS_BENCH/hammerDB/run_template.tcl ./
+cp $TAUFS_BENCH/hammerDB/build_postgres_template.tcl ./
+cp $TAUFS_BENCH/hammerDB/run_postgres_template.tcl ./
+cp $TAUFS_BENCH/hammerDB/build_mysql_template.tcl ./
+cp $TAUFS_BENCH/hammerDB/run_mysql_template.tcl ./
 
 echo "Copy template from the repo, ALL_DONE!"

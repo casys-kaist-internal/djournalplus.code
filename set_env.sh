@@ -13,7 +13,7 @@ export TAU_BACKUP_ROOT=/mnt/tau_backup
 
 # Add binary to env path
 export PATH=$TAUFS_ROOT/tools/bin:$PATH
-export LD_LIBRARY_PATH=$TAUFS_BENCH/workspace/pg_install/lib:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=$TAUFS_BENCH/mysql-server/build/lib:$TAUFS_BENCH/workspace/pg_install/lib:$LD_LIBRARY_PATH
 export PATH=$TAUFS_BENCH_WS/pg_install/bin:$PATH
 
 # Test Device
@@ -38,10 +38,17 @@ fi
 export TAU_BACKUP_DEVICE
 
 sudo mkdir -p $TAU_BACKUP_ROOT
-if ! sudo mount "$TAU_BACKUP_DEVICE" "$TAU_BACKUP_ROOT"; then
+
+if ! mountpoint -q "$TAU_BACKUP_ROOT"; then
+  sudo mount "$TAU_BACKUP_DEVICE" "$TAU_BACKUP_ROOT"
+  if [ $? -ne 0 ]; then
     echo "mount failed! $TAU_BACKUP_DEVICE"
     return 1
+  fi
+else
+    echo "$TAU_BACKUP_ROOT already mounted"
 fi
+
 sudo chown $TAU_USERNAME:$TAU_USERNAME $TAU_BACKUP_ROOT
 echo "TAU_BACKUP_ROOT set to: $TAU_BACKUP_ROOT"
 

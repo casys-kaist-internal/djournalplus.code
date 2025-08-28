@@ -9,12 +9,10 @@ diset tpcc pg_superuser tpccuser
 diset tpcc pg_superuserpass tpccpass
 diset tpcc pg_defaultdbase tpccdb
 diset tpcc pg_dbase tpccdb
-
 diset tpcc pg_tspace pg_default
+
 diset tpcc pg_count_ware __WAREHOUSE__
 diset tpcc pg_num_vu __VU__
-diset tpcc pg_storedprocs __STOREDPROCS__
-diset tpcc pg_partition false
 
 vudestroy
 buildschema
