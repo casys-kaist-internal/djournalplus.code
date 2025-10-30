@@ -28,16 +28,15 @@ do_mkfs() {
       ;;
     zfs)
       sudo zpool destroy -f zfspool || true
-      sudo zpool create zfspool $DEVICE
-      sudo zfs set recordsize=8k zfspool
+      sudo zpool create -o ashift=12 zfspool $DEVICE
       ;;
     zfs-16k)
       sudo zpool destroy -f zfspool || true
-      sudo zpool create zfspool $DEVICE
+      sudo zpool create -o ashift=12 zfspool $DEVICE
       sudo zfs set recordsize=16k zfspool
       ;;
     taujournal)
-      sudo mke2fs -t ext4 -J size=40000 -E lazy_itable_init=0,lazy_journal_init=0 -F $DEVICE
+      sudo $TAUFS_ROOT/e2fsprogs/misc/mke2fs -t ext4 -J tau_journal_size=40000 -E lazy_itable_init=0,lazy_journal_init=0 -F $DEVICE
       ;;
     *)
       echo "Unknown FS: $FS"; exit 1;;
@@ -61,11 +60,15 @@ mount_fs() {
       sudo mount -t btrfs $DEVICE $MOUNT_DIR
       ;;
     zfs)
+      sudo zfs set recordsize=8k zfspool
+      sudo zfs set mountpoint=$MOUNT_DIR zfspool
+      ;;
+    zfs-16k)
+      sudo zfs set recordsize=16k zfspool
       sudo zfs set mountpoint=$MOUNT_DIR zfspool
       ;;
     taujournal)
-      # sudo mount -t ext4 -o data=journal,tjournal $DEVICE $MOUNT_DIR
-      sudo mount -t ext4 -o data=ordered,tjournal $DEVICE $MOUNT_DIR
+      sudo mount -t ext4 -o tjournal $DEVICE $MOUNT_DIR
       ;;
     *)
       echo "Unknown FS: $FS"; exit 1;;
@@ -100,6 +103,12 @@ umount_fs() {
   MOUNT_DIR=$1
   sudo umount $MOUNT_DIR || sudo zfs umount -a
 }
+
+sysbench_rows_per_table () { # SCALE 5000≈80GB, 10000≈160GB, 20000≈320GB
+  local s="$1"
+  echo $(( 4480 * s ))
+}
+
 
 drop_caches() {
   echo "[+] Dropping caches"
