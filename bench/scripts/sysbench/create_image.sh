@@ -7,8 +7,9 @@ if [[ "$MODE" != "postgres" && "$MODE" != "mysql" ]]; then
   exit 1
 fi
 
+# Motivation Test
 SCALE_LIST=(2500)
-TARGET_FILESYSTEM="ext4 zfs"
+TARGET_FILESYSTEM="xfs-cow"
 
 # SCALE_LIST=(5000 10000 20000)
 # TARGET_FILESYSTEM="ext4 zfs"
@@ -77,6 +78,7 @@ for FS in ${TARGET_FILESYSTEM}; do
           --pid-file="$MY_DATA/mysqld.pid" \
           --bind-address=127.0.0.1 \
           --skip-networking=0 \
+	  --innodb-doublewrite=0 \
           --log-error="$MY_DATA/mysqld.err" &
       wait_for_sock "$MY_SOCK" 60
 

@@ -16,19 +16,31 @@ fi
 # WARMUP_TIME=10
 # EVENTS=1000 # for check IO Volume
 
+## Motivation test settings
 SCALE_LIST=(2500)
-THREADS_LIST=(16 32 64)
+THREADS_LIST=(32)
 SB_TABLES=32 # fixed
-RUNNING_TIME=1800
+RUNNING_TIME=300
 WARMUP_TIME=600
-EVENTS_BASE=1000000 # for check IO Volume
+EVENTS_BASE=1000000 # 1M --> 32M for total
+WORKLOADS=(oltp_update_index)
+
+# SCALE_LIST=(5000)
+# THREADS_LIST=(16 32 64)
+# SB_TABLES=32 # fixed
+# RUNNING_TIME=1800
+# WARMUP_TIME=600
+# EVENTS_BASE=1000000 # for check IO Volume
 
 
 # Filesystem groups
 declare -A FS_GROUPS
 
-FS_GROUPS[on]="ext4"
-FS_GROUPS[off]="ext4 zfs"
+# FS_GROUPS[on]=""
+# FS_GROUPS[off]="taujournal"
+
+FS_GROUPS[on]=""
+FS_GROUPS[off]="xfs-cow"
 
 source "$TAUFS_BENCH/scripts/common.sh"
 source "$TAUFS_BENCH/scripts/$MODE/api.sh"
@@ -57,12 +69,13 @@ iostat_end() {
 for FPW in on off; do
   for FS in ${FS_GROUPS[$FPW]}; do
     for SCALE in "${SCALE_LIST[@]}"; do
-      for WORKLOAD in oltp_update_index oltp_insert; do
+      for WORKLOAD in "${WORKLOADS[@]}"; do
         for THREADS in "${THREADS_LIST[@]}"; do
           LABEL="${MODE}_${WORKLOAD}_${FS}_fpw_${FPW}_s${SCALE}_c${THREADS}"
           OUT_DBSPEC="$RESULT_DIR/${LABEL}.spec"
           OUT_ERR="$RESULT_DIR/${LABEL}.error"
           OUT_LOG="$RESULT_DIR/${LABEL}.log"
+          OUT_IOLOG="$RESULT_DIR/${LABEL}_iostat.result"
           IOLOG="$RESULT_DIR/${LABEL}_iostat.log"
           EVENTS=$((EVENTS_BASE * THREADS))
 
@@ -101,8 +114,8 @@ for FPW in on off; do
                 --db-driver=pgsql --auto_inc=on \
                 --pgsql-host=127.0.0.1 --pgsql-port="$PG_PORT" \
                 --pgsql-user="$PGUSER" --pgsql-db="$DBNAME" \
-                --tables=$SB_TABLES --table-size=$ROWS \
-                --threads=$THREADS --events=$EVENTS run
+                --tables=$SB_TABLES --table-size=$ROWS  --time=0 \
+                --threads=$THREADS --events=$EVENTS run > "$OUT_IOLOG"
 
               $PG_BIN/psql -d postgres -c "CHECKPOINT;"
               $PG_BIN/pg_ctl -D $PG_DATA stop
@@ -115,7 +128,11 @@ for FPW in on off; do
               MY_SOCK="$MY_DATA/mysql.sock"
               DBNAME="sbtest_s${SCALE}"
               ROWS=$(sysbench_rows_per_table "$SCALE")
-              DBW=$(FPW="on" && echo "1" || echo "0")
+              if [[ "$FPW" == "on" ]]; then
+                DBW=1
+              else
+                DBW=0
+              fi
 
               echo "[*] Start mysqld"
               $MYSQL_BIN/mysqld \
@@ -136,38 +153,39 @@ for FPW in on off; do
                 --db-driver=mysql \
                 --mysql-user=root --mysql-socket=$MY_SOCK --mysql-db=$DBNAME \
                 --tables=$SB_TABLES --table-size=$ROWS \
-                --threads=$THREADS --time=$WARMUP_TIME run
+                --threads=$THREADS --time=$WARMUP_TIME --report-interval=60 run
 
               echo "--> Benchmarking $LABEL"
               sysbench $WORKLOAD \
                 --db-driver=mysql \
                 --mysql-user=root --mysql-socket=$MY_SOCK --mysql-db=$DBNAME \
                 --tables=$SB_TABLES --table-size=$ROWS \
-                --threads=$THREADS --time=$RUNNING_TIME --report-interval=10 run > "$OUT_SUMMARY" 2> "$OUT_LOG"
+                --threads=$THREADS --time=$RUNNING_TIME --report-interval=10 run > "$OUT_LOG" 2> "$OUT_ERR"
 
               echo "--> Volume Benchmarking $LABEL"
               iostat_start $IOLOG
               sysbench $WORKLOAD \
                 --db-driver=mysql \
                 --mysql-user=root --mysql-socket=$MY_SOCK --mysql-db=$DBNAME \
-                --tables=$SB_TABLES --table-size=$ROWS \
+                --tables=$SB_TABLES --table-size=$ROWS --time=0 \
                 --threads=$THREADS --events=$EVENTS run
 
-              $MYSQL_BIN/mysql -uroot --socket="$MY_SOCK" -e "SET GLOBAL innodb_fast_shutdown=0; FLUSH LOGS;"
+              $MYSQL_BIN/mysql -uroot --socket="$MY_SOCK" -e "SET GLOBAL innodb_fast_shutdown=1; FLUSH LOGS;"
               $MYSQL_BIN/mysqladmin -uroot --socket="$MY_SOCK" shutdown
 
+              echo "--> Volume Benchmarking $LABEL Done"
               umount_fs $MOUNT_DIR
               iostat_end
 
-              echo "--> Done: $LABEL"
+              echo "--> All Done: $LABEL"
             ;;
           esac
           done
-          sleep 600  # Cooling down
+          sleep 10  # Cooling down
         done
     done
     echo "=== FS: $FS Done ==="
-    clear_fs $FS $DEVICE
+    # clear_fs $FS $DEVICE
   done
 done
 

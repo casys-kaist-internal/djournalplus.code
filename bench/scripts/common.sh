@@ -20,20 +20,21 @@ do_mkfs() {
     ext4)
       sudo mke2fs -t ext4 -E lazy_itable_init=0,lazy_journal_init=0 -F $DEVICE
       ;;
+    ext4-dj)
+      sudo mke2fs -t ext4  -J size=10000 -E lazy_itable_init=0,lazy_journal_init=0 -F $DEVICE
+      ;;
     f2fs)
       sudo mkfs.f2fs -f $DEVICE
       ;;
     btrfs)
       sudo mkfs.btrfs -f $DEVICE
       ;;
-    zfs)
-      sudo zpool destroy -f zfspool || true
-      sudo zpool create -o ashift=12 zfspool $DEVICE
+    xfs|xfs-cow)
+      sudo mkfs.xfs -f $DEVICE
       ;;
-    zfs-16k)
+    zfs|zfs-4k|zfs-8k|zfs-16k)
       sudo zpool destroy -f zfspool || true
       sudo zpool create -o ashift=12 zfspool $DEVICE
-      sudo zfs set recordsize=16k zfspool
       ;;
     taujournal)
       sudo $TAUFS_ROOT/e2fsprogs/misc/mke2fs -t ext4 -J tau_journal_size=40000 -E lazy_itable_init=0,lazy_journal_init=0 -F $DEVICE
@@ -53,13 +54,26 @@ mount_fs() {
     ext4)
       sudo mount -t ext4 -o data=ordered $DEVICE $MOUNT_DIR
       ;;
+    ext4-dj)
+      sudo mount -t ext4 -o data=journal $DEVICE $MOUNT_DIR
+      ;;
     f2fs)
       sudo mount -t f2fs $DEVICE $MOUNT_DIR
       ;;
     btrfs)
       sudo mount -t btrfs $DEVICE $MOUNT_DIR
       ;;
+    xfs|xfs-cow)
+      sudo mount -t xfs $DEVICE $MOUNT_DIR
+      ;;
     zfs)
+      sudo zfs set mountpoint=$MOUNT_DIR zfspool
+      ;;
+    zfs-4k)
+      sudo zfs set recordsize=4k zfspool
+      sudo zfs set mountpoint=$MOUNT_DIR zfspool
+      ;;
+    zfs-8k)
       sudo zfs set recordsize=8k zfspool
       sudo zfs set mountpoint=$MOUNT_DIR zfspool
       ;;
@@ -80,13 +94,15 @@ clear_fs() {
   local DEVICE=$2
 
   case $FS in
-    ext4)
+    ext4|ext4-dj)
       ;;
     f2fs)
       ;;
     btrfs)
       ;;
-    zfs)
+    xfs|xfs-cow)
+      ;;
+    zfs|zfs-4k|zfs-8k|zfs-16k)
       sudo zpool export zfspool || true
       ;;
     taujournal)
@@ -121,10 +137,13 @@ create_backup_fs_image()
   local KEY=$2
   local BACKUP_DIR=$3
   case $FS in
-    ext4)
+    ext4|ext4-dj)
       sudo partclone.ext4 -c -s $DEVICE -o "$BACKUP_DIR/${FS}_${KEY}.img"
       ;;
-    zfs)
+    xfs|xfs-cow)
+      sudo partclone.xfs -c -s $DEVICE -o "$BACKUP_DIR/${FS}_${KEY}.img"
+      ;;
+    zfs|zfs-4k|zfs-8k|zfs-16k)
       mount_fs $FS $MOUNT_DIR
       sudo zfs snapshot zfspool@pgbackup
       sudo sh -c "zfs send zfspool@pgbackup > '$BACKUP_DIR/${FS}_${KEY}.img'"
@@ -144,10 +163,13 @@ restore_filesystem() {
   local BACKUP_DIR=$3
   echo "[+] Restoring filesystem: $FS"
   case $FS in
-    ext4)
-      sudo partclone.$FS -r -s $BACKUP_DIR/${FS}_${KEY}.img -o $TAU_DEVICE
+    ext4|ext4-dj)
+      sudo partclone.ext4 -r -s $BACKUP_DIR/${FS}_${KEY}.img -o $TAU_DEVICE
       ;;
-    zfs)
+    xfs|xfs-cow)
+      sudo partclone.xfs -r -s $BACKUP_DIR/${FS}_${KEY}.img -o $TAU_DEVICE
+      ;;
+    zfs|zfs-4k|zfs-8k|zfs-16k)
       do_mkfs $FS $DEVICE
       mount_fs $FS $MOUNT_DIR
       sudo sh -c "zfs receive -F zfspool < '$BACKUP_DIR/${FS}_${KEY}.img'"
