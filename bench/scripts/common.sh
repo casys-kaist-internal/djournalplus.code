@@ -36,7 +36,7 @@ do_mkfs() {
       sudo zpool destroy -f zfspool || true
       sudo zpool create -o ashift=12 zfspool $DEVICE
       ;;
-    taujournal)
+    taujournal|tau4G|tau8G|tau16G|tau32G)
       sudo $TAUFS_ROOT/e2fsprogs/misc/mke2fs -t ext4 -J tau_journal_size=40000 -E lazy_itable_init=0,lazy_journal_init=0 -F $DEVICE
       ;;
     *)
@@ -84,6 +84,18 @@ mount_fs() {
     taujournal)
       sudo mount -t ext4 -o tjournal $DEVICE $MOUNT_DIR
       ;;
+    tau4G)
+      sudo mount -t ext4 -o tjournal,tjournal_size=4 $DEVICE $MOUNT_DIR
+      ;;
+    tau8G)
+      sudo mount -t ext4 -o tjournal,tjournal_size=8 $DEVICE $MOUNT_DIR
+      ;;
+    tau16G)
+      sudo mount -t ext4 -o tjournal,tjournal_size=16 $DEVICE $MOUNT_DIR
+      ;;
+    tau32G)
+      sudo mount -t ext4 -o tjournal,tjournal_size=32 $DEVICE $MOUNT_DIR
+      ;;
     *)
       echo "Unknown FS: $FS"; exit 1;;
   esac
@@ -105,7 +117,7 @@ clear_fs() {
     zfs|zfs-4k|zfs-8k|zfs-16k)
       sudo zpool export zfspool || true
       ;;
-    taujournal)
+    taujournal|tau4G|tau8G|tau16G|tau32G)
       ;;
     *)
       echo "Unknown FS: $FS"; exit 1;;
@@ -149,7 +161,7 @@ create_backup_fs_image()
       sudo sh -c "zfs send zfspool@pgbackup > '$BACKUP_DIR/${FS}_${KEY}.img'"
       umount_fs $MOUNT_DIR
       ;;
-    taujournal)
+    taujournal|tau4G|tau8G|tau16G|tau32G)
       sudo partclone.ext4 -c -s $DEVICE -o "$BACKUP_DIR/${FS}_${KEY}.img"
       ;;
     *)
@@ -175,7 +187,7 @@ restore_filesystem() {
       sudo sh -c "zfs receive -F zfspool < '$BACKUP_DIR/${FS}_${KEY}.img'"
       umount_fs $MOUNT_DIR
       ;;
-    taujournal)
+    taujournal|tau4G|tau8G|tau16G|tau32G)
       sudo partclone.ext4 -r -s $BACKUP_DIR/${FS}_${KEY}.img -o $TAU_DEVICE
       ;;
     *)
