@@ -137,6 +137,60 @@ sysbench_rows_per_table () { # SCALE 5000≈80GB, 10000≈160GB, 20000≈320GB
   echo $(( 4480 * s ))
 }
 
+warming_up_ssd() {
+  echo "WARNING: This will destroy all data on $TAU_DEVICE in 5 seconds."
+  echo "Press Ctrl+C to cancel."
+  sleep 5
+
+  echo "Starting 5-minute SSD Scramble on $TAU_DEVICE..."
+
+  sudo fio --name=scramble \
+      --filename=$TAU_DEVICE \
+      --direct=1 \
+      --rw=randwrite \
+      --bs=4k \
+      --ioengine=libaio \
+      --iodepth=64 \
+      --time_based \
+      --runtime=300 \
+      --group_reporting \
+      --norandommap
+
+  echo "Scramble complete."
+}
+
+log_ssd_state() {
+    local LOG_FILE=$1
+
+    local DEV_NAME=$(basename $DEVICE)
+
+    (
+        echo "======================================================================="
+        echo "SSD State Snapshot for $DEV_NAME : $(date -u --rfc-3339=seconds)"
+        echo "======================================================================="
+        echo ""
+        echo "### SMART/Health Data (smartctl -a) ###"
+
+        if ! sudo smartctl -a $DEVICE; then
+            echo "smartctl return $?"
+        fi
+
+        echo ""
+        echo "### I/O Statistics (/proc/diskstats) ###"
+
+        local diskstats_line=$(grep -w "$DEV_NAME" /proc/diskstats)
+        if [ -n "$diskstats_line" ]; then
+            echo "$diskstats_line"
+            echo "(Fields: 1-major 2-minor 3-devname 4-rd_ios 5-rd_merges 6-rd_sectors ... 10-wr_sectors ...)"
+        else
+            echo "WARN: Not found $DEV_NAME on /proc/diskstats"
+        fi
+        echo ""
+
+    ) >> $LOG_FILE
+
+    echo "SSD state for $DEV_NAME logged to $LOG_FILE."
+}
 
 drop_caches() {
   echo "[+] Dropping caches"
@@ -162,7 +216,7 @@ create_backup_fs_image()
       umount_fs $MOUNT_DIR
       ;;
     taujournal|tau4G|tau8G|tau16G|tau32G)
-      sudo partclone.ext4 -c -s $DEVICE -o "$BACKUP_DIR/${FS}_${KEY}.img"
+      sudo partclone.ext4 -c -s $DEVICE -o "$BACKUP_DIR/taujournal_${KEY}.img"
       ;;
     *)
       echo "Unknown FS: $FS"; exit 1;;
@@ -188,7 +242,7 @@ restore_filesystem() {
       umount_fs $MOUNT_DIR
       ;;
     taujournal|tau4G|tau8G|tau16G|tau32G)
-      sudo partclone.ext4 -r -s $BACKUP_DIR/${FS}_${KEY}.img -o $TAU_DEVICE
+      sudo partclone.ext4 -r -s $BACKUP_DIR/taujournal_${KEY}.img -o $TAU_DEVICE
       ;;
     *)
       echo "Unknown FS: $FS"; exit 1;;

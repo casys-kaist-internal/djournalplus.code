@@ -8,12 +8,11 @@ if [[ "$MODE" != "postgres" && "$MODE" != "mysql" ]]; then
 fi
 
 # Motivation Test
-SCALE_LIST=(2500)
-TARGET_FILESYSTEM="xfs-cow"
+# SCALE_LIST=(2500)
+# TARGET_FILESYSTEM="ext4 xfs zfs"
 
-# SCALE_LIST=(5000 10000 20000)
-# TARGET_FILESYSTEM="ext4 zfs"
-
+SCALE_LIST=(5000)
+TARGET_FILESYSTEM="taujournal"
 SB_TABLES=32
 
 source "$TAUFS_BENCH/scripts/common.sh"
@@ -41,6 +40,7 @@ for FS in ${TARGET_FILESYSTEM}; do
       sudo mkdir -p $PG_DATA
       sudo chown -R $PGUSER:$PGUSER $PG_DATA
       $PG_BIN/initdb -D $PG_DATA
+      pg_wal_max_set $PG_DATA "16GB"
       pg_fpw $PG_DATA "off"
       $PG_BIN/pg_ctl -D $PG_DATA start
 
@@ -78,7 +78,11 @@ for FS in ${TARGET_FILESYSTEM}; do
           --pid-file="$MY_DATA/mysqld.pid" \
           --bind-address=127.0.0.1 \
           --skip-networking=0 \
-	  --innodb-doublewrite=0 \
+          --innodb_buffer_pool_size=140G \
+          --innodb_redo_log_capacity=10G \
+          --innodb_flush_log_at_trx_commit=0 \
+          --sync_binlog=0 \
+          --innodb-doublewrite=0 \
           --log-error="$MY_DATA/mysqld.err" &
       wait_for_sock "$MY_SOCK" 60
 
@@ -101,7 +105,9 @@ for FS in ${TARGET_FILESYSTEM}; do
     echo "[✓] Done: $OUT_IMG"
   done
   echo "=== FS: $FS Done ==="
-  clear_fs $FS $DEVICE
+  if [ "$FS" == "zfs" ] || [[ "$FS" == zfs-* ]]; then
+    clear_fs $FS $DEVICE
+  fi
 done
 
 echo "All done."
