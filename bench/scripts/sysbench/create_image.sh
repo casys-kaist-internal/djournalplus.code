@@ -8,11 +8,11 @@ if [[ "$MODE" != "postgres" && "$MODE" != "mysql" ]]; then
 fi
 
 # Motivation Test
-# SCALE_LIST=(2500)
-# TARGET_FILESYSTEM="ext4 xfs zfs"
+SCALE_LIST=(2500)
+TARGET_FILESYSTEM="ext4 xfs zfs-8k ext4-dj"
 
-SCALE_LIST=(5000)
-TARGET_FILESYSTEM="taujournal"
+# SCALE_LIST=(5000)
+# TARGET_FILESYSTEM="ext4"
 SB_TABLES=32
 
 source "$TAUFS_BENCH/scripts/common.sh"
@@ -40,7 +40,6 @@ for FS in ${TARGET_FILESYSTEM}; do
       sudo mkdir -p $PG_DATA
       sudo chown -R $PGUSER:$PGUSER $PG_DATA
       $PG_BIN/initdb -D $PG_DATA
-      pg_wal_max_set $PG_DATA "16GB"
       pg_fpw $PG_DATA "off"
       $PG_BIN/pg_ctl -D $PG_DATA start
 
@@ -78,13 +77,17 @@ for FS in ${TARGET_FILESYSTEM}; do
           --pid-file="$MY_DATA/mysqld.pid" \
           --bind-address=127.0.0.1 \
           --skip-networking=0 \
-          --innodb_buffer_pool_size=140G \
-          --innodb_redo_log_capacity=10G \
-          --innodb_flush_log_at_trx_commit=0 \
-          --sync_binlog=0 \
           --innodb-doublewrite=0 \
           --log-error="$MY_DATA/mysqld.err" &
       wait_for_sock "$MY_SOCK" 60
+
+      # This option can reduce prepare time, but performance may vary.
+      # Not using this option when evaluating performance.
+      # --sync_binlog=0 \
+      # --innodb_buffer_pool_size=140G \
+      # --innodb_redo_log_capacity=10G \
+      # --innodb_flush_log_at_trx_commit=0 \
+      # Also, use threads=32 for sysbench prepare for faster loading.
 
       echo "[*] Create DB & sysbench prepare"
       $MYSQL_BIN/mysql -uroot --socket="$MY_SOCK" -e "CREATE DATABASE IF NOT EXISTS \`$DBNAME\`;"

@@ -10,10 +10,16 @@ fi
 DEVICE=$TAU_DEVICE
 MOUNT_DIR="/mnt/temp"
 
+warning() {
+  echo "WARNING: This will destroy all data on $TAU_DEVICE in 5 seconds."
+  echo "Press Ctrl+C to cancel."
+  sleep 5
+}
 
 do_mkfs() {
   local FS=$1
   local DEVICE=$2
+  warning
   echo "[+] Formatting $FS on $DEVICE"
 
   case $FS in
@@ -21,7 +27,7 @@ do_mkfs() {
       sudo mke2fs -t ext4 -E lazy_itable_init=0,lazy_journal_init=0 -F $DEVICE
       ;;
     ext4-dj)
-      sudo mke2fs -t ext4  -J size=10000 -E lazy_itable_init=0,lazy_journal_init=0 -F $DEVICE
+      sudo mke2fs -t ext4  -J size=40000 -E lazy_itable_init=0,lazy_journal_init=0 -F $DEVICE
       ;;
     f2fs)
       sudo mkfs.f2fs -f $DEVICE
@@ -33,6 +39,7 @@ do_mkfs() {
       sudo mkfs.xfs -f $DEVICE
       ;;
     zfs|zfs-4k|zfs-8k|zfs-16k)
+      sudo wipefs -a $DEVICE
       sudo zpool destroy -f zfspool || true
       sudo zpool create -o ashift=12 zfspool $DEVICE
       ;;
@@ -122,7 +129,6 @@ clear_fs() {
     *)
       echo "Unknown FS: $FS"; exit 1;;
   esac
-  
   sudo wipefs -a $DEVICE
 }
 
@@ -138,10 +144,7 @@ sysbench_rows_per_table () { # SCALE 5000≈80GB, 10000≈160GB, 20000≈320GB
 }
 
 warming_up_ssd() {
-  echo "WARNING: This will destroy all data on $TAU_DEVICE in 5 seconds."
-  echo "Press Ctrl+C to cancel."
-  sleep 5
-
+  warning
   echo "Starting 5-minute SSD Scramble on $TAU_DEVICE..."
 
   sudo fio --name=scramble \
@@ -227,7 +230,9 @@ restore_filesystem() {
   local FS=$1
   local KEY=$2
   local BACKUP_DIR=$3
+  warning
   echo "[+] Restoring filesystem: $FS"
+
   case $FS in
     ext4|ext4-dj)
       sudo partclone.ext4 -r -s $BACKUP_DIR/${FS}_${KEY}.img -o $TAU_DEVICE

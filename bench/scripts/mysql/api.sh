@@ -61,4 +61,5 @@ log_mysql_specs() {
       "
     fi
   } >> "$out_log" 2>&1
+  $MYSQL_BIN/mysqladmin -uroot -h127.0.0.1 -P"$MYSQL_PORT" variables >> "$out_log"
 }
