@@ -12,8 +12,8 @@ APP_USER="tpccuser"
 APP_PASS="tpccpass"
 DBNAME="tpccdb"
 
-TARGET_FILESYSTEM="ext4"
-WAREHOUSE_LIST=(1024)
+TARGET_FILESYSTEM="taujournal"
+WAREHOUSE_LIST=(2000)
 
 command -v $HAMMERDB/hammerdbcli >/dev/null || { echo "hammerdbcli not found"; exit 1; }
 command -v partclone.ext4 >/dev/null || { echo "partclone.ext4 not found"; exit 1; }

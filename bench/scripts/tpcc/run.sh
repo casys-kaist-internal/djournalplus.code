@@ -10,8 +10,8 @@ fi
 # Filesystem groups
 declare -A FS_GROUPS
 
-FS_GROUPS[on]="ext4"
-FS_GROUPS[off]="ext4 zfs"
+FS_GROUPS[on]=""
+FS_GROUPS[off]="tau16G"
 
 source "$TAUFS_BENCH/scripts/common.sh"
 source "$TAUFS_BENCH/scripts/$MODE/api.sh"
@@ -24,11 +24,11 @@ mkdir -p "$RESULT_DIR"
 
 declare -A REPLACEMENTS
 
-TOTAL_ITERATION=10000
-DURATION=1
-RAMPUP=1
-VU_LIST=(8)
-#VU_LIST=(8 16 24 32 48 64)
+TOTAL_ITERATION=1000000000
+DURATION=10
+RAMPUP=10
+VU_LIST=(32)
+#VU_LIST=(4 8 16 32 48 64)
 
 # IO capture helper
 iostat_start() {
@@ -72,8 +72,13 @@ for FPW in on off; do
           postgres)
             PG_DATA="$MOUNT_DIR/postgres"
             pg_fpw $PG_DATA $FPW
+            if [[ "$FPW" == "on" ]]; then
+              WALSIZE="16GB"
+            else
+              WALSIZE="2GB"
+            fi
             $PG_BIN/pg_ctl -D $PG_DATA start
-
+            pg_wal_max_set $PG_DATA $WALSIZE
             log_pg_specs "$OUT_DBSPEC" "$DBNAME"
 
             pushd $HAMMERDB
@@ -130,7 +135,7 @@ for FPW in on off; do
     done
     echo "=== FS: $FS Done ==="
     clear_fs $FS $DEVICE
-    # sleep 600  # Cooling down
+    sleep 30  # Cooling down
   done
 done
 
