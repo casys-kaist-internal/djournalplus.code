@@ -47,7 +47,7 @@ do_mkfs() {
       sudo mkfs.xfs $DEVICE -f -l tjsize=40G
       ;;
     taujournal|tau4G|tau8G|tau16G|tau32G)
-      sudo $TAUFS_ROOT/e2fsprogs/misc/mke2fs -t ext4 -J tau_journal_size=40000 -E lazy_itable_init=0,lazy_journal_init=0 -F $DEVICE
+      sudo $TAUFS_ROOT/e2fsprogs/misc/mke2fs -t ext4 -E lazy_itable_init=0,lazy_journal_init=0 -F $DEVICE
       ;;
     *)
       echo "Unknown FS: $FS"; exit 1;;
@@ -91,9 +91,6 @@ mount_fs() {
       sudo zfs set recordsize=16k zfspool
       sudo zfs set mountpoint=$MOUNT_DIR zfspool
       ;;
-    taujournal)
-      sudo mount -t ext4 -o tjournal $DEVICE $MOUNT_DIR
-      ;;
     tau4G)
       sudo mount -t ext4 -o tjournal,tjournal_size=4 $DEVICE $MOUNT_DIR
       ;;
@@ -103,7 +100,7 @@ mount_fs() {
     tau16G)
       sudo mount -t ext4 -o tjournal,tjournal_size=16 $DEVICE $MOUNT_DIR
       ;;
-    tau32G)
+    taujournal|tau32G)
       sudo mount -t ext4 -o tjournal,tjournal_size=32 $DEVICE $MOUNT_DIR
       ;;
     xfs-tau)
@@ -144,11 +141,6 @@ clear_fs() {
 umount_fs() {
   MOUNT_DIR=$1
   sudo umount $MOUNT_DIR || sudo zfs umount -a
-}
-
-sysbench_rows_per_table () { # SCALE 5000≈80GB, 10000≈160GB, 20000≈320GB
-  local s="$1"
-  echo $(( 4480 * s ))
 }
 
 warming_up_ssd() {
@@ -202,6 +194,40 @@ log_ssd_state() {
 
     echo "SSD state for $DEV_NAME logged to $LOG_FILE."
 }
+
+log_ssd_state() {
+    local LOG_FILE=$1
+
+    local DEV_NAME=$(basename $DEVICE)
+
+    (
+        echo "======================================================================="
+        echo "SSD State Snapshot for $DEV_NAME : $(date -u --rfc-3339=seconds)"
+        echo "======================================================================="
+        echo ""
+        echo "### SMART/Health Data (smartctl -a) ###"
+
+        if ! sudo smartctl -a $DEVICE; then
+            echo "smartctl return $?"
+        fi
+
+        echo ""
+        echo "### I/O Statistics (/proc/diskstats) ###"
+
+        local diskstats_line=$(grep -w "$DEV_NAME" /proc/diskstats)
+        if [ -n "$diskstats_line" ]; then
+            echo "$diskstats_line"
+            echo "(Fields: 1-major 2-minor 3-devname 4-rd_ios 5-rd_merges 6-rd_sectors ... 10-wr_sectors ...)"
+        else
+            echo "WARN: Not found $DEV_NAME on /proc/diskstats"
+        fi
+        echo ""
+
+    ) >> $LOG_FILE
+
+    echo "SSD state for $DEV_NAME logged to $LOG_FILE."
+}
+
 
 drop_caches() {
   echo "[+] Dropping caches"
@@ -273,9 +299,15 @@ restore_filesystem() {
 # SCALE 5000≈80GB, 10000≈160GB, 20000≈320GB  for PGBENCH in postgres
 # But the differs in sysbench.
 # postgres -- scale 500=17GB, 2500=85GB 5000=170GB, 10000=340GB
-# MySQL    -- scale 500=14GB, 2500=72GB
+# MySQL    -- scale 500=14GB, 2500=72GB 5000=145GB
 
 sysbench_rows_per_table () { 
   local s="$1"
   echo $(( 4480 * s ))
+}
+
+# 32 tables with 10M rows about 80GB database size
+motivation_rows_per_table () { 
+  local tables="$1"
+  echo $(( 320000000 / tables )) # 320M
 }
