@@ -26,6 +26,12 @@ do_mkfs() {
     ext4)
       sudo mke2fs -t ext4 -E lazy_itable_init=0,lazy_journal_init=0 -F $DEVICE
       ;;
+    ext4-dj10)
+      sudo mke2fs -t ext4  -J size=10000 -E lazy_itable_init=0,lazy_journal_init=0 -F $DEVICE
+      ;;
+    ext4-dj20)
+      sudo mke2fs -t ext4  -J size=20000 -E lazy_itable_init=0,lazy_journal_init=0 -F $DEVICE
+      ;;
     ext4-dj)
       sudo mke2fs -t ext4  -J size=40000 -E lazy_itable_init=0,lazy_journal_init=0 -F $DEVICE
       ;;
@@ -46,7 +52,7 @@ do_mkfs() {
     xfs-tau)
       sudo mkfs.xfs $DEVICE -f -l tjsize=40G
       ;;
-    taujournal|tau4G|tau8G|tau16G|tau32G)
+    ext4-tau|taujournal|tau4G|tau8G|tau16G|tau32G)
       sudo $TAUFS_ROOT/e2fsprogs/misc/mke2fs -t ext4 -E lazy_itable_init=0,lazy_journal_init=0 -F $DEVICE
       ;;
     *)
@@ -64,7 +70,7 @@ mount_fs() {
     ext4)
       sudo mount -t ext4 -o data=ordered $DEVICE $MOUNT_DIR
       ;;
-    ext4-dj)
+    ext4-dj|ext4-dj10|ext4-dj20)
       sudo mount -t ext4 -o data=journal $DEVICE $MOUNT_DIR
       ;;
     f2fs)
@@ -91,6 +97,12 @@ mount_fs() {
       sudo zfs set recordsize=16k zfspool
       sudo zfs set mountpoint=$MOUNT_DIR zfspool
       ;;
+    ext4-tau)
+      sudo mount -t ext4 -o tjournal $DEVICE $MOUNT_DIR
+      ;;
+    tau1G)
+      sudo mount -t ext4 -o tjournal,tjournal_size=1 $DEVICE $MOUNT_DIR
+      ;;
     tau4G)
       sudo mount -t ext4 -o tjournal,tjournal_size=4 $DEVICE $MOUNT_DIR
       ;;
@@ -106,6 +118,21 @@ mount_fs() {
     xfs-tau)
       sudo mount -t xfs -o tjournal,tjournal_size=16 $DEVICE $MOUNT_DIR
       ;;
+    xfs-tau1G)
+      sudo mount -t xfs -o tjournal,tjournal_size=1 $DEVICE $MOUNT_DIR
+      ;;
+    xfs-tau4G)
+      sudo mount -t xfs -o tjournal,tjournal_size=4 $DEVICE $MOUNT_DIR
+      ;;
+    xfs-tau8G)
+      sudo mount -t xfs -o tjournal,tjournal_size=8 $DEVICE $MOUNT_DIR
+      ;;
+    xfs-tau16G)
+      sudo mount -t xfs -o tjournal,tjournal_size=16 $DEVICE $MOUNT_DIR
+      ;;
+    xfs-tau32G)
+      sudo mount -t xfs -o tjournal,tjournal_size=32 $DEVICE $MOUNT_DIR
+      ;;
     *)
       echo "Unknown FS: $FS"; exit 1;;
   esac
@@ -116,7 +143,7 @@ clear_fs() {
   local DEVICE=$2
 
   case $FS in
-    ext4|ext4-dj)
+    ext4|ext4-dj|ext4-dj10|ext4-dj20)
       ;;
     f2fs)
       ;;
@@ -127,9 +154,9 @@ clear_fs() {
     zfs|zfs-4k|zfs-8k|zfs-16k)
       sudo zpool export zfspool || true
       ;;
-    taujournal|tau4G|tau8G|tau16G|tau32G)
+    ext4-tau|tau1G|tau4G|tau8G|tau16G|tau32G)
       ;;
-    xfs-tau)
+    xfs-tau|xfs-tau1G|xfs-tau4G|xfs-tau8G|xfs-tau16G|xfs-tau32G)
       ;;
     *)
       echo "Unknown FS: $FS"; exit 1;;
@@ -240,7 +267,7 @@ create_backup_fs_image()
   local KEY=$2
   local BACKUP_DIR=$3
   case $FS in
-    ext4|ext4-dj)
+    ext4|ext4-dj|ext4-dj10|ext4-dj20)
       sudo partclone.ext4 -c -s $DEVICE -o "$BACKUP_DIR/${FS}_${KEY}.img"
       ;;
     xfs|xfs-cow)
@@ -252,10 +279,10 @@ create_backup_fs_image()
       sudo sh -c "zfs send zfspool@pgbackup > '$BACKUP_DIR/${FS}_${KEY}.img'"
       umount_fs $MOUNT_DIR
       ;;
-    taujournal|tau4G|tau8G|tau16G|tau32G)
-      sudo partclone.ext4 -c -s $DEVICE -o "$BACKUP_DIR/taujournal_${KEY}.img"
+    ext4-tau|tau1G|tau4G|tau8G|tau16G|tau32G)
+      sudo partclone.ext4 -c -s $DEVICE -o "$BACKUP_DIR/ext4-tau_${KEY}.img"
       ;;
-    xfs-tau)
+    xfs-tau|xfs-tau1G|xfs-tau4G|xfs-tau8G|xfs-tau16G|xfs-tau32G)
       sudo partclone.xfs -c -s $DEVICE -o "$BACKUP_DIR/xfs-tau_${KEY}.img"
       ;;
     *)
@@ -271,7 +298,7 @@ restore_filesystem() {
   echo "[+] Restoring filesystem: $FS"
 
   case $FS in
-    ext4|ext4-dj)
+    ext4|ext4-dj|ext4-dj10|ext4-dj20)
       sudo partclone.ext4 -r -s $BACKUP_DIR/${FS}_${KEY}.img -o $TAU_DEVICE
       ;;
     xfs|xfs-cow)
@@ -283,10 +310,10 @@ restore_filesystem() {
       sudo sh -c "zfs receive -F zfspool < '$BACKUP_DIR/${FS}_${KEY}.img'"
       umount_fs $MOUNT_DIR
       ;;
-    taujournal|tau4G|tau8G|tau16G|tau32G)
-      sudo partclone.ext4 -r -s $BACKUP_DIR/taujournal_${KEY}.img -o $TAU_DEVICE
+    ext4-tau|tau1G|tau4G|tau8G|tau16G|tau32G)
+      sudo partclone.ext4 -r -s $BACKUP_DIR/ext4-tau_${KEY}.img -o $TAU_DEVICE
       ;;
-    xfs-tau)
+    xfs-tau|xfs-tau1G|xfs-tau4G|xfs-tau8G|xfs-tau16G|xfs-tau32G)
       sudo partclone.xfs -r -s $BACKUP_DIR/xfs-tau_${KEY}.img -o $TAU_DEVICE
       ;;
     *)
@@ -310,4 +337,9 @@ sysbench_rows_per_table () {
 motivation_rows_per_table () { 
   local tables="$1"
   echo $(( 320000000 / tables )) # 320M
+}
+
+main_rows_per_table () { 
+  local tables="$1"
+  echo $(( 640000000 / tables )) # 640M
 }

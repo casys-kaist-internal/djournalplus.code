@@ -22,13 +22,13 @@ if [[ ! "$KERNEL_VERSION" == *"6.8.0"* ]]; then
 fi
 echo "✅ Kernel version check passed: $KERNEL_VERSION"
 
-# Motivation test use only 32GB memory
+# Main test use only 64GB memory
 MEM_TOTAL_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
 MEM_TOTAL_GB=$((MEM_TOTAL_KB / 1024 / 1024))
-if [ "$MEM_TOTAL_GB" -gt 32 ]; then
-    echo "❌ Error: System memory exceeds 32GB limitation."
+if [ "$MEM_TOTAL_GB" -gt 64 ]; then
+    echo "❌ Error: System memory exceeds 64GB limitation."
     echo "   - Current Memory: ~${MEM_TOTAL_GB}GB"
-    echo "   Please restrict memory using 'mem=32G' in GRUB settings."
+    echo "   Please restrict memory using 'mem=64G' in GRUB settings."
     exit 1
 fi
 echo "✅ Memory size check passed: ~${MEM_TOTAL_GB}GB"
@@ -38,16 +38,16 @@ echo "  Environment check complete. Ready to proceed."
 echo "=================================================="
 
 # Or you can just hardcode like below:
-FS_GROUPS="ext4 zfs xfs ext4-dj"
+FS_GROUPS="ext4 zfs"
 FS_FPWON="ext4 xfs"
 FS_FPWOFF="ext4 zfs xfs ext4-dj"
 
 TRIES=1
-SB_TABLES=(8)
-THREADS_LIST=(1 8 16 32 64)
+SB_TABLES=(8 16 32)
+THREADS_LIST=(8 32 64)
 RUNNING_TIME=300
 WARMUP_TIME=600
-WORKLOADS=(oltp_write_only)
+WORKLOADS=(oltp_update_index oltp_write_only)
 
 echo "=== Starting sysbench benchamrk: DBMS=$DBMS, TEST=$TEST ==="
 echo "=== WORKLOADS=${WORKLOADS[*]}, TABLE_LIST=${SB_TABLES[*]}, THREADS_LIST=${THREADS_LIST[*]} ==="
@@ -62,11 +62,11 @@ mkdir -p "$RESULT_DIR"
 
 run_postgres_benchmark() {
   PG_DATA="$MOUNT_DIR/postgres"
-  DBNAME="motiv_t${TABLE}"
-  ROWS=$(motivation_rows_per_table "$TABLE")
+  DBNAME="main_t${TABLE}"
+  ROWS=$(main_rows_per_table "$TABLE")
   pg_fpw $PG_DATA $FPW
   if [[ "$FPW" == "on" ]]; then
-    WALSIZE="8GB"
+    WALSIZE="16GB"
     pg_wal_max_set $PG_DATA $WALSIZE
   fi
 
@@ -100,8 +100,8 @@ run_postgres_benchmark() {
 run_mysql_benchmark() {
   MY_DATA="$MOUNT_DIR/mysql"
   MY_SOCK="$MY_DATA/mysql.sock"
-  DBNAME="motiv_t${TABLE}"
-  ROWS=$(motivation_rows_per_table "$TABLE")
+  DBNAME="main_t${TABLE}"
+  ROWS=$(main_rows_per_table "$TABLE")
   if [[ "$FPW" == "on" ]]; then
     DBW=1
   else
@@ -162,8 +162,8 @@ create_database() {
 
     case "$DBMS" in
       postgres)
-      DBNAME="motiv_t${TABLE}"
-      ROWS=$(motivation_rows_per_table "$TABLE")
+      DBNAME="main_t${TABLE}"
+      ROWS=$(main_rows_per_table "$TABLE")
 
       PG_DATA="$MOUNT_DIR/postgres"
       sudo mkdir -p $PG_DATA
@@ -189,8 +189,8 @@ create_database() {
       mysql)
       MY_DATA="$MOUNT_DIR/mysql"
       MY_SOCK="$MY_DATA/mysql.sock"
-      DBNAME="motiv_t${TABLE}"
-      ROWS=$(motivation_rows_per_table "$TABLE")
+      DBNAME="main_t${TABLE}"
+      ROWS=$(main_rows_per_table "$TABLE")
 
       echo "TABLES: $TABLE, ROWS per table: $ROWS"
 
