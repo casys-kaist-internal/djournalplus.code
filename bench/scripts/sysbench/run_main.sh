@@ -38,16 +38,17 @@ echo "  Environment check complete. Ready to proceed."
 echo "=================================================="
 
 # Or you can just hardcode like below:
-FS_GROUPS="ext4 zfs"
+FS_GROUPS="ext4 xfs zfs-16k ext4-dj20"
 FS_FPWON="ext4 xfs"
-FS_FPWOFF="ext4 zfs xfs ext4-dj"
+FS_FPWOFF="ext4 zfs-16k xfs ext4-dj20"
 
 TRIES=1
-SB_TABLES=(8 16 32)
-THREADS_LIST=(8 32 64)
-RUNNING_TIME=300
+SB_TABLES=(16)
+# THREADS_LIST=(1 8 16 32 64)
+THREADS_LIST=(32)
+RUNNING_TIME=600
 WARMUP_TIME=600
-WORKLOADS=(oltp_update_index oltp_write_only)
+WORKLOADS=(oltp_update_index oltp_update_non_index oltp_write_only oltp_read_write oltp_delete oltp_insert)
 
 echo "=== Starting sysbench benchamrk: DBMS=$DBMS, TEST=$TEST ==="
 echo "=== WORKLOADS=${WORKLOADS[*]}, TABLE_LIST=${SB_TABLES[*]}, THREADS_LIST=${THREADS_LIST[*]} ==="
@@ -108,8 +109,6 @@ run_mysql_benchmark() {
     DBW=0
   fi
 
-  INNODB_BP_SIZE="8G"
-
   echo "[*] Start mysqld"
   $MYSQL_BIN/mysqld \
       --datadir="$MY_DATA" \
@@ -118,8 +117,7 @@ run_mysql_benchmark() {
       --pid-file="$MY_DATA/mysqld.pid" \
       --bind-address=127.0.0.1 \
       --skip-networking=0 \
-      --innodb_buffer_pool_size=$INNODB_BP_SIZE \
-      --innodb-doublewrite=$DBW &
+      --innodb_doublewrite=$DBW &
   wait_for_sock "$MY_SOCK" 60
 
     # --innodb_flush_method=fsync \
@@ -246,17 +244,17 @@ create_database() {
 # MAIN LOOP
 for FS in ${FS_GROUPS[@]}; do
   for TABLE in "${SB_TABLES[@]}"; do
-    echo "=== Setting up FS: $FS in device($DEVICE) with TABLE: $TABLE ==="
-    create_database $FS $DBMS $TABLE
-    for FPW in on off; do
-      if [[ "$FPW" == "on" ]]; then
-        [[ ! " $FS_FPWON " =~ " $FS " ]] && continue
-      elif [[ "$FPW" == "off" ]]; then
-        [[ ! " $FS_FPWOFF " =~ " $FS " ]] && continue
-      fi
-      echo "Executing: FS=$FS, FPW=$FPW"
-      for WORKLOAD in "${WORKLOADS[@]}"; do
-        for THREADS in "${THREADS_LIST[@]}"; do
+    for WORKLOAD in "${WORKLOADS[@]}"; do
+      for THREADS in "${THREADS_LIST[@]}"; do
+      echo "=== Setting up FS: $FS in device($DEVICE) with TABLE: $TABLE ==="
+      create_database $FS $DBMS $TABLE
+      for FPW in on off; do
+        if [[ "$FPW" == "on" ]]; then
+          [[ ! " $FS_FPWON " =~ " $FS " ]] && continue
+        elif [[ "$FPW" == "off" ]]; then
+          [[ ! " $FS_FPWOFF " =~ " $FS " ]] && continue
+        fi
+        echo "Executing: FS=$FS, FPW=$FPW"
           for (( R=1; R<=$TRIES; R++ )); do
             LABEL="${DBMS}_${WORKLOAD}_${FS}_fpw_${FPW}_t${TABLE}_c${THREADS}_r${R}"
             OUT_DBSPEC="$RESULT_DIR/${LABEL}.spec"
@@ -274,13 +272,12 @@ for FS in ${FS_GROUPS[@]}; do
               ;;
             esac
             log_ssd_state $OUT_DBSPEC
-            
           done
-        done
-      done
-    done
-    clear_fs $FS $DEVICE
-  done
+        done # FPW
+        clear_fs $FS $DEVICE
+      done # THREADS
+    done # WORKLOADS
+  done # TABLES
   echo "=== FS: $FS Done ==="
-done
+done # FS_GROUPS
 echo "=== All benchmarks completed ==="
