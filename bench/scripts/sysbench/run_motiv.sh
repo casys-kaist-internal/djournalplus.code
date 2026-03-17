@@ -37,10 +37,14 @@ echo "=================================================="
 echo "  Environment check complete. Ready to proceed."
 echo "=================================================="
 
-# Or you can just hardcode like below:
-FS_GROUPS="ext4 zfs xfs ext4-dj"
+if [[ "$DBMS" == "postgres"]]; then
+  FS_GROUPS="ext4 zfs-8k xfs ext4-dj10"
+else
+  FS_GROUPS="ext4 zfs-16k xfs ext4-dj10"
+fi
+
 FS_FPWON="ext4 xfs"
-FS_FPWOFF="ext4 zfs xfs ext4-dj"
+FS_FPWOFF="ext4 xfs zfs-8k zfs-16k ext4-dj10"
 
 TRIES=1
 SB_TABLES=(8)
@@ -98,7 +102,7 @@ run_postgres_benchmark() {
 }
 
 run_mysql_benchmark() {
-  MY_DATA="$MOUNT_DIR/mysql"
+  MY_DATA="$MOUNT_DIR/mysql_data"
   MY_SOCK="$MY_DATA/mysql.sock"
   DBNAME="motiv_t${TABLE}"
   ROWS=$(motivation_rows_per_table "$TABLE")
@@ -108,7 +112,15 @@ run_mysql_benchmark() {
     DBW=0
   fi
 
-  INNODB_BP_SIZE="8G"
+  if [[ "$FS" == "zfs-16k" ]]; then
+    MY_LOGS="$MOUNT_DIR/mysql_logs"
+    MY_BINLOGS="$MOUNT_DIR/mysql_binlogs"
+    sudo chown -R $MYUSER:$MYUSER $MY_LOGS
+    sudo chown -R $MYUSER:$MYUSER $MY_BINLOGS
+  else
+    MY_LOGS="$MY_DATA/logs"
+    MY_BINLOGS="$MY_DATA/binlogs"
+  fi
 
   echo "[*] Start mysqld"
   $MYSQL_BIN/mysqld \
@@ -118,10 +130,12 @@ run_mysql_benchmark() {
       --pid-file="$MY_DATA/mysqld.pid" \
       --bind-address=127.0.0.1 \
       --skip-networking=0 \
-      --innodb_buffer_pool_size=$INNODB_BP_SIZE \
+      --log-error="$MY_LOGS/error.log" \
+      --log-bin="$MY_BINLOGS/mysql-bin" \
       --innodb-doublewrite=$DBW &
   wait_for_sock "$MY_SOCK" 60
 
+    # --innodb_buffer_pool_size=$INNODB_BP_SIZE \
     # --innodb_flush_method=fsync \
     # --log-error="$MY_DATA/mysqld.err" \
     # --innodb_dedicated_server=1 \
@@ -187,7 +201,7 @@ create_database() {
       $PG_BIN/pg_ctl -D $PG_DATA stop
       ;;
       mysql)
-      MY_DATA="$MOUNT_DIR/mysql"
+      MY_DATA="$MOUNT_DIR/mysql_data"
       MY_SOCK="$MY_DATA/mysql.sock"
       DBNAME="motiv_t${TABLE}"
       ROWS=$(motivation_rows_per_table "$TABLE")
@@ -246,17 +260,17 @@ create_database() {
 # MAIN LOOP
 for FS in ${FS_GROUPS[@]}; do
   for TABLE in "${SB_TABLES[@]}"; do
-    echo "=== Setting up FS: $FS in device($DEVICE) with TABLE: $TABLE ==="
-    create_database $FS $DBMS $TABLE
-    for FPW in on off; do
-      if [[ "$FPW" == "on" ]]; then
-        [[ ! " $FS_FPWON " =~ " $FS " ]] && continue
-      elif [[ "$FPW" == "off" ]]; then
-        [[ ! " $FS_FPWOFF " =~ " $FS " ]] && continue
-      fi
-      echo "Executing: FS=$FS, FPW=$FPW"
-      for WORKLOAD in "${WORKLOADS[@]}"; do
-        for THREADS in "${THREADS_LIST[@]}"; do
+    for WORKLOAD in "${WORKLOADS[@]}"; do
+      for THREADS in "${THREADS_LIST[@]}"; do
+      echo "=== Setting up FS: $FS in device($DEVICE) with TABLE: $TABLE ==="
+      create_database $FS $DBMS $TABLE
+      for FPW in on off; do
+        if [[ "$FPW" == "on" ]]; then
+          [[ ! " $FS_FPWON " =~ " $FS " ]] && continue
+        elif [[ "$FPW" == "off" ]]; then
+          [[ ! " $FS_FPWOFF " =~ " $FS " ]] && continue
+        fi
+        echo "Executing: FS=$FS, FPW=$FPW"
           for (( R=1; R<=$TRIES; R++ )); do
             LABEL="${DBMS}_${WORKLOAD}_${FS}_fpw_${FPW}_t${TABLE}_c${THREADS}_r${R}"
             OUT_DBSPEC="$RESULT_DIR/${LABEL}.spec"
@@ -274,12 +288,11 @@ for FS in ${FS_GROUPS[@]}; do
               ;;
             esac
             log_ssd_state $OUT_DBSPEC
-            
           done
         done
+        clear_fs $FS $DEVICE
       done
     done
-    clear_fs $FS $DEVICE
   done
   echo "=== FS: $FS Done ==="
 done

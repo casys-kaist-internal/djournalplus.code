@@ -32,9 +32,6 @@ do_mkfs() {
     ext4-dj20)
       sudo mke2fs -t ext4  -J size=20000 -E lazy_itable_init=0,lazy_journal_init=0 -F $DEVICE
       ;;
-    ext4-dj)
-      sudo mke2fs -t ext4  -J size=40000 -E lazy_itable_init=0,lazy_journal_init=0 -F $DEVICE
-      ;;
     f2fs)
       sudo mkfs.f2fs -f $DEVICE
       ;;
@@ -44,10 +41,23 @@ do_mkfs() {
     xfs|xfs-cow)
       sudo mkfs.xfs -f $DEVICE
       ;;
-    zfs|zfs-4k|zfs-8k|zfs-16k)
+    # zfs)
+    #   sudo wipefs -a $DEVICE
+    #   sudo zpool destroy -f zfspool || true
+    #   sudo zpool create -o ashift=12 zfspool $DEVICE
+    #   ;;
+    zfs-8k)
       sudo wipefs -a $DEVICE
       sudo zpool destroy -f zfspool || true
       sudo zpool create -o ashift=12 zfspool $DEVICE
+      ;;
+    zfs-16k)
+      sudo wipefs -a $DEVICE
+      sudo zpool destroy -f zfspool || true
+      sudo zpool create -o ashift=12 zfspool $DEVICE
+      sudo zfs create -o recordsize=16k -o compress=lz4 -o redundant_metadata=most zfspool/mysql_data
+      sudo zfs create -o compress=gzip -o primarycache=none zfspool/mysql_logs
+      sudo zfs create -o compress=lz4 zfspool/mysql_binlogs
       ;;
     xfs-tau)
       sudo mkfs.xfs $DEVICE -f -l tjsize=40G
@@ -70,7 +80,7 @@ mount_fs() {
     ext4)
       sudo mount -t ext4 -o data=ordered $DEVICE $MOUNT_DIR
       ;;
-    ext4-dj|ext4-dj10|ext4-dj20)
+    ext4-dj10|ext4-dj20)
       sudo mount -t ext4 -o data=journal $DEVICE $MOUNT_DIR
       ;;
     f2fs)
@@ -94,7 +104,6 @@ mount_fs() {
       sudo zfs set mountpoint=$MOUNT_DIR zfspool
       ;;
     zfs-16k)
-      sudo zfs set recordsize=16k zfspool
       sudo zfs set mountpoint=$MOUNT_DIR zfspool
       ;;
     ext4-tau)
@@ -143,7 +152,7 @@ clear_fs() {
   local DEVICE=$2
 
   case $FS in
-    ext4|ext4-dj|ext4-dj10|ext4-dj20)
+    ext4|ext4-dj10|ext4-dj20)
       ;;
     f2fs)
       ;;
@@ -151,7 +160,7 @@ clear_fs() {
       ;;
     xfs|xfs-cow)
       ;;
-    zfs|zfs-4k|zfs-8k|zfs-16k)
+    zfs|zfs-8k|zfs-16k)
       sudo zpool export zfspool || true
       ;;
     ext4-tau|tau1G|tau4G|tau8G|tau16G|tau32G)
@@ -267,7 +276,7 @@ create_backup_fs_image()
   local KEY=$2
   local BACKUP_DIR=$3
   case $FS in
-    ext4|ext4-dj|ext4-dj10|ext4-dj20)
+    ext4|ext4-dj10|ext4-dj20)
       sudo partclone.ext4 -c -s $DEVICE -o "$BACKUP_DIR/${FS}_${KEY}.img"
       ;;
     xfs|xfs-cow)
@@ -298,7 +307,7 @@ restore_filesystem() {
   echo "[+] Restoring filesystem: $FS"
 
   case $FS in
-    ext4|ext4-dj|ext4-dj10|ext4-dj20)
+    ext4|ext4-dj10|ext4-dj20)
       sudo partclone.ext4 -r -s $BACKUP_DIR/${FS}_${KEY}.img -o $TAU_DEVICE
       ;;
     xfs|xfs-cow)
