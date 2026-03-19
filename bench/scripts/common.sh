@@ -41,11 +41,11 @@ do_mkfs() {
     xfs|xfs-cow)
       sudo mkfs.xfs -f $DEVICE
       ;;
-    # zfs)
-    #   sudo wipefs -a $DEVICE
-    #   sudo zpool destroy -f zfspool || true
-    #   sudo zpool create -o ashift=12 zfspool $DEVICE
-    #   ;;
+    zfs)
+      sudo wipefs -a $DEVICE
+      sudo zpool destroy -f zfspool || true
+      sudo zpool create -o ashift=12 zfspool $DEVICE
+      ;;
     zfs-8k)
       sudo wipefs -a $DEVICE
       sudo zpool destroy -f zfspool || true
@@ -60,9 +60,9 @@ do_mkfs() {
       sudo zfs create -o compress=lz4 zfspool/mysql_binlogs
       ;;
     xfs-tau)
-      sudo mkfs.xfs $DEVICE -f -l tjsize=40G
+      sudo mkfs.xfs $DEVICE -f -l tjmaxsize=1G
       ;;
-    ext4-tau|taujournal|tau4G|tau8G|tau16G|tau32G)
+    ext4-tau)
       sudo $TAUFS_ROOT/e2fsprogs/misc/mke2fs -t ext4 -E lazy_itable_init=0,lazy_journal_init=0 -F $DEVICE
       ;;
     *)
@@ -107,40 +107,10 @@ mount_fs() {
       sudo zfs set mountpoint=$MOUNT_DIR zfspool
       ;;
     ext4-tau)
-      sudo mount -t ext4 -o tjournal $DEVICE $MOUNT_DIR
-      ;;
-    tau1G)
-      sudo mount -t ext4 -o tjournal,tjournal_size=1 $DEVICE $MOUNT_DIR
-      ;;
-    tau4G)
-      sudo mount -t ext4 -o tjournal,tjournal_size=4 $DEVICE $MOUNT_DIR
-      ;;
-    tau8G)
-      sudo mount -t ext4 -o tjournal,tjournal_size=8 $DEVICE $MOUNT_DIR
-      ;;
-    tau16G)
-      sudo mount -t ext4 -o tjournal,tjournal_size=16 $DEVICE $MOUNT_DIR
-      ;;
-    taujournal|tau32G)
-      sudo mount -t ext4 -o tjournal,tjournal_size=32 $DEVICE $MOUNT_DIR
+      sudo mount -t ext4 -o tjournal,tjournal_size=32  $DEVICE $MOUNT_DIR
       ;;
     xfs-tau)
-      sudo mount -t xfs -o tjournal,tjournal_size=16 $DEVICE $MOUNT_DIR
-      ;;
-    xfs-tau1G)
-      sudo mount -t xfs -o tjournal,tjournal_size=1 $DEVICE $MOUNT_DIR
-      ;;
-    xfs-tau4G)
-      sudo mount -t xfs -o tjournal,tjournal_size=4 $DEVICE $MOUNT_DIR
-      ;;
-    xfs-tau8G)
-      sudo mount -t xfs -o tjournal,tjournal_size=8 $DEVICE $MOUNT_DIR
-      ;;
-    xfs-tau16G)
-      sudo mount -t xfs -o tjournal,tjournal_size=16 $DEVICE $MOUNT_DIR
-      ;;
-    xfs-tau32G)
-      sudo mount -t xfs -o tjournal,tjournal_size=32 $DEVICE $MOUNT_DIR
+      sudo mount -t xfs -o tjournal $DEVICE $MOUNT_DIR
       ;;
     *)
       echo "Unknown FS: $FS"; exit 1;;
@@ -152,7 +122,7 @@ clear_fs() {
   local DEVICE=$2
 
   case $FS in
-    ext4|ext4-dj10|ext4-dj20)
+    ext4|ext4-dj10|ext4-dj20|ext4-tau)
       ;;
     f2fs)
       ;;
@@ -162,8 +132,6 @@ clear_fs() {
       ;;
     zfs|zfs-8k|zfs-16k)
       sudo zpool export zfspool || true
-      ;;
-    ext4-tau|tau1G|tau4G|tau8G|tau16G|tau32G)
       ;;
     xfs-tau|xfs-tau1G|xfs-tau4G|xfs-tau8G|xfs-tau16G|xfs-tau32G)
       ;;
@@ -276,24 +244,24 @@ create_backup_fs_image()
   local KEY=$2
   local BACKUP_DIR=$3
   case $FS in
-    ext4|ext4-dj10|ext4-dj20)
+    ext4|ext4-dj10|ext4-dj20|ext4-tau)
       sudo partclone.ext4 -c -s $DEVICE -o "$BACKUP_DIR/${FS}_${KEY}.img"
       ;;
-    xfs|xfs-cow)
+    xfs|xfs-cow|xfs-tau)
       sudo partclone.xfs -c -s $DEVICE -o "$BACKUP_DIR/${FS}_${KEY}.img"
       ;;
-    zfs|zfs-4k|zfs-8k|zfs-16k)
+    zfs|zfs-8k)
       mount_fs $FS $MOUNT_DIR
       sudo zfs snapshot zfspool@pgbackup
       sudo sh -c "zfs send zfspool@pgbackup > '$BACKUP_DIR/${FS}_${KEY}.img'"
       umount_fs $MOUNT_DIR
       ;;
-    ext4-tau|tau1G|tau4G|tau8G|tau16G|tau32G)
-      sudo partclone.ext4 -c -s $DEVICE -o "$BACKUP_DIR/ext4-tau_${KEY}.img"
-      ;;
-    xfs-tau|xfs-tau1G|xfs-tau4G|xfs-tau8G|xfs-tau16G|xfs-tau32G)
-      sudo partclone.xfs -c -s $DEVICE -o "$BACKUP_DIR/xfs-tau_${KEY}.img"
-      ;;
+    zfs-16k)
+      mount_fs $FS $MOUNT_DIR
+      sudo zfs snapshot -r zfspool@pgbackup
+      sudo sh -c "zfs send -R zfspool@pgbackup > '$BACKUP_DIR/${FS}_${KEY}.img'"
+      umount_fs $MOUNT_DIR
+    ;;
     *)
       echo "Unknown FS: $FS"; exit 1;;
   esac
@@ -307,10 +275,10 @@ restore_filesystem() {
   echo "[+] Restoring filesystem: $FS"
 
   case $FS in
-    ext4|ext4-dj10|ext4-dj20)
+    ext4|ext4-dj10|ext4-dj20|ext4-tau)
       sudo partclone.ext4 -r -s $BACKUP_DIR/${FS}_${KEY}.img -o $TAU_DEVICE
       ;;
-    xfs|xfs-cow)
+    xfs|xfs-cow|xfs-tau)
       sudo partclone.xfs -r -s $BACKUP_DIR/${FS}_${KEY}.img -o $TAU_DEVICE
       ;;
     zfs|zfs-4k|zfs-8k|zfs-16k)
@@ -319,27 +287,11 @@ restore_filesystem() {
       sudo sh -c "zfs receive -F zfspool < '$BACKUP_DIR/${FS}_${KEY}.img'"
       umount_fs $MOUNT_DIR
       ;;
-    ext4-tau|tau1G|tau4G|tau8G|tau16G|tau32G)
-      sudo partclone.ext4 -r -s $BACKUP_DIR/ext4-tau_${KEY}.img -o $TAU_DEVICE
-      ;;
-    xfs-tau|xfs-tau1G|xfs-tau4G|xfs-tau8G|xfs-tau16G|xfs-tau32G)
-      sudo partclone.xfs -r -s $BACKUP_DIR/xfs-tau_${KEY}.img -o $TAU_DEVICE
-      ;;
     *)
       echo "Unknown FS: $FS"; exit 1;;
   esac
   sleep 1
   drop_caches
-}
-
-# SCALE 5000≈80GB, 10000≈160GB, 20000≈320GB  for PGBENCH in postgres
-# But the differs in sysbench.
-# postgres -- scale 500=17GB, 2500=85GB 5000=170GB, 10000=340GB
-# MySQL    -- scale 500=14GB, 2500=72GB 5000=145GB
-
-sysbench_rows_per_table () { 
-  local s="$1"
-  echo $(( 4480 * s ))
 }
 
 # 32 tables with 10M rows about 80GB database size

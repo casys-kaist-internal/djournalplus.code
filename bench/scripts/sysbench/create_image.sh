@@ -7,13 +7,8 @@ if [[ "$MODE" != "postgres" && "$MODE" != "mysql" ]]; then
   exit 1
 fi
 
-# Motivation Test
-SCALE_LIST=(2500)
-TARGET_FILESYSTEM="ext4 xfs zfs-8k ext4-dj"
-
-# SCALE_LIST=(5000)
-# TARGET_FILESYSTEM="ext4"
-SB_TABLES=32
+SB_TABLES=(16)
+TARGET_FILESYSTEM="zfs-16k"
 
 source "$TAUFS_BENCH/scripts/common.sh"
 source "$TAUFS_BENCH/scripts/$MODE/api.sh"
@@ -26,15 +21,15 @@ command -v partclone.ext4 >/dev/null || { echo "partclone.ext4 not found"; exit 
 mkdir -p "$BACKUP_DIR"
 
 for FS in ${TARGET_FILESYSTEM}; do
-  for SCALE in "${SCALE_LIST[@]}"; do
+  for TABLE in "${SB_TABLES[@]}"; do
     echo "=== Setting up FS: $FS in device($DEVICE) ==="
     do_mkfs $FS $DEVICE
     mount_fs $FS $MOUNT_DIR
 
     case "$MODE" in
       postgres)
-      DBNAME="sbtest_s${SCALE}"
-      ROWS=$(sysbench_rows_per_table "$SCALE")
+      DBNAME="main_t${TABLE}"
+      ROWS=$(main_rows_per_table "$TABLE")
 
       PG_DATA="$MOUNT_DIR/postgres"
       sudo mkdir -p $PG_DATA
@@ -58,10 +53,10 @@ for FS in ${TARGET_FILESYSTEM}; do
       $PG_BIN/pg_ctl -D $PG_DATA stop
       ;;
       mysql)
-      MY_DATA="$MOUNT_DIR/mysql"
+      MY_DATA="$MOUNT_DIR/mysql_data"
       MY_SOCK="$MY_DATA/mysql.sock"
-      DBNAME="sbtest_s${SCALE}"
-      ROWS=$(sysbench_rows_per_table "$SCALE")
+      DBNAME="main_t${TABLE}"
+      ROWS=$(main_rows_per_table "$TABLE")
 
       echo "[*] Initialize MySQL datadir"
       sudo mkdir -p $MY_DATA
@@ -78,7 +73,10 @@ for FS in ${TARGET_FILESYSTEM}; do
           --bind-address=127.0.0.1 \
           --skip-networking=0 \
           --innodb-doublewrite=0 \
+          --innodb_flush_log_at_trx_commit=0 \
+          --sync_binlog=0 \
           --log-error="$MY_DATA/mysqld.err" &
+
       wait_for_sock "$MY_SOCK" 60
 
       # This option can reduce prepare time, but performance may vary.
@@ -93,7 +91,7 @@ for FS in ${TARGET_FILESYSTEM}; do
       $MYSQL_BIN/mysql -uroot --socket="$MY_SOCK" -e "CREATE DATABASE IF NOT EXISTS \`$DBNAME\`;"
       sysbench --db-driver=mysql \
           --mysql-user=root --mysql-socket="$MY_SOCK" --mysql-db="$DBNAME" \
-          oltp_read_write --tables="$SB_TABLES" --table-size="$ROWS" prepare
+          oltp_read_write --threads=32 --tables="$SB_TABLES" --table-size="$ROWS" prepare
 
       $MYSQL_BIN/mysql -uroot --socket="$MY_SOCK" -e "SET GLOBAL innodb_fast_shutdown=0; FLUSH LOGS;"
       $MYSQL_BIN/mysqladmin -uroot --socket="$MY_SOCK" shutdown
@@ -103,7 +101,7 @@ for FS in ${TARGET_FILESYSTEM}; do
     echo "[*] Unmount before imaging"
     umount_fs "$MOUNT_DIR"
     sleep 1
-    create_backup_fs_image $FS "s$SCALE" $BACKUP_DIR
+    create_backup_fs_image $FS "s$TABLE" $BACKUP_DIR
 
     echo "[✓] Done: $OUT_IMG"
   done

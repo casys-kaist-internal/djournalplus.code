@@ -38,17 +38,17 @@ echo "  Environment check complete. Ready to proceed."
 echo "=================================================="
 
 # Or you can just hardcode like below:
-FS_GROUPS="ext4 xfs zfs-16k ext4-dj20"
+FS_GROUPS="xfs-tau"
 FS_FPWON="ext4 xfs"
-FS_FPWOFF="ext4 zfs-16k xfs ext4-dj20"
+FS_FPWOFF="ext4 ext4-tau xfs xfs-tau zfs-16k ext4-dj20"
 
 TRIES=1
 SB_TABLES=(16)
-# THREADS_LIST=(1 8 16 32 64)
+#THREADS_LIST=(8 16 64)
 THREADS_LIST=(32)
 RUNNING_TIME=600
 WARMUP_TIME=600
-WORKLOADS=(oltp_update_index oltp_update_non_index oltp_write_only oltp_read_write oltp_delete oltp_insert)
+WORKLOADS=(oltp_update_index oltp_update_non_index oltp_write_only oltp_delete oltp_insert)
 
 echo "=== Starting sysbench benchamrk: DBMS=$DBMS, TEST=$TEST ==="
 echo "=== WORKLOADS=${WORKLOADS[*]}, TABLE_LIST=${SB_TABLES[*]}, THREADS_LIST=${THREADS_LIST[*]} ==="
@@ -99,7 +99,7 @@ run_postgres_benchmark() {
 }
 
 run_mysql_benchmark() {
-  MY_DATA="$MOUNT_DIR/mysql"
+  MY_DATA="$MOUNT_DIR/mysql_data"
   MY_SOCK="$MY_DATA/mysql.sock"
   DBNAME="main_t${TABLE}"
   ROWS=$(main_rows_per_table "$TABLE")
@@ -107,6 +107,16 @@ run_mysql_benchmark() {
     DBW=1
   else
     DBW=0
+  fi
+
+  if [[ "$FS" == "zfs-16k" ]]; then
+    MY_LOGS="$MOUNT_DIR/mysql_logs"
+    MY_BINLOGS="$MOUNT_DIR/mysql_binlogs"
+    sudo chown -R $MYUSER:$MYUSER $MY_LOGS
+    sudo chown -R $MYUSER:$MYUSER $MY_BINLOGS
+  else
+    MY_LOGS=$MY_DATA
+    MY_BINLOGS=$MY_DATA
   fi
 
   echo "[*] Start mysqld"
@@ -146,7 +156,6 @@ run_mysql_benchmark() {
   sleep 5
   echo "--> Volume Benchmarking $LABEL Done"
   umount_fs $MOUNT_DIR
-  # fi
   echo "--> All Done: $LABEL"
 }
 
