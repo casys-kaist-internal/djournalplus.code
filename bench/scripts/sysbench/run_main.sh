@@ -194,7 +194,7 @@ create_database() {
       $PG_BIN/pg_ctl -D $PG_DATA stop
       ;;
       mysql)
-      MY_DATA="$MOUNT_DIR/mysql"
+      MY_DATA="$MOUNT_DIR/mysql_data"
       MY_SOCK="$MY_DATA/mysql.sock"
       DBNAME="main_t${TABLE}"
       ROWS=$(main_rows_per_table "$TABLE")
@@ -256,7 +256,12 @@ for FS in ${FS_GROUPS[@]}; do
     for WORKLOAD in "${WORKLOADS[@]}"; do
       for THREADS in "${THREADS_LIST[@]}"; do
       echo "=== Setting up FS: $FS in device($DEVICE) with TABLE: $TABLE ==="
-      create_database $FS $DBMS $TABLE
+      if [[ "$FS" == "zfs-16k" || "$FS" == "ext4-dj20" ]]; then
+       restore_filesystem $FS "s$TABLE" $BACKUP_DIR
+      else
+       create_database $FS $DBMS $TABLE
+      fi
+
       for FPW in on off; do
         if [[ "$FPW" == "on" ]]; then
           [[ ! " $FS_FPWON " =~ " $FS " ]] && continue
