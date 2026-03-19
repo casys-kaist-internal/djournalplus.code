@@ -1,0 +1,1 @@
+../../djournalplus-kernel.code/scripts/gdb/vmlinux-gdb.py

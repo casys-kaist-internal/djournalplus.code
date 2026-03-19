@@ -17,9 +17,11 @@ fi
 
 qemu-img create $IMG 100g
 mkfs.ext4 $IMG
+#mkfs.btrfs $IMG
 mkdir -p $DIR
 sudo mount -o loop $IMG $DIR
-sudo debootstrap --arch amd64 jammy $DIR
+#sudo debootstrap --arch amd64 jammy $DIR
+sudo debootstrap --arch amd64 noble $DIR
 sudo umount $DIR
 rmdir $DIR
 qemu-img convert -O qcow2 $IMG $IMG_QCOW2
