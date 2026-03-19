@@ -22,3 +22,6 @@
 [submodule "e2fsprogs"]
 	path = e2fsprogs
 	url = git@github.com:leesecre/e2fsprogs.git
+[submodule "xfsprogs-dev"]
+	path = xfsprogs-dev
+	url = git@github.com:junbongwe/xfsprogs-dev.git
