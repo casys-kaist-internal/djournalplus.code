@@ -10,8 +10,8 @@ fi
 # Filesystem groups
 declare -A FS_GROUPS
 
-FS_GROUPS[on]=""
-FS_GROUPS[off]="tau16G"
+FS_GROUPS[on]="ext4"
+FS_GROUPS[off]="ext4"
 
 source "$TAUFS_BENCH/scripts/common.sh"
 source "$TAUFS_BENCH/scripts/$MODE/api.sh"
@@ -23,12 +23,17 @@ RESULT_DIR="$TAUFS_BENCH_WS/results/tpcc/$MODE/$DATE"
 mkdir -p "$RESULT_DIR"
 
 declare -A REPLACEMENTS
+declare -A IO_REPLACEMENTS
 
-TOTAL_ITERATION=1000000000
+ITERATION=1000000000
 DURATION=10
 RAMPUP=10
-VU_LIST=(32)
-#VU_LIST=(4 8 16 32 48 64)
+# VU_LIST=(4 8 16 32 64)
+VU_LIST=(1 16)
+
+IO_ITERATION=1000000 # 1M
+IO_DURATION=100
+IO_RAMPUP=0
 
 # IO capture helper
 iostat_start() {
@@ -44,17 +49,46 @@ iostat_end() {
     fi
 }
 
+wait_for_hammerdb_completion() {
+    local out_log=$1
+    local vu=$2
+    local hammer_pid=$3
+
+    local count=0
+    while true; do
+        count=$(grep -c "FINISHED SUCCESS" "$out_log" 2>/dev/null || true)
+        echo "[INFO] Completed $count / $vu"
+
+        if (( count >= vu )); then
+            echo "[INFO] All Vusers finished. Stopping hammerdbcli..."
+            kill "$hammer_pid" 2>/dev/null
+            sleep 2
+            if ps -p "$hammer_pid" > /dev/null; then
+                echo "[WARN] hammerdbcli still running, force killing..."
+                kill -9 "$hammer_pid" 2>/dev/null
+            fi
+            echo "[INFO] HammerDB terminated."
+            break
+        fi
+
+        sleep 5
+    done
+}
+
 ## Start here
 # MAIN LOOP
 for FPW in on off; do
   for FS in ${FS_GROUPS[$FPW]}; do
     for WAREHOUSE in "${WAREHOUSE_LIST[@]}"; do
       for VU in "${VU_LIST[@]}"; do
-        LABEL="${MODE}_${FS}_fpw_${FPW}_w${WAREHOUSE}_v${VU}_i${TOTAL_ITERATION}_d${DURATION}_r${RAMPUP}"
+        # LABEL="${MODE}_${FS}_fpw_${FPW}_w${WAREHOUSE}_v${VU}_i${ITERATION}_d${DURATION}_r${RAMPUP}"
+        LABEL="${MODE}_${FS}_fpw_${FPW}_w${WAREHOUSE}_v${VU}"
         OUT_DBSPEC="$RESULT_DIR/${LABEL}.spec"
         OUT_ERR="$RESULT_DIR/${LABEL}.error"
         OUT_LOG="$RESULT_DIR/${LABEL}.log"
-        # IOLOG="$RESULT_DIR/${LABEL}_iostat.log"
+        IO_OUT_ERR="$RESULT_DIR/${LABEL}_iostat.error"
+        IO_OUT_LOG="$RESULT_DIR/${LABEL}_iostat.log"
+        IOSTAT_LOG="$RESULT_DIR/${LABEL}_iostat"
 
         echo "=== Setting up FS: $FS (FPW=$FPW) in device($DEVICE) ==="
         restore_filesystem $FS "w$WAREHOUSE" $BACKUP_DIR
@@ -63,9 +97,17 @@ for FPW in on off; do
         REPLACEMENTS=(
           ["VU"]=$VU
           ["WAREHOUSE"]=$WAREHOUSE
-          ["ITERATIONS"]=$TOTAL_ITERATION
+          ["ITERATIONS"]=$ITERATION
           ["DURATION"]=$DURATION
           ["RAMPUP"]=$RAMPUP
+        )
+
+        IO_REPLACEMENTS=(
+          ["VU"]=$VU
+          ["WAREHOUSE"]=$WAREHOUSE
+          ["ITERATIONS"]=$IO_ITERATION
+          ["DURATION"]=$IO_DURATION
+          ["RAMPUP"]=$IO_RAMPUP
         )
 
         case "$MODE" in
@@ -74,8 +116,6 @@ for FPW in on off; do
             pg_fpw $PG_DATA $FPW
             if [[ "$FPW" == "on" ]]; then
               WALSIZE="16GB"
-            else
-              WALSIZE="2GB"
             fi
             $PG_BIN/pg_ctl -D $PG_DATA start
             pg_wal_max_set $PG_DATA $WALSIZE
@@ -83,11 +123,21 @@ for FPW in on off; do
 
             pushd $HAMMERDB
 
-            echo "--> Benchmarking $LABEL"
+            echo "--> Benchmarking UP $LABEL"
             RUN_TCL="$HAMMERDB/run_${LABEL}.tcl"
             render_tcl_template "$HAMMERDB/run_postgres_template.tcl" $RUN_TCL REPLACEMENTS
             ./hammerdbcli auto $RUN_TCL > "$OUT_LOG" 2> "$OUT_ERR"
 
+            sleep 1
+
+            echo "--> IO Benchmarking $LABEL"
+            RUN_TCL="$HAMMERDB/run_${LABEL}.tcl"
+            render_tcl_template "$HAMMERDB/run_postgres_template.tcl" $RUN_TCL IO_REPLACEMENTS
+            iostat_start $IOSTAT_LOG
+            setsid ./hammerdbcli auto "$RUN_TCL" > "$IO_OUT_LOG" 2> "$IO_OUT_ERR" &
+            HAMMER_PID=$!
+            wait_for_hammerdb_completion "$IO_OUT_LOG" "$VU" "$HAMMER_PID"
+            iostat_end
             popd
 
             $PG_BIN/psql -d postgres -c "CHECKPOINT;"
@@ -95,9 +145,13 @@ for FPW in on off; do
             umount_fs $MOUNT_DIR
           ;;
           mysql)
-            MY_DATA="$MOUNT_DIR/mysql"
+            MY_DATA="$MOUNT_DIR/mysql_data"
             MY_SOCK="$MY_DATA/mysql.sock"
-            DBW=$(FPW="on" && echo "1" || echo "0")
+            if [[ "$FPW" == "on" ]]; then
+              DBW=1
+            else
+              DBW=0
+            fi
             REPLACEMENTS["MYSOCKET"]=$MY_SOCK
 
             echo "[*] Start mysqld"
@@ -108,7 +162,6 @@ for FPW in on off; do
                 --pid-file="$MY_DATA/mysqld.pid" \
                 --bind-address=127.0.0.1 \
                 --skip-networking=0 \
-                --log-error="$MY_DATA/mysqld.err" \
                 --innodb-doublewrite=$DBW &
             wait_for_sock "$MY_SOCK" 60
 
@@ -135,7 +188,6 @@ for FPW in on off; do
     done
     echo "=== FS: $FS Done ==="
     clear_fs $FS $DEVICE
-    sleep 30  # Cooling down
   done
 done
 

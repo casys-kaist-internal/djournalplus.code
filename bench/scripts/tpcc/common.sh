@@ -12,7 +12,7 @@ APP_USER="tpccuser"
 APP_PASS="tpccpass"
 DBNAME="tpccdb"
 
-TARGET_FILESYSTEM="taujournal"
+TARGET_FILESYSTEM="ext4"
 WAREHOUSE_LIST=(2000)
 
 command -v $HAMMERDB/hammerdbcli >/dev/null || { echo "hammerdbcli not found"; exit 1; }

@@ -32,6 +32,7 @@ for FS in ${TARGET_FILESYSTEM}; do
       ["VU"]="$(( $WAREHOUSE < 32 ? $WAREHOUSE : 32 ))"
       ["WAREHOUSE"]="$WAREHOUSE"
     )
+
     LABEL="w${WAREHOUSE}"
     BACKUP_DIR=$TAU_BACKUP_ROOT/tpcc/$MODE
     mkdir -p "$BACKUP_DIR"
@@ -66,7 +67,7 @@ for FS in ${TARGET_FILESYSTEM}; do
       $PG_BIN/pg_ctl -D $PG_DATA stop
       ;;
       mysql)
-      MY_DATA="$MOUNT_DIR/mysql"
+      MY_DATA="$MOUNT_DIR/mysql_data"
       MY_SOCK="$MY_DATA/mysql.sock"
       REPLACEMENTS["MYSOCKET"]=$MY_SOCK
 
@@ -84,6 +85,9 @@ for FS in ${TARGET_FILESYSTEM}; do
           --pid-file="$MY_DATA/mysqld.pid" \
           --bind-address=127.0.0.1 \
           --skip-networking=0 \
+	        --innodb-doublewrite=0 \
+          --innodb_flush_log_at_trx_commit=0 \
+          --sync_binlog=0 \
           --log-error="$MY_DATA/mysqld.err" &
       wait_for_sock "$MY_SOCK" 60
 
