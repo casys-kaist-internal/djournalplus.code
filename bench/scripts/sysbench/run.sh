@@ -211,7 +211,7 @@ iostat_end() {
 
 run_postgres_benchmark() {
   PG_DATA="$MOUNT_DIR/postgres"
-  DBNAME="sbtest_s${SB_TABLES}"
+  DBNAME="sbtest_s${SCALE}"
   ROWS=$(sysbench_rows_per_table "$SB_TABLES")
   pg_fpw $PG_DATA $FPW
   if [[ "$FPW" == "on" ]]; then
@@ -277,7 +277,7 @@ run_postgres_benchmark() {
 run_mysql_benchmark() {
   MY_DATA="$MOUNT_DIR/mysql"
   MY_SOCK="/tmp/mysql.sock"
-  DBNAME="sbtest_s${SB_TABLES}"
+  DBNAME="sbtest_s${SCALE}"
   ROWS=$(sysbench_rows_per_table "$SB_TABLES")
   if [[ "$FPW" == "on" ]]; then
     DBW=1
