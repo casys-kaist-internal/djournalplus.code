@@ -22,5 +22,6 @@ cmake .. \
   -DTAU_JOURNAL=1
 
 make -j"$(nproc)"
+make install
 
 echo "✅ Installed Done"

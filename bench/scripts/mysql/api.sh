@@ -2,17 +2,18 @@
 set -e
 
 ### MySQL Configuration
-MYSQL_BIN="$TAUFS_BENCH/mysql-server/build/bin"
+MYSQL_BIN="$TAUFS_BENCH_WS/mysql/bin"
 MYSQL_PORT=3306
 MYUSER=$TAU_USERNAME
 
 wait_for_sock () {
-  local path="$1" tries="${2:-60}"
+  local path="$1" tries="${2:-60}" errlog="${3:-}"
   for i in $(seq 1 "$tries"); do
     [[ -S "$path" ]] && return 0
     sleep 1
   done
   echo "Socket $path not found (timeout)" >&2
+  cat $errlog
   return 1
 }
 
@@ -35,7 +36,9 @@ log_mysql_specs() {
       SHOW VARIABLES LIKE 'innodb_flush_method';
       SHOW VARIABLES LIKE 'innodb_buffer_pool_size';
       SHOW VARIABLES LIKE 'innodb_log_file_size';
+      SHOW VARIABLES LIKE 'innodb_log_files_in_group';
       SHOW VARIABLES LIKE 'innodb_file_per_table';
+      SHOW VARIABLES LIKE 'innodb_force_recovery';
       SHOW VARIABLES LIKE 'sync_binlog';
     "
 

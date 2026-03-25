@@ -2,11 +2,11 @@
 set -e
 
 usage() {
-    echo "Usage: $0 {mysql|postgres} {main|motiv|io|scale} [FS] [APP_PROTECT]"
+    echo "Usage: $0 {mysql|postgres} {main|motiv|io|scale|persist} [FS] [APP_PROTECT]"
     echo ""
     echo "Arguments:"
     echo "  DBMS         : mysql | postgres"
-    echo "  TEST         : main | motiv | io | scale"
+    echo "  TEST         : main | motiv | io | scale | persist"
     echo "  FS           : ext4 | xfs | zfs | ext4-dj | xfs-cow | tau | all"
     echo "  APP_PROTECT  : on | off"
     echo ""
@@ -33,7 +33,7 @@ case "$DBMS" in
 esac
 
 case "$TEST" in
-    main|motiv|io|scale) ;;
+    main|motiv|io|scale|persist) ;;
     *) usage ;;
 esac
 
@@ -58,6 +58,8 @@ elif [[ "$KERNEL_RAW" == *"6.8.0"* ]]; then
     kernel_type="6.8.0"
 elif [[ "$KERNEL_RAW" == *"6.16.0"* ]]; then
     kernel_type="6.16.0"
+elif [[ "$KERNEL_RAW" == *"6.14.0"* ]]; then
+    kernel_type="6.14.0"
 else
     echo "Unsupported kernel"
     exit 1
@@ -85,6 +87,9 @@ filter_kernel() {
             ;;
         "6.8.0tjournal")
             [[ "$f" == "tau" ]]
+            ;;
+        "6.14.0")
+            [[ "$f" =~ ^(ext4|xfs|zfs-8k|zfs-16k|ext4-dj)$ ]]
             ;;
     esac
 }
@@ -164,6 +169,18 @@ elif [[ "$TEST" == "scale" ]]; then
   RUNNING_TIME=600
   WARMUP_TIME=1800
   WORKLOADS=(oltp_write_only)
+elif [[ "$TEST" == "persist" ]]; then
+  ## Normal test settings
+  TRIES=1
+  SCALE_LIST=(200) # unused
+  THREADS_LIST=(32)
+  SB_TABLES=32
+  RUNNING_TIME=$5
+  WARMUP_TIME=10
+  WORKLOADS=(oltp_write_only)
+  
+  DO_RESTORE=$6
+  DO_SAVE=$7
 fi
 # bulk_insert << error in postgres
 
@@ -194,8 +211,8 @@ iostat_end() {
 
 run_postgres_benchmark() {
   PG_DATA="$MOUNT_DIR/postgres"
-  DBNAME="sbtest_s${SCALE}"
-  ROWS=$(sysbench_rows_per_table "$SCALE")
+  DBNAME="sbtest_s${SB_TABLES}"
+  ROWS=$(sysbench_rows_per_table "$SB_TABLES")
   pg_fpw $PG_DATA $FPW
   if [[ "$FPW" == "on" ]]; then
     if [[ "$TEST" == "motiv" ]]; then  # 10% of database
@@ -227,7 +244,7 @@ run_postgres_benchmark() {
       --tables=$SB_TABLES --table-size=$ROWS  --time=0 \
       --threads=$THREADS --events=$EVENTS run >> "$OUT_LOG"
 
-    $PG_BIN/psql -d postgres -c "CHECKPOINT;"
+    $PG_BIN/psql -h /tmp -d postgres -c "CHECKPOINT;"
     $PG_BIN/pg_ctl -D $PG_DATA stop
     umount_fs $MOUNT_DIR
     iostat_end
@@ -241,7 +258,7 @@ run_postgres_benchmark() {
       --tables=$SB_TABLES --table-size=$ROWS \
       --threads=$THREADS --time=$WARMUP_TIME run
 
-    echo "--> Benchmarking $LABEL"
+    echo "--> Start Benchmarking $LABEL"
     sysbench $WORKLOAD \
       --db-driver=pgsql --auto_inc=on \
       --pgsql-host=127.0.0.1 --pgsql-port="$PG_PORT" \
@@ -251,6 +268,7 @@ run_postgres_benchmark() {
       --percentile=99 --histogram="on" run > "$OUT_LOG"
 
     $PG_BIN/pg_ctl -D $PG_DATA stop
+    echo "--> Benchmarking $LABEL Done"
     umount_fs $MOUNT_DIR
   fi
   sleep 30 # Cooling down
@@ -258,9 +276,9 @@ run_postgres_benchmark() {
 
 run_mysql_benchmark() {
   MY_DATA="$MOUNT_DIR/mysql"
-  MY_SOCK="$MY_DATA/mysql.sock"
-  DBNAME="sbtest_s${SCALE}"
-  ROWS=$(sysbench_rows_per_table "$SCALE")
+  MY_SOCK="/tmp/mysql.sock"
+  DBNAME="sbtest_s${SB_TABLES}"
+  ROWS=$(sysbench_rows_per_table "$SB_TABLES")
   if [[ "$FPW" == "on" ]]; then
     DBW=1
   else
@@ -273,17 +291,21 @@ run_mysql_benchmark() {
     INNODB_BP_SIZE="16G"
   fi
 
+  rm -f /tmp/mysqld.pid $MY_SOCK $MY_SOCK.lock
+
+  $MYSQL_BIN/innochecksum $MY_DATA/$DBNAME/sbtest*.ibd || true
+
   echo "[*] Start mysqld"
   $MYSQL_BIN/mysqld \
       --datadir="$MY_DATA" \
       --socket="$MY_SOCK" \
       --port="$MYSQL_PORT" \
-      --pid-file="$MY_DATA/mysqld.pid" \
+      --pid-file="/tmp/mysqld.pid" \
       --bind-address=127.0.0.1 \
       --skip-networking=0 \
       --innodb_buffer_pool_size=$INNODB_BP_SIZE \
       --innodb-doublewrite=$DBW &
-  wait_for_sock "$MY_SOCK" 60
+      wait_for_sock "$MY_SOCK" 60 "$MY_DATA/mysqld.err"
 
     # --log-error="$MY_DATA/mysqld.err" \
     # --innodb_dedicated_server=1 \
@@ -291,6 +313,7 @@ run_mysql_benchmark() {
     # --innodb_redo_log_capacity=$INNODB_LOG_SIZE \
 
   log_mysql_specs $MY_SOCK $OUT_DBSPEC $DBNAME
+  cat $OUT_DBSPEC
 
   if [[ "$TEST" == "io" ]]; then
     echo "--> Volume Benchmarking $LABEL"
@@ -315,7 +338,7 @@ run_mysql_benchmark() {
      --tables=$SB_TABLES --table-size=$ROWS \
      --threads=$THREADS --time=$WARMUP_TIME --report-interval=60 run
     
-    echo "--> Benchmarking $LABEL"
+    echo "--> Start Benchmarking $LABEL"
     sysbench $WORKLOAD \
       --db-driver=mysql \
       --mysql-user=root --mysql-socket=$MY_SOCK --mysql-db=$DBNAME \
@@ -324,7 +347,7 @@ run_mysql_benchmark() {
 
     $MYSQL_BIN/mysqladmin -uroot --socket="$MY_SOCK" shutdown
     sleep 5
-    echo "--> Volume Benchmarking $LABEL Done"
+    echo "--> Benchmarking $LABEL Done"
     umount_fs $MOUNT_DIR
   fi
   echo "--> All Done: $LABEL"
@@ -346,7 +369,9 @@ for FPW in on off; do
 
             #warming_up_ssd
             echo "=== Setting up FS: $FS (FPW=$FPW) in device($DEVICE) ==="
-            restore_filesystem $FS "s$SCALE" $BACKUP_DIR
+            if [ $DO_RESTORE -gt 0 ]; then
+              restore_filesystem $FS "s$SCALE" $BACKUP_DIR
+            fi
             mount_fs $FS $MOUNT_DIR
             case "$DBMS" in
               postgres)
@@ -357,6 +382,9 @@ for FPW in on off; do
               ;;
             esac
             log_ssd_state $OUT_DBSPEC
+            if [ $DO_SAVE -gt 0 ]; then
+              create_backup_fs_image $FS "s$SCALE" $BACKUP_DIR 1
+            fi
             clear_fs $FS $DEVICE
           done
         done

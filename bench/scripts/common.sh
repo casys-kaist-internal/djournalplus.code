@@ -22,12 +22,14 @@ do_mkfs() {
   warning
   echo "[+] Formatting $FS on $DEVICE"
 
+  sudo zpool destroy -f zfspool || true
+
   case $FS in
     ext4)
       sudo mke2fs -t ext4 -E lazy_itable_init=0,lazy_journal_init=0 -F $DEVICE
       ;;
     ext4-dj)
-      sudo mke2fs -t ext4  -J size=40000 -E lazy_itable_init=0,lazy_journal_init=0 -F $DEVICE
+      sudo mke2fs -t ext4 -E lazy_itable_init=0,lazy_journal_init=0 -F $DEVICE
       ;;
     f2fs)
       sudo mkfs.f2fs -f $DEVICE
@@ -146,11 +148,6 @@ umount_fs() {
   sudo umount $MOUNT_DIR || sudo zfs umount -a
 }
 
-sysbench_rows_per_table () { # SCALE 5000≈80GB, 10000≈160GB, 20000≈320GB
-  local s="$1"
-  echo $(( 4480 * s ))
-}
-
 warming_up_ssd() {
   warning
   echo "Starting 5-minute SSD Scramble on $TAU_DEVICE..."
@@ -215,10 +212,16 @@ create_backup_fs_image()
   local BACKUP_DIR=$3
   case $FS in
     ext4|ext4-dj)
-      sudo partclone.ext4 -c -s $DEVICE -o "$BACKUP_DIR/${FS}_${KEY}.img"
+      sudo partclone.ext4 -c -s $DEVICE -O "$BACKUP_DIR/${FS}_${KEY}.img"
       ;;
+    f2fs)
+      sudo partclone.f2fs -c -s $DEVICE -O "$BACKUP_DIR/${FS}_${KEY}.img"
+      ;;
+    btrfs)
+      sudo partclone.btrfs -c -s $DEVICE -O "$BACKUP_DIR/${FS}_${KEY}.img"
+       ;;
     xfs|xfs-cow)
-      sudo partclone.xfs -c -s $DEVICE -o "$BACKUP_DIR/${FS}_${KEY}.img"
+      sudo partclone.xfs -c -s $DEVICE -O "$BACKUP_DIR/${FS}_${KEY}.img"
       ;;
     zfs|zfs-4k|zfs-8k|zfs-16k)
       mount_fs $FS $MOUNT_DIR
@@ -248,6 +251,12 @@ restore_filesystem() {
     ext4|ext4-dj)
       sudo partclone.ext4 -r -s $BACKUP_DIR/${FS}_${KEY}.img -o $TAU_DEVICE
       ;;
+    f2fs)
+      sudo partclone.f2fs -r -s $BACKUP_DIR/${FS}_${KEY}.img -o $TAU_DEVICE
+      ;;
+    btrfs)
+      sudo partclone.btrfs -r -s $BACKUP_DIR/${FS}_${KEY}.img -o $TAU_DEVICE
+      ;;
     xfs|xfs-cow)
       sudo partclone.xfs -r -s $BACKUP_DIR/${FS}_${KEY}.img -o $TAU_DEVICE
       ;;
@@ -270,12 +279,7 @@ restore_filesystem() {
   drop_caches
 }
 
-# SCALE 5000≈80GB, 10000≈160GB, 20000≈320GB  for PGBENCH in postgres
-# But the differs in sysbench.
-# postgres -- scale 500=17GB, 2500=85GB 5000=170GB, 10000=340GB
-# MySQL    -- scale 500=14GB, 2500=72GB
-
-sysbench_rows_per_table () { 
-  local s="$1"
-  echo $(( 4480 * s ))
+sysbench_rows_per_table () { # 32 tables * 24M rows ~= 6GB
+  local tables="$1"
+  echo $(( 24000000 / tables )) # 320M
 }

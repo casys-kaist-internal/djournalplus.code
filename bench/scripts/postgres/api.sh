@@ -50,14 +50,15 @@ log_pg_specs() {
     date
 
     echo -e "\n-- Version --"
-    sudo -u "$PGUSER" "$PG_BIN/psql" -p "$PG_PORT" -d postgres -c "SELECT version();"
+    sudo -u "$PGUSER" "$PG_BIN/psql" -h /tmp -p "$PG_PORT" -d postgres -c "SELECT version();"
 
     echo -e "\n-- Settings (fsync/full_page_writes/synchronous_commit/wal_level) --"
-    sudo -u "$PGUSER" "$PG_BIN/psql" -p "$PG_PORT" -d postgres -c "
+    sudo -u "$PGUSER" "$PG_BIN/psql" -h /tmp -p "$PG_PORT" -d postgres -c "
       SHOW fsync;
       SHOW full_page_writes;
       SHOW synchronous_commit;
       SHOW wal_level;
+      SHOW wal_segment_size;
       SHOW max_wal_size;
       SHOW shared_buffers;
       SHOW work_mem;
@@ -65,17 +66,18 @@ log_pg_specs() {
     "
 
     echo -e "\n-- Database Size --"
-    sudo -u "$PGUSER" "$PG_BIN/psql" -p "$PG_PORT" -d postgres -c \
+    sudo -u "$PGUSER" "$PG_BIN/psql" -h /tmp -p "$PG_PORT" -d postgres -c \
       "SELECT pg_size_pretty(pg_database_size('${dbname}')) AS size;"
 
     echo -e "\n-- Top 10 Tables (size) --"
-    sudo -u "$PGUSER" "$PG_BIN/psql" -p "$PG_PORT" -d "${dbname}" -c "
+    sudo -u "$PGUSER" "$PG_BIN/psql" -h /tmp -p "$PG_PORT" -d "${dbname}" -c "
       SELECT relname, pg_size_pretty(pg_total_relation_size(relid)) AS total
       FROM pg_catalog.pg_statio_user_tables
       ORDER BY pg_total_relation_size(relid) DESC
       LIMIT 10;
     "
   } >> "$out_log" 2>&1
+  cat "$out_log"
 }
 
 pg_reset_wal_stats() {
@@ -83,7 +85,7 @@ pg_reset_wal_stats() {
   local pgport="$2"
   local pgbin="$3"
   echo "--> Resetting WAL stats"
-  sudo -u "$pguser" "$pgbin/psql" -p "$pgport" -d postgres -c "SELECT pg_stat_reset_shared('wal');"
+  sudo -u "$pguser" "$pgbin/psql" -h /tmp -p "$pgport" -d postgres -c "SELECT pg_stat_reset_shared('wal');"
 }
 
 pg_reset_io_stats() {
@@ -91,7 +93,7 @@ pg_reset_io_stats() {
   local pgport="$2"
   local pgbin="$3"
   echo "--> Resetting WAL stats"
-  sudo -u "$pguser" "$pgbin/psql" -p "$pgport" -d postgres -c "SELECT pg_stat_reset_shared('io');"
+  sudo -u "$pguser" "$pgbin/psql" -h /tmp -p "$pgport" -d postgres -c "SELECT pg_stat_reset_shared('io');"
 }
 
 log_pg_wal_status() {
@@ -110,7 +112,7 @@ log_pg_wal_status() {
     sleep "$interval"
 
     local IFS='|'
-    read ts bytes fpi <<< $(sudo -u "$PGUSER" "$PG_BIN/psql" -AtX -p "$PG_PORT" -d postgres -c \
+    read ts bytes fpi <<< $(sudo -u "$PGUSER" "$PG_BIN/psql" -AtX -h /tmp -p "$PG_PORT" -d postgres -c \
       "SELECT to_char(now(),'HH24:MI:SS'), wal_bytes, wal_fpi FROM pg_stat_wal;")
 
     if (( prev_bytes > 0 )); then
@@ -141,7 +143,7 @@ pg_io_stats_total() {
   local out_log="$1"
   echo "" >> "$out_log"
   echo "===== Final Summary (pg_stat_wal) =====" >> "$out_log"
-  sudo -u "$PGUSER" "$PG_BIN/psql" -AtX -p "$PG_PORT" -d postgres -c "
+  sudo -u "$PGUSER" "$PG_BIN/psql" -AtX -h /tmp -p "$PG_PORT" -d postgres -c "
     SELECT
       wal_records,
       wal_fpi,
@@ -152,7 +154,7 @@ pg_io_stats_total() {
 
   echo "" >> "$out_log"
   echo "===== Final Summary (pg_stat_io, WAL) =====" >> "$out_log"
-  sudo -u "$PGUSER" "$PG_BIN/psql" -AtX -p "$PG_PORT" -d postgres -c "
+  sudo -u "$PGUSER" "$PG_BIN/psql" -AtX -h /tmp -p "$PG_PORT" -d postgres -c "
     SELECT
       COALESCE(SUM(write_bytes)/1024/1024,0) AS wal_io_mb,
       COALESCE(SUM(fsyncs),0) AS wal_fsyncs

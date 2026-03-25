@@ -3,16 +3,18 @@ set -e
 
 MODE="${1:-}"  # postgres | mysql
 if [[ "$MODE" != "postgres" && "$MODE" != "mysql" ]]; then
-  echo "Usage: $0 {postgres|mysql}"
+  echo "Usage: $0 {postgres|mysql} [FS]"
   exit 1
 fi
 
 # Motivation Test
-SCALE_LIST=(2500)
-TARGET_FILESYSTEM="ext4 xfs zfs-8k ext4-dj"
-
+# SCALE_LIST=(2500)
+# TARGET_FILESYSTEM="ext4 xfs zfs-8k ext4-dj"
 # SCALE_LIST=(5000)
 # TARGET_FILESYSTEM="ext4"
+
+SCALE_LIST=(200)
+TARGET_FILESYSTEM="$2"
 SB_TABLES=32
 
 source "$TAUFS_BENCH/scripts/common.sh"
@@ -20,13 +22,18 @@ source "$TAUFS_BENCH/scripts/$MODE/api.sh"
 
 BACKUP_DIR=$TAU_BACKUP_ROOT/sysbench/$MODE
 
-
 command -v sysbench >/dev/null || { echo "sysbench not found"; exit 1; }
 command -v partclone.ext4 >/dev/null || { echo "partclone.ext4 not found"; exit 1; }
 mkdir -p "$BACKUP_DIR"
 
 for FS in ${TARGET_FILESYSTEM}; do
   for SCALE in "${SCALE_LIST[@]}"; do
+
+    if [ -f "$BACKUP_DIR/${FS}_s${SCALE}.img" ]; then
+      echo "Image already exists: $BACKUP_DIR/${FS}_s${SCALE}.img"
+      continue
+    fi
+
     echo "=== Setting up FS: $FS in device($DEVICE) ==="
     do_mkfs $FS $DEVICE
     mount_fs $FS $MOUNT_DIR
@@ -39,7 +46,7 @@ for FS in ${TARGET_FILESYSTEM}; do
       PG_DATA="$MOUNT_DIR/postgres"
       sudo mkdir -p $PG_DATA
       sudo chown -R $PGUSER:$PGUSER $PG_DATA
-      $PG_BIN/initdb -D $PG_DATA
+      $PG_BIN/initdb --data-checksums -D $PG_DATA
       pg_fpw $PG_DATA "off"
       $PG_BIN/pg_ctl -D $PG_DATA start
 
@@ -59,7 +66,7 @@ for FS in ${TARGET_FILESYSTEM}; do
       ;;
       mysql)
       MY_DATA="$MOUNT_DIR/mysql"
-      MY_SOCK="$MY_DATA/mysql.sock"
+      MY_SOCK="/tmp/mysql.sock"
       DBNAME="sbtest_s${SCALE}"
       ROWS=$(sysbench_rows_per_table "$SCALE")
 
@@ -74,7 +81,7 @@ for FS in ${TARGET_FILESYSTEM}; do
           --datadir="$MY_DATA" \
           --socket="$MY_SOCK" \
           --port="$MYSQL_PORT" \
-          --pid-file="$MY_DATA/mysqld.pid" \
+          --pid-file="/tmp/mysqld.pid" \
           --bind-address=127.0.0.1 \
           --skip-networking=0 \
           --innodb-doublewrite=0 \
