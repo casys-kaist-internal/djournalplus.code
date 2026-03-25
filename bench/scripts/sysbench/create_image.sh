@@ -41,7 +41,7 @@ for FS in ${TARGET_FILESYSTEM}; do
     case "$MODE" in
       postgres)
       DBNAME="sbtest_s${SCALE}"
-      ROWS=$(sysbench_rows_per_table "$SCALE")
+      ROWS=$(sysbench_rows_per_table "$SB_TABLES")
 
       PG_DATA="$MOUNT_DIR/postgres"
       sudo mkdir -p $PG_DATA
@@ -68,7 +68,7 @@ for FS in ${TARGET_FILESYSTEM}; do
       MY_DATA="$MOUNT_DIR/mysql"
       MY_SOCK="/tmp/mysql.sock"
       DBNAME="sbtest_s${SCALE}"
-      ROWS=$(sysbench_rows_per_table "$SCALE")
+      ROWS=$(sysbench_rows_per_table "$SB_TABLES")
 
       echo "[*] Initialize MySQL datadir"
       sudo mkdir -p $MY_DATA
