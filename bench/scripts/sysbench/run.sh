@@ -229,7 +229,7 @@ run_postgres_benchmark() {
   fi
   pg_wal_max_set $PG_DATA $WALSIZE
   # pg_wal_level $PG_DATA $WALLEVEL # not used
-  $PG_BIN/pg_ctl -D $PG_DATA start
+  $PG_BIN/pg_ctl -D $PG_DATA start -t 120
   # pg_reset_wal_stats "$PGUSER" "$PG_PORT" "$PG_BIN" # not used
   # pg_reset_io_stats "$PGUSER" "$PG_PORT" "$PG_BIN" # not used
 

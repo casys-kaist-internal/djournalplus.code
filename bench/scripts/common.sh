@@ -279,7 +279,7 @@ restore_filesystem() {
   drop_caches
 }
 
-sysbench_rows_per_table () { # 32 tables * 24M rows ~= 6GB
+sysbench_rows_per_table () { # 16M rows (/ 32 tables)~= 4GB
   local tables="$1"
-  echo $(( 24000000 / tables )) # 320M
+  echo $(( 16000000 / tables ))
 }
