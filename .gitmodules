@@ -25,3 +25,9 @@
 [submodule "xfsprogs-dev"]
 	path = xfsprogs-dev
 	url = git@github.com:junbongwe/xfsprogs-dev.git
+[submodule "crashmonkey"]
+	path = crashmonkey
+	url = git@github.com:leesecre/crashmonkey.git
+[submodule "tools/crashmonkey"]
+	path = tools/crashmonkey
+	url = git@github.com:leesecre/crashmonkey.git
