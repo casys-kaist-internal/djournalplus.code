@@ -6,6 +6,11 @@ PG_BIN="$TAUFS_BENCH_WS/pg_install/bin"
 PG_PORT=5432
 PGUSER=$TAU_USERNAME
 
+# Fixed server settings shared by every configuration (EVAL_PLAN §2.2).
+# The build itself is stock: 1 GB relation segments, 8 KiB blocks.
+PG_SHARED_BUFFERS=16GB   # 25% of 64 GB DRAM
+PG_MAX_WAL_SIZE=16GB     # same for FPW on and off
+
 # Call before starting PostgreSQL
 pg_conf_set() {
   local pgdata="$1" key="$2" val="$3" conf="$1/postgresql.conf"
@@ -38,6 +43,11 @@ pg_io_stat() {
   local pgdata="$1"
   pg_conf_set "$pgdata" "track_io_timing" "on"
 }
+pg_fixed_settings() {
+  local pgdata="$1"
+  pg_conf_set "$pgdata" "shared_buffers" "$PG_SHARED_BUFFERS"
+  pg_conf_set "$pgdata" "max_wal_size" "$PG_MAX_WAL_SIZE"
+}
 # sed -i "s/^#*max_connections = .*/max_connections = 200/" "$PG_DATA/postgresql.conf"
 
 log_pg_specs() {
@@ -62,6 +72,10 @@ log_pg_specs() {
       SHOW shared_buffers;
       SHOW work_mem;
       SHOW maintenance_work_mem;
+      SHOW checkpoint_timeout;
+      SHOW segment_size;
+      SHOW block_size;
+      SHOW data_checksums;
     "
 
     echo -e "\n-- Database Size --"
@@ -76,6 +90,15 @@ log_pg_specs() {
       LIMIT 10;
     "
   } >> "$out_log" 2>&1
+}
+
+# WAL volume, full-page images (the FPW cost) and checkpointer writes, one line.
+log_pg_io_counters() {
+  local tag="$1" out="$2"
+  echo "$tag $(sudo -u "$PGUSER" "$PG_BIN/psql" -AtX -p "$PG_PORT" -d postgres -c "
+    SELECT 'wal_records=' || w.wal_records || ' wal_fpi=' || w.wal_fpi
+        || ' wal_bytes=' || w.wal_bytes || ' ckpt_buffers_written=' || c.buffers_written
+    FROM pg_stat_wal w, pg_stat_checkpointer c;")" >> "$out"
 }
 
 pg_reset_wal_stats() {

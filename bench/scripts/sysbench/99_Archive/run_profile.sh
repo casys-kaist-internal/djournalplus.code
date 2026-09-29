@@ -38,16 +38,17 @@ echo "  Environment check complete. Ready to proceed."
 echo "=================================================="
 
 # Or you can just hardcode like below:
-#FS_GROUPS="ext4 xfs zfs-16k ext4-dj20"
-FS_GROUPS="ext4-tau"
+FS_GROUPS="ext4"
 FS_FPWON="ext4 xfs"
 FS_FPWOFF="ext4 ext4-tau xfs xfs-tau zfs-16k ext4-dj20"
 
 TRIES=1
 SB_TABLES=(16)
-THREADS_LIST=(32)
+#THREADS_LIST=(1 8 16 32 64)
+THREADS_LIST=(32 64)
+RUNNING_TIME=600
+WARMUP_TIME=600
 WORKLOADS=(oltp_update_index oltp_update_non_index oltp_write_only oltp_delete oltp_insert)
-EVENTS_BASE=1000000
 
 echo "=== Starting sysbench benchamrk: DBMS=$DBMS, TEST=$TEST ==="
 echo "=== WORKLOADS=${WORKLOADS[*]}, TABLE_LIST=${SB_TABLES[*]}, THREADS_LIST=${THREADS_LIST[*]} ==="
@@ -60,24 +61,6 @@ DATE=$(date +%Y%m%d_%H%M%S)
 RESULT_DIR="$TAUFS_BENCH_WS/results/sysbench/$DBMS/$DATE"
 mkdir -p "$RESULT_DIR"
 
-# IO capture helper
-iostat_start() {
-    DEVICE_NAME=$(basename "$TAU_DEVICE")
-    LOG_FILE=$1
-    SEARCH_PATTERN=$(echo "$DEVICE_NAME" | sed -E 's/(nvme[0-9]+)(n[0-9]+)/\1(c[0-9]+)?\2/')
-
-    echo "=== $DEVICE_NAME I/O 상태 ==="
-    iostat -dmx 1 | grep -E "Device|$SEARCH_PATTERN"  > "$LOG_FILE" &
-    # iostat -dmx 1 "$DEVICE_NAME" > "$LOG_FILE" &
-    IOSTAT_PID=$!
-}
-iostat_end() {
-    if [[ -n "$IOSTAT_PID" ]]; then
-        kill "$IOSTAT_PID"
-        wait "$IOSTAT_PID" 2>/dev/null || true
-    fi
-}
-
 run_postgres_benchmark() {
   PG_DATA="$MOUNT_DIR/postgres"
   DBNAME="main_t${TABLE}"
@@ -88,22 +71,31 @@ run_postgres_benchmark() {
     pg_wal_max_set $PG_DATA $WALSIZE
   fi
 
+  # pg_wal_level $PG_DATA $WALLEVEL # not used
   $PG_BIN/pg_ctl -D $PG_DATA start
-  
-  log_pg_specs "$OUT_DBSPEC" "$DBNAME" "$TEST"
-  echo "--> Volume Benchmarking $LABEL"
-  iostat_start $OUT_IOSTAT
-  sysbench $WORKLOAD \
-    --db-driver=pgsql --auto_inc=on \
-    --pgsql-host=127.0.0.1 --pgsql-port="$PG_PORT" \
-    --pgsql-user="$PGUSER" --pgsql-db="$DBNAME" \
-    --tables=$TABLE --table-size=$ROWS  --time=0 \
-    --threads=$THREADS --events=$EVENTS run >> "$OUT_LOG"
+  # pg_reset_wal_stats "$PGUSER" "$PG_PORT" "$PG_BIN" # not used
+  # pg_reset_io_stats "$PGUSER" "$PG_PORT" "$PG_BIN" # not used
 
-  $PG_BIN/psql -d postgres -c "CHECKPOINT;"
+  log_pg_specs "$OUT_DBSPEC" "$DBNAME" "$TEST"
+  echo "--> Benchmarking $LABEL warming up"
+  sysbench $WORKLOAD \
+      --db-driver=pgsql --auto_inc=on \
+      --pgsql-host=127.0.0.1 --pgsql-port="$PG_PORT" \
+      --pgsql-user="$PGUSER" --pgsql-db="$DBNAME" \
+      --tables=$TABLE --table-size=$ROWS \
+      --threads=$THREADS --time=$WARMUP_TIME run
+
+  echo "--> Benchmarking $LABEL"
+  sysbench $WORKLOAD \
+      --db-driver=pgsql --auto_inc=on \
+      --pgsql-host=127.0.0.1 --pgsql-port="$PG_PORT" \
+      --pgsql-user="$PGUSER" --pgsql-db="$DBNAME" \
+      --tables=$TABLE --table-size=$ROWS \
+      --threads=$THREADS --time=$RUNNING_TIME --report-interval=10 \
+      --percentile=99 --histogram="on" run > "$OUT_LOG"
+
   $PG_BIN/pg_ctl -D $PG_DATA stop
   umount_fs $MOUNT_DIR
-  iostat_end
 }
 
 run_mysql_benchmark() {
@@ -135,6 +127,7 @@ run_mysql_benchmark() {
       --pid-file="$MY_DATA/mysqld.pid" \
       --bind-address=127.0.0.1 \
       --skip-networking=0 \
+      --innodb_flush_method=fsync \
       --innodb_doublewrite=$DBW &
   wait_for_sock "$MY_SOCK" 60
 
@@ -146,20 +139,25 @@ run_mysql_benchmark() {
 
   log_mysql_specs $MY_SOCK $OUT_DBSPEC $DBNAME
 
-  echo "--> Volume Benchmarking $LABEL"
-  iostat_start $OUT_IOSTAT
+  echo "--> Benchmarking $LABEL warming up"
   sysbench $WORKLOAD \
     --db-driver=mysql \
     --mysql-user=root --mysql-socket=$MY_SOCK --mysql-db=$DBNAME \
-    --tables=$TABLE --table-size=$ROWS --time=0 \
-    --threads=$THREADS --events=$EVENTS run >> "$OUT_LOG"
+    --tables=$TABLE --table-size=$ROWS \
+    --threads=$THREADS --time=$WARMUP_TIME --report-interval=60 run
 
-  $MYSQL_BIN/mysql -uroot --socket="$MY_SOCK" -e "SET GLOBAL innodb_fast_shutdown=1; FLUSH LOGS;"
+  echo "--> Benchmarking $LABEL"
+  sysbench $WORKLOAD \
+    --db-driver=mysql \
+    --mysql-user=root --mysql-socket=$MY_SOCK --mysql-db=$DBNAME \
+    --tables=$TABLE --table-size=$ROWS --percentile=99 --histogram="on" \
+    --threads=$THREADS --time=$RUNNING_TIME --report-interval=30 run > "$OUT_LOG"
+
   $MYSQL_BIN/mysqladmin -uroot --socket="$MY_SOCK" shutdown
   sleep 5
   echo "--> Volume Benchmarking $LABEL Done"
   umount_fs $MOUNT_DIR
-  iostat_end
+  echo "--> All Done: $LABEL"
 }
 
 create_database() {
@@ -259,7 +257,7 @@ for FS in ${FS_GROUPS[@]}; do
     for WORKLOAD in "${WORKLOADS[@]}"; do
       for THREADS in "${THREADS_LIST[@]}"; do
       echo "=== Setting up FS: $FS in device($DEVICE) with TABLE: $TABLE ==="
-      restore_filesystem $FS "s$TABLE" $BACKUP_DIR
+      # restore_filesystem $FS "s$TABLE" $BACKUP_DIR
 
       for FPW in on off; do
         if [[ "$FPW" == "on" ]]; then
@@ -272,9 +270,8 @@ for FS in ${FS_GROUPS[@]}; do
             LABEL="${DBMS}_${WORKLOAD}_${FS}_fpw_${FPW}_t${TABLE}_c${THREADS}_r${R}"
             OUT_DBSPEC="$RESULT_DIR/${LABEL}.spec"
             OUT_LOG="$RESULT_DIR/${LABEL}.log"
-            OUT_IOSTAT="$RESULT_DIR/${LABEL}.iostat"
             # OUT_IOSTAT="$RESULT_DIR/${LABEL}.iostat"
-            EVENTS=$((EVENTS_BASE * THREADS))
+            # EVENTS=$((EVENTS_BASE * THREADS))
 
             mount_fs $FS $MOUNT_DIR
             case "$DBMS" in
@@ -288,7 +285,7 @@ for FS in ${FS_GROUPS[@]}; do
             log_ssd_state $OUT_DBSPEC
           done
         done # FPW
-        clear_fs $FS $DEVICE
+        # clear_fs $FS $DEVICE
       done # THREADS
     done # WORKLOADS
   done # TABLES

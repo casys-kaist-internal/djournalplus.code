@@ -12,7 +12,8 @@ sudo apt update
 sudo apt install -y pkg-config build-essential libreadline-dev zlib1g-dev flex bison libxml2-dev libxslt1-dev libssl-dev
 
 make distclean
-./configure --prefix=$TAUFS_BENCH_WS/pg_install --with-segsize=32
+# Stock relation segment size (1 GB) and block size (8 KiB).
+./configure --prefix=$TAUFS_BENCH_WS/pg_install
 make -j$(nproc)
 make install
 

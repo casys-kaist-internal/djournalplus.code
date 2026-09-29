@@ -44,7 +44,7 @@ elif [[ "$TEST" == "main" ]]; then
   THREADS_LIST=(32)
   RUNNING_TIME=600
   WARMUP_TIME=1800
-  WORKLOADS=(oltp_insert oltp_read_write oltp_write_only)
+  WORKLOADS=(oltp_insert oltp_update_index oltp_delete oltp_write_only oltp_read_write)
 elif [[ "$TEST" == "io" ]]; then
   TRIES=1
   SCALE_LIST=(5000)

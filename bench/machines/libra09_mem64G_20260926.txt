@@ -1,0 +1,72 @@
+# machine_info 2026-09-26 07:09:55+00:00
+
+## system
+host:                    libra09
+product:                 Supermicro SYS-1029U-TR4
+bios:                    3.3 (02/21/2020)
+os:                      Ubuntu 24.04.1 LTS
+kernel:                  6.8.0+
+cmdline:                 BOOT_IMAGE=/vmlinuz-6.8.0+ root=/dev/mapper/ubuntu--vg--1-ubuntu--lv ro mem=64G
+
+## cpu
+model:                   Intel(R) Xeon(R) Gold 5218 CPU @ 2.30GHz
+topology:                2 sockets x 16 cores x 1 threads
+smt:                     control=on active=0
+microcode:               0x5003901
+freq_driver:             intel_cpufreq (intel_pstate passive)
+governor:                32 performance
+freq_khz:                min=1000000 max=3900000 hw_max=3900000
+turbo:                   on
+energy_perf_bias:        6
+cstates:                 intel_idle: POLL=on C1=on C1E=on C6=on 
+clocksource:             tsc
+vuln.gather_data_sampling: Mitigation: Microcode
+vuln.itlb_multihit:      KVM: Mitigation: VMX disabled
+vuln.l1tf:               Not affected
+vuln.mds:                Not affected
+vuln.meltdown:           Not affected
+vuln.mmio_stale_data:    Mitigation: Clear CPU buffers; SMT disabled
+vuln.retbleed:           Mitigation: Enhanced IBRS
+vuln.spec_rstack_overflow: Not affected
+vuln.spec_store_bypass:  Mitigation: Speculative Store Bypass disabled via prctl
+vuln.spectre_v1:         Mitigation: usercopy/swapgs barriers and __user pointer sanitization
+vuln.spectre_v2:         Mitigation: Enhanced / Automatic IBRS, IBPB: conditional, RSB filling, PBRSB-eIBRS: SW sequence
+vuln.srbds:              Not affected
+vuln.tsx_async_abort:    Mitigation: TSX disabled
+
+## memory
+memtotal:                60.5 GiB
+node0:                   60.5 GiB, cpus 0-15
+node1:                   0.0 GiB, cpus 16-31
+dimms:                   12 x 16 GB @ 2666 MT/s 
+numa_balancing:          1
+thp:                     enabled=madvise defrag=madvise shmem=never
+hugepages:               0
+ksm:                     0
+swap:                    /swap.img 8G swappiness=60
+dirty:                   ratio=20 background=10 expire_cs=3000 writeback_cs=500
+vm_other:                overcommit=0 min_free_kbytes=67584 zone_reclaim=0
+
+## storage
+nvme_multipath:          Y
+test_device:             nvme0n1
+nvme0:                   SAMSUNG MZPLJ3T2HBJR-00007, fw EPK9GB5Q, numa 1, pcie Speed 8GT/s (downgraded) Width x8, 3200 GB, cache write through
+nvme0.queue:             sched=none nr_requests=1023 read_ahead_kb=128 max_sectors_kb=128
+nvme1:                   PM1753V8TLC, fw RPS90E59, numa 1, pcie Speed 8GT/s (downgraded) Width x4, 7681 GB, cache write through
+nvme1.queue:             sched=none nr_requests=1023 read_ahead_kb=128 max_sectors_kb=128
+nvme2:                   Samsung SSD 990 PRO 2TB, fw 4B2QJXD7, numa 0, pcie Speed 8GT/s (downgraded) Width x4, 2000 GB, cache write back
+nvme2.queue:             sched=none nr_requests=1023 read_ahead_kb=128 max_sectors_kb=128
+nvme3:                   Samsung SSD 990 PRO 4TB, fw 4B2QJXD7, numa 0, pcie Speed 8GT/s (downgraded) Width x4, 4000 GB, cache write back
+nvme3.queue:             sched=none nr_requests=1023 read_ahead_kb=128 max_sectors_kb=128
+
+## services
+services:                irqbalance=inactive tuned=inactive thermald=inactive 
+
+## software
+postgres:                postgres (PostgreSQL) 17.5
+mysql:                   8.4.5 for Linux on x86_64 (Source distribution)
+sysbench:                sysbench 1.0.20
+partclone:               v0.3.27 (0882b2de94f05d3ad81304872cbd3dff02105239) 
+stock_mkfs:              mke2fs 1.47.0 (5-Feb-2023), mkfs.xfs version 6.6.0
+system_mkfs:             mke2fs 1.47.0 (5-Feb-2023), mkfs.xfs version 6.16.0 (tau forks)
+zfs:                     module not loaded / userland 2.2.2-0ubuntu9.5

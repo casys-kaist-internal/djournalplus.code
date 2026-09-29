@@ -41,7 +41,7 @@ esac
 [[ -z "$APP" ]] && APP="all"
 
 case "$FS" in
-    ext4|xfs|zfs-8k|zfs-16k|ext4-dj|xfs-cow|tau|all) ;;
+    ext4|xfs|zfs-8k|zfs-16k|ext4-dj|xfs-cow|tau32G|all) ;;
     *) usage ;;
 esac
 
@@ -66,13 +66,13 @@ fi
 declare -A FS_GROUPS
 
 if [[ "$DBMS" == "mysql" ]]; then
-    base_off=("ext4" "xfs" "zfs-16k" "ext4-dj" "xfs-cow")
+    base_off=("ext4" "xfs" "zfs-16k" "ext4-dj" "xfs-cow" "tau32G")
 else
-    base_off=("ext4" "xfs" "zfs-8k" "ext4-dj")
+    base_off=("ext4" "xfs" "zfs-8k" "ext4-dj" "tau32G")
 fi
 
 base_on=("ext4" "xfs")
-tau_only=("tau")
+tau_only=("tau32G")
 
 filter_kernel() {
     local f="$1"
@@ -84,7 +84,7 @@ filter_kernel() {
             [[ "$f" == "xfs-cow" ]]
             ;;
         "6.8.0tjournal")
-            [[ "$f" == "tau" ]]
+            [[ "$f" == "tau32G" ]]
             ;;
     esac
 }
@@ -150,6 +150,8 @@ elif [[ "$TEST" == "main" ]]; then
   RUNNING_TIME=600
   WARMUP_TIME=1800
   WORKLOADS=(oltp_insert oltp_update_index oltp_delete oltp_write_only oltp_read_write)
+  #WORKLOADS=(oltp_delete oltp_write_only)
+  #WORKLOADS=(oltp_delete oltp_write_only)
 elif [[ "$TEST" == "io" ]]; then
   TRIES=1
   SCALE_LIST=(5000)
@@ -282,9 +284,11 @@ run_mysql_benchmark() {
       --bind-address=127.0.0.1 \
       --skip-networking=0 \
       --innodb_buffer_pool_size=$INNODB_BP_SIZE \
+      --innodb_flush_method=fsync \
       --innodb-doublewrite=$DBW &
   wait_for_sock "$MY_SOCK" 60
 
+    # --innodb_flush_method=fsync \
     # --log-error="$MY_DATA/mysqld.err" \
     # --innodb_dedicated_server=1 \
     # --disable-log-bin \
@@ -315,6 +319,9 @@ run_mysql_benchmark() {
      --tables=$SB_TABLES --table-size=$ROWS \
      --threads=$THREADS --time=$WARMUP_TIME --report-interval=60 run
     
+    #sudo sh -c 'echo "Benchmarking start" > /dev/kmsg'
+    #sudo sh -c "echo 1 > /sys/kernel/debug/tauperf/enable"
+
     echo "--> Benchmarking $LABEL"
     sysbench $WORKLOAD \
       --db-driver=mysql \
@@ -322,6 +329,7 @@ run_mysql_benchmark() {
       --tables=$SB_TABLES --table-size=$ROWS --percentile=99 --histogram="on" \
       --threads=$THREADS --time=$RUNNING_TIME --report-interval=30 run > "$OUT_LOG"
 
+    #sudo sh -c "echo 0 > /sys/kernel/debug/tauperf/enable"
     $MYSQL_BIN/mysqladmin -uroot --socket="$MY_SOCK" shutdown
     sleep 5
     echo "--> Volume Benchmarking $LABEL Done"
@@ -366,4 +374,3 @@ for FPW in on off; do
   done
 done
 echo "=== All benchmarks completed ==="
-

@@ -18,8 +18,8 @@ export PATH=$TAUFS_BENCH_WS/pg_install/bin:$PATH
 export PATH=$TAUFS_BENCH/mysql-server/build/bin/:$PATH
 
 # Test Device
-# TARGET_DISK="Samsung SSD 980 PRO"
 TARGET_DISK="SAMSUNG MZPLJ3T2HBJR-00007"
+#TARGET_DISK="PM1753V8TLC"
 TAU_DEVICE=$(nvme list | awk -v model="$TARGET_DISK" '$0 ~ model {print $1; exit}')
 if [[ -z "$TAU_DEVICE" ]]; then
   echo "[ERR] cannot find device: $TARGET_DISK" >&2
@@ -31,6 +31,7 @@ export TAU_DEVICE_NAME
 
 # Backup Device for file system images
 BACKUP_DISK="PM1753V8TLC"
+#BACKUP_DISK="Samsung SSD 990 PRO 4TB"
 TAU_BACKUP_DEVICE=$(nvme list | awk -v model="$BACKUP_DISK" '$0 ~ model {print $1}')
 echo "TAU_BACKUP_DEVICE set to: $TAU_BACKUP_DEVICE"
 if [[ -z "$TAU_BACKUP_DEVICE" ]]; then

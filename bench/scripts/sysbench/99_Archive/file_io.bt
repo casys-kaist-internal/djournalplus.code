@@ -1,0 +1,17 @@
+#!/bin/bash
+# file_io.sh - 벤치마크 전후 MySQL 프로세스의 write bytes 비교
+
+MYSQL_PID=$(pgrep -x mysqld)
+
+# 시작 시점
+START=$(cat /proc/$MYSQL_PID/io | grep write_bytes | awk '{print $2}')
+
+# --- 여기서 벤치마크 실행 ---
+"$@"
+
+# 종료 시점
+END=$(cat /proc/$MYSQL_PID/io | grep write_bytes | awk '{print $2}')
+
+DIFF=$((END - START))
+echo "=== MySQL Process Write I/O ==="
+echo "Total: $DIFF bytes ($((DIFF / 1048576)) MB)"

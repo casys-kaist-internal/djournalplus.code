@@ -11,7 +11,8 @@ INSTALL_PREFIX="$TAUFS_BENCH_WS/mysql"
 
 sudo apt update
 sudo apt-get install -y build-essential cmake ninja-build git bison pkg-config \
-  libncurses5-dev libssl-dev zlib1g-dev libaio-dev libtirpc-dev libsasl2-dev libudev-dev
+  libncurses5-dev libssl-dev zlib1g-dev libaio-dev libtirpc-dev libsasl2-dev libudev-dev \
+  libnuma-dev
 
 mkdir -p "$SRC_DIR/build"
 cd "$SRC_DIR/build"
@@ -19,7 +20,8 @@ cd "$SRC_DIR/build"
 cmake .. \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX="$INSTALL_PREFIX" \
-  -DTAU_JOURNAL=1
+  -DTAU_JOURNAL=1 \
+  -DWITH_NUMA=ON   # innodb_numa_interleave (8.4 default ON) exists only with NUMA support
 
 make -j"$(nproc)"
 

@@ -5,4 +5,9 @@ bench/workspace/*
 !bench/workspace/.gitkeep
 configs/
 
+# disk images: VM disks, partclone FS images, scratch devices
+*.img
+*.raw
+tools/qemu/vm_imgs/
 
+__pycache__/

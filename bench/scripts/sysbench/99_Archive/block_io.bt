@@ -1,0 +1,14 @@
+tracepoint:block:block_rq_issue
+/args->rwbs == "W" || args->rwbs == "WS" || args->rwbs == "WF" || args->rwbs == "WB"/
+{
+    @write_bytes[comm] += (uint64)args->nr_sector * 512;
+    @total_write       += (uint64)args->nr_sector * 512;
+}
+
+END {
+    printf("\n=== Block Write I/O ===\n");
+    printf("Total Write: %lld bytes (%lld MB)\n",
+           @total_write, @total_write / 1048576);
+    printf("\nWrite breakdown by process:\n");
+    print(@write_bytes);
+}

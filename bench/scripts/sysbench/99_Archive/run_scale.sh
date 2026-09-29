@@ -26,7 +26,7 @@ TEST="scale"
 declare -A FS_GROUPS
 # Or you can just hardcode like below:
 FS_GROUPS[on]=""
-FS_GROUPS[off]="zfs-8k ext4-dj" #xfs-cow
+FS_GROUPS[off]="xfs-cow" #xfs-cow
 
 SB_TABLES=32 # fixed
 TRIES=1
@@ -166,7 +166,7 @@ for FPW in on off; do
     for SCALE in "${SCALE_LIST[@]}"; do
       for WORKLOAD in "${WORKLOADS[@]}"; do
         for (( R=1; R<=$TRIES; R++ )); do
-          restore_filesystem $FS "s$SCALE" $BACKUP_DIR
+          # restore_filesystem $FS "s$SCALE" $BACKUP_DIR
           mount_fs $FS $MOUNT_DIR
           case "$DBMS" in
             postgres)
@@ -201,7 +201,7 @@ for FPW in on off; do
               stop_mysql
             ;;
           esac
-          clear_fs $FS $DEVICE
+          # clear_fs $FS $DEVICE
         done
       done
     done
