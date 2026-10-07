@@ -17,9 +17,20 @@ export LD_LIBRARY_PATH=$TAUFS_BENCH/mysql-server/build/lib:$TAUFS_BENCH/workspac
 export PATH=$TAUFS_BENCH_WS/pg_install/bin:$PATH
 export PATH=$TAUFS_BENCH/mysql-server/build/bin/:$PATH
 
+# This machine's settings: bench/machines/<host>.env (the SSDs, the memory the
+# benchmarks see); a new machine starts from a copy of libra09.env
+export TAU_HOST=$(hostname -s)
+TAU_MACHINE_ENV=$TAUFS_BENCH/machines/$TAU_HOST.env
+if [[ ! -f "$TAU_MACHINE_ENV" ]]; then
+  echo "[ERR] no $TAU_MACHINE_ENV: copy bench/machines/libra09.env and edit it" >&2
+  return 1
+fi
+source "$TAU_MACHINE_ENV"
+export TAU_MEM_GB TAU_BOOT_ARGS TAU_DB_CACHE_GB TAU_ZFS_ARC_GB
+# Results stay outside git, per machine
+export TAU_RESULTS=$TAUFS_BENCH_WS/results/$TAU_HOST
+
 # Test Device
-TARGET_DISK="SAMSUNG MZPLJ3T2HBJR-00007"
-#TARGET_DISK="PM1753V8TLC"
 TAU_DEVICE=$(nvme list | awk -v model="$TARGET_DISK" '$0 ~ model {print $1; exit}')
 if [[ -z "$TAU_DEVICE" ]]; then
   echo "[ERR] cannot find device: $TARGET_DISK" >&2
@@ -30,8 +41,6 @@ export TAU_DEVICE
 export TAU_DEVICE_NAME
 
 # Backup Device for file system images
-BACKUP_DISK="PM1753V8TLC"
-#BACKUP_DISK="Samsung SSD 990 PRO 4TB"
 TAU_BACKUP_DEVICE=$(nvme list | awk -v model="$BACKUP_DISK" '$0 ~ model {print $1}')
 echo "TAU_BACKUP_DEVICE set to: $TAU_BACKUP_DEVICE"
 if [[ -z "$TAU_BACKUP_DEVICE" ]]; then

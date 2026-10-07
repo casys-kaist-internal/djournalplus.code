@@ -7,7 +7,7 @@ MYSQL_PORT=3306
 MYUSER=$TAU_USERNAME
 
 # Fixed server settings shared by every configuration (EVAL_PLAN §2.2).
-MY_BUFFER_POOL_SIZE=16G    # 25% of 64 GB DRAM
+MY_BUFFER_POOL_SIZE=${TAU_DB_CACHE_GB}G  # 25% of TAU_MEM_GB (bench/machines/<host>.env)
 MY_REDO_LOG_CAPACITY=16G   # symmetric with PG max_wal_size
 MY_FLUSH_METHOD=fsync      # buffered I/O for every config (8.4 default is O_DIRECT)
 # No binary log (--disable-log-bin): with the 8.4 default (on, sync_binlog=1) the
@@ -92,6 +92,7 @@ log_mysql_specs() {
       SHOW VARIABLES LIKE 'innodb_buffer_pool_size';
       SHOW VARIABLES LIKE 'innodb_log_file_size';
       SHOW VARIABLES LIKE 'innodb_redo_log_capacity';
+      SHOW VARIABLES LIKE 'innodb_log_group_home_dir';
       SHOW VARIABLES LIKE 'innodb_page_size';
       SHOW VARIABLES LIKE 'innodb_file_per_table';
       SHOW VARIABLES LIKE 'log_bin';

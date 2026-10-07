@@ -22,13 +22,14 @@ if [[ ! "$KERNEL_VERSION" == *"6.8.0"* ]]; then
 fi
 echo "✅ Kernel version check passed: $KERNEL_VERSION"
 
-# Main test use only 64GB memory: the rest is reserved as unused huge pages
+# Main test use only TAU_MEM_GB of memory (bench/machines/<host>.env): the rest
+# is reserved as unused huge pages
 MEM_TOTAL_KB=$(awk '/^MemTotal/{t=$2} /^Hugetlb/{h=$2} END{print t-h}' /proc/meminfo)
 MEM_TOTAL_GB=$((MEM_TOTAL_KB / 1024 / 1024))
-if [ "$MEM_TOTAL_GB" -gt 64 ]; then
-    echo "❌ Error: Usable memory (MemTotal minus huge pages) exceeds 64GB limitation."
+if [ "$MEM_TOTAL_GB" -gt "$TAU_MEM_GB" ]; then
+    echo "❌ Error: Usable memory (MemTotal minus huge pages) exceeds ${TAU_MEM_GB}GB limitation."
     echo "   - Current Memory: ~${MEM_TOTAL_GB}GB"
-    echo "   Please reserve the rest with 'hugepagesz=1G hugepages=0:63,1:63' in GRUB settings."
+    echo "   Please reserve the rest with '$TAU_BOOT_ARGS' in GRUB settings."
     exit 1
 fi
 echo "✅ Memory size check passed: ~${MEM_TOTAL_GB}GB"
@@ -128,7 +129,7 @@ block_sec=$(( WARMUP_TIME + ${#THREADS_LIST[@]} * POINT_WARMUP_TIME
 echo "=== $n_blocks blocks x ~$((block_sec / 60)) min = ~$((n_blocks * block_sec / 3600)) h ==="
 
 DATE=$(date +%Y%m%d_%H%M%S)
-RESULT_DIR="$TAUFS_BENCH_WS/results/sysbench/$DBMS/$DATE${VARIANT:+_$VARIANT}"
+RESULT_DIR="$TAU_RESULTS/sysbench/$DBMS/$DATE${VARIANT:+_$VARIANT}"
 mkdir -p "$RESULT_DIR"
 
 # Device and DB-internal write counters around one measurement
@@ -181,6 +182,12 @@ run_sweep() {
 run_postgres_block() {
   PG_DATA="$MOUNT_DIR/pgsql_data"
   DBNAME="main_t${TABLE}"
+  # zfs-*: the WAL is in zfspool/log (create_image.sh); refuse an older image
+  # that keeps it with the data
+  if [[ -n "$(db_log_dir $FS)" && ! -L "$PG_DATA/pg_wal" ]]; then
+    echo "❌ ${FS}_${IMAGE_KEY} has pg_wal in the data dataset: recreate the image"
+    exit 1
+  fi
   pg_fpw $PG_DATA $FPW
   pg_fixed_settings $PG_DATA
   case $FS in btrfs|zfs*) pg_cow_settings $PG_DATA ;; esac
@@ -211,9 +218,12 @@ run_mysql_block() {
   fi
 
   # The image must hold the full pre-created redo log, or the first ~16 GB of
-  # redo run at about half speed while InnoDB creates the files.
-  local redo_bytes want_bytes
-  redo_bytes=$(du -sb "$MY_DATA/#innodb_redo" | cut -f1)
+  # redo run at about half speed while InnoDB creates the files. zfs-*: in
+  # zfspool/log (create_image.sh); an older image has none there.
+  local redo_bytes want_bytes log_dir
+  log_dir=$(db_log_dir $FS)
+  redo_bytes=$(du -sb "${log_dir:-$MY_DATA}/#innodb_redo" | cut -f1)
+  redo_bytes=${redo_bytes:-0}
   want_bytes=$(numfmt --from=iec "$MY_REDO_LOG_CAPACITY")
   if (( redo_bytes < want_bytes * 9 / 10 )); then
     echo "❌ Redo log in the image is $(numfmt --to=iec $redo_bytes), want $MY_REDO_LOG_CAPACITY: recreate the image"
@@ -224,6 +234,9 @@ run_mysql_block() {
   # 2.2.2 crashed the kernel in io_submit completion (2026-10-02).
   local my_extra=$MY_EXTRA_ARGS
   case $FS in zfs*) MY_EXTRA_ARGS="$MY_EXTRA_ARGS --innodb_use_native_aio=OFF" ;; esac
+  if [[ -n "$log_dir" ]]; then
+    MY_EXTRA_ARGS="$MY_EXTRA_ARGS --innodb_log_group_home_dir=$log_dir"
+  fi
   echo "[*] Start mysqld"
   start_mysqld "$MY_DATA" "$MY_SOCK" $DBW "$RESULT_DIR/${BLOCK}_server.log"
   MY_EXTRA_ARGS=$my_extra
@@ -256,6 +269,10 @@ for WORKLOAD in "${WORKLOADS[@]}"; do
       echo "=== $BLOCK: restoring ${FS}_${IMAGE_KEY} on $DEVICE ==="
       restore_filesystem $FS "$IMAGE_KEY" $BACKUP_DIR
       mount_fs $FS $MOUNT_DIR
+      if [[ "$FS" == zfs* ]]; then
+        sudo zfs get -H -r -t filesystem -o name,property,value \
+          recordsize,compression,logbias zfspool >> "$RESULT_DIR/${BLOCK}.spec"
+      fi
       case "$DBMS" in
         postgres) run_postgres_block ;;
         mysql)    run_mysql_block ;;

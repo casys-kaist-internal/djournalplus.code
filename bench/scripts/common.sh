@@ -63,11 +63,20 @@ do_mkfs() {
       sudo zpool destroy -f zfspool || true
       sudo zpool create -o ashift=12 zfspool $DEVICE
       ;;
-    zfs-8k|zfs-16k)  # one dataset, recordsize = DB page (PG 8k, MySQL 16k), no compression
+    zfs-8k|zfs-16k)  # recordsize = DB page (PG 8k, MySQL 16k), no compression
       # destroy first: a pool re-imported at boot keeps the device busy for wipefs
       sudo zpool destroy -f zfspool || true
       sudo wipefs -a $DEVICE
-      sudo zpool create -o ashift=12 -O recordsize=${FS#zfs-} -O compression=off zfspool $DEVICE
+      # OpenZFS Workload Tuning (InnoDB, PostgreSQL): separate datasets for the
+      # data and the WAL/redo, logbias=throughput on the data. With the default
+      # (latency) the pages an fsync commits (under 32K) are copied into the
+      # ZIL, and a copy split across two log blocks can replay half new
+      # (openzfs/zfs#17879; tools/killtest/results/libra09/SUMMARY.md §3.3).
+      # WAL/redo stay at the defaults (recordsize 128K, logbias latency) in
+      # zfspool/log, at $MOUNT_DIR/log (db_log_dir).
+      sudo zpool create -o ashift=12 -O recordsize=${FS#zfs-} -O compression=off \
+          -O logbias=throughput zfspool $DEVICE
+      sudo zfs create -o recordsize=128k -o logbias=latency zfspool/log
       ;;
     xfs-tau)
       sudo mkfs.xfs $DEVICE -f -l tjmaxsize=1G
@@ -112,8 +121,8 @@ mount_fs() {
       sudo zfs set recordsize=4k zfspool
       sudo zfs set mountpoint=$MOUNT_DIR zfspool
       ;;
-    zfs-8k|zfs-16k)
-      sudo zfs set recordsize=${FS#zfs-} compression=off zfspool
+    zfs-8k|zfs-16k)  # zfspool/log inherits the mountpoint: $MOUNT_DIR/log
+      sudo zfs set recordsize=${FS#zfs-} compression=off logbias=throughput zfspool
       sudo zfs set mountpoint=$MOUNT_DIR zfspool
       ;;
     ext4-tau)
@@ -154,7 +163,16 @@ clear_fs() {
 
 umount_fs() {
   MOUNT_DIR=$1
-  sudo umount $MOUNT_DIR || sudo zfs umount -a
+  # -R: zfs-8k/16k mount zfspool/log inside $MOUNT_DIR
+  sudo umount -R $MOUNT_DIR || sudo zfs umount -a
+}
+
+# db_log_dir <fs>: where the WAL/redo go when not in the database directory --
+# zfspool/log on the zfs-8k/zfs-16k pools (do_mkfs) -- or nothing.
+db_log_dir() {
+  case $1 in
+    zfs-8k|zfs-16k) echo "$MOUNT_DIR/log" ;;
+  esac
 }
 
 warming_up_ssd() {
@@ -299,6 +317,8 @@ restore_filesystem() {
       ;;
     zfs|zfs-4k|zfs-8k|zfs-16k)
       do_mkfs $FS $DEVICE
+      # zfs-8k/16k: the replication stream brings zfspool/log with it
+      sudo zfs destroy zfspool/log 2>/dev/null || true
       mount_fs $FS $MOUNT_DIR
       sudo sh -c "zfs receive -F zfspool < '$BACKUP_DIR/${FS}_${KEY}.img'"
       umount_fs $MOUNT_DIR

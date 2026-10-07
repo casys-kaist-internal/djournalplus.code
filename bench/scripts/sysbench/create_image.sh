@@ -44,7 +44,14 @@ for FS in ${TARGET_FILESYSTEM}; do
       PG_DATA="$MOUNT_DIR/pgsql_data"
       sudo mkdir -p $PG_DATA
       sudo chown -R $PGUSER:$PGUSER $PG_DATA
-      $PG_BIN/initdb -D $PG_DATA
+      LOG_DIR=$(db_log_dir $FS)
+      if [[ -n "$LOG_DIR" ]]; then
+        # the WAL in its own dataset (do_mkfs); pg_wal becomes a symlink to it
+        sudo chown $PGUSER:$PGUSER "$LOG_DIR"
+        $PG_BIN/initdb -D $PG_DATA --waldir="$LOG_DIR/pg_wal"
+      else
+        $PG_BIN/initdb -D $PG_DATA
+      fi
       pg_fpw $PG_DATA "off"
       case $FS in btrfs|zfs*) pg_cow_settings $PG_DATA ;; esac
       $PG_BIN/pg_ctl -D $PG_DATA start
@@ -75,12 +82,21 @@ for FS in ${TARGET_FILESYSTEM}; do
       echo "[*] Initialize MySQL datadir"
       sudo mkdir -p $MY_DATA
       sudo chown -R $MYUSER:$MYUSER $MY_DATA
+      LOG_DIR=$(db_log_dir $FS)
+      MY_FS_ARGS=()
+      if [[ -n "$LOG_DIR" ]]; then
+        # the redo log in its own dataset (do_mkfs): <LOG_DIR>/#innodb_redo
+        sudo chown $MYUSER:$MYUSER "$LOG_DIR"
+        MY_FS_ARGS=(--innodb_log_group_home_dir="$LOG_DIR")
+      fi
+      # native AIO off on ZFS, as in run_main.sh
+      case $FS in zfs*) MY_FS_ARGS+=(--innodb_use_native_aio=OFF) ;; esac
       echo "[*] Initialize MySQL"
       # Redo log at the run-time capacity from the start: InnoDB pre-creates all
       # 32 redo files and keeps them through shutdown, so a restored image does
       # not spend its first ~16 GB of redo creating files at about half speed.
       $MYSQL_BIN/mysqld --initialize-insecure --datadir="$MY_DATA" \
-          --innodb_redo_log_capacity=$MY_REDO_LOG_CAPACITY
+          --innodb_redo_log_capacity=$MY_REDO_LOG_CAPACITY "${MY_FS_ARGS[@]}"
 
       # No binlog while loading, or the prepare binlogs (~ the data size) end up
       # in the image. Benchmark runs have no binlog either (MY_BINLOG in mysql/api.sh).
@@ -96,6 +112,7 @@ for FS in ${TARGET_FILESYSTEM}; do
           --innodb_flush_log_at_trx_commit=0 \
           --disable-log-bin \
           --innodb_redo_log_capacity=$MY_REDO_LOG_CAPACITY \
+          "${MY_FS_ARGS[@]}" \
           --log-error="$MY_DATA/mysqld.err" &
 
       wait_for_sock "$MY_SOCK" 60
@@ -116,7 +133,7 @@ for FS in ${TARGET_FILESYSTEM}; do
       $MYSQL_BIN/mysql -uroot --socket="$MY_SOCK" -e "SET GLOBAL innodb_fast_shutdown=0; FLUSH LOGS;"
       $MYSQL_BIN/mysqladmin -uroot --socket="$MY_SOCK" shutdown
       sleep 5
-      echo "[*] Redo log in the image: $(ls "$MY_DATA/#innodb_redo" | wc -l) files, $(du -sh "$MY_DATA/#innodb_redo" | cut -f1)"
+      echo "[*] Redo log in the image: $(ls "${LOG_DIR:-$MY_DATA}/#innodb_redo" | wc -l) files, $(du -sh "${LOG_DIR:-$MY_DATA}/#innodb_redo" | cut -f1)"
       ;;
     esac
     sleep 1

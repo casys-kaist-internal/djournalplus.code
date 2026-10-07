@@ -6,17 +6,21 @@
 # Usage: host_setup.sh {check|apply}
 MODE=${1:-check}
 cpu=/sys/devices/system/cpu
+# This machine's memory budget (set_env.sh exports it; bench/machines/<host>.env)
+if [ -z "$TAU_MEM_GB" ]; then
+  source "$(dirname "$(realpath "$0")")/../machines/$(hostname -s).env" || exit 1
+fi
 
 # Target state
-BOOT_ARGS="hugepagesz=1G hugepages=0:63,1:63"  # 126 of 192 GB unused: ~62.6 GB left, as with 64 GB installed
+BOOT_ARGS="$TAU_BOOT_ARGS"  # the memory above TAU_MEM_GB held as unused huge pages
 NUMA_BALANCING=0
 GOVERNOR=performance
 EPB=0                   # energy_perf_bias: 0 = performance
 TURBO=on
 CSTATE_MAX_LATENCY=2    # us: POLL and C1 stay, C1E and C6 are disabled
 # OpenZFS caps the ARC at half of MemTotal, which still counts the reserved huge
-# pages (~188 GB). 32 GiB is the default a machine with 64 GB installed gets.
-ZFS_ARC_MAX=$((32 << 30))
+# pages (~188 GB on libra09); TAU_ZFS_ARC_GB is what TAU_MEM_GB installed gets.
+ZFS_ARC_MAX=$((TAU_ZFS_ARC_GB << 30))
 
 fail=0
 ok()  { echo "✓ $*"; }

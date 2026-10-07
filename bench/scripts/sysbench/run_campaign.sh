@@ -18,8 +18,9 @@ run() {  # <db> <command...>: run, then summarize the newest result dir of <db>
   shift
   echo "===== $* $(date -u --rfc-3339=seconds)"
   "$@" || { rc=$?; echo "===== FAILED rc=$rc $(date -u --rfc-3339=seconds)"; exit $rc; }
-  d=$(ls -td "$TAUFS_BENCH_WS/results/sysbench/$db"/20*/ | head -1)
+  d=$(ls -td "$TAU_RESULTS/sysbench/$db"/20*/ | head -1)
   python3 bench/scripts/sysbench/parse_main.py "$d" | tee "$d/summary.txt"
+  python3 bench/scripts/export_results.py "$TAU_RESULTS"   # summaries into git
 }
 
 step() {
@@ -29,7 +30,7 @@ step() {
   case $1 in
     host)
       bench/scripts/host_setup.sh apply || exit 1
-      bash bench/scripts/machine_info.sh "$TAU_DEVICE_NAME" > "bench/machines/$(hostname).txt"
+      bash bench/scripts/machine_info.sh "$TAU_DEVICE_NAME" > "bench/machines/$TAU_HOST.txt"
       ;;
     images)
       env TARGET_FILESYSTEM="ext4 xfs ext4-dj40" bench/scripts/sysbench/create_image.sh mysql || exit 1

@@ -8,7 +8,7 @@ PGUSER=$TAU_USERNAME
 
 # Fixed server settings shared by every configuration (EVAL_PLAN §2.2).
 # The build itself is stock: 1 GB relation segments, 8 KiB blocks.
-PG_SHARED_BUFFERS=16GB   # 25% of 64 GB DRAM
+PG_SHARED_BUFFERS=${TAU_DB_CACHE_GB}GB  # 25% of TAU_MEM_GB (bench/machines/<host>.env)
 PG_MAX_WAL_SIZE=16GB     # same for FPW on and off
 
 # Call before starting PostgreSQL
