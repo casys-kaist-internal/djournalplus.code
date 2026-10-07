@@ -1,0 +1,9 @@
+*.o
+/torner
+__pycache__/
+# Results stay on the machine that made them; only each run's ANALYSIS.md
+# goes into git (the raw states and logs, report.txt/.tex stay here).
+/results/**
+!/results/**/
+!/results/**/ANALYSIS.md
+!/results/**/README.md
