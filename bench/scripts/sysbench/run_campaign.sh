@@ -43,8 +43,31 @@ step() {
   touch "$LOG.$1.done"
 }
 
+# The images the remaining steps restore, checked before hours of the others:
+# the images step makes MySQL's, PostgreSQL's have to be there already.
+check_images() {
+  local rest=" " s started=0 want=() key img missing=0
+  for s in "${STEPS[@]}"; do
+    [ "$s" = "$FROM" ] && started=1
+    [ $started = 1 ] && rest+="$s "
+  done
+  if [[ $rest != *" images "* ]]; then
+    [[ $rest == *" mysql "* ]] && want+=(mysql/ext4 mysql/xfs)
+    [[ $rest == *" mysql_dj40 "* ]] && want+=(mysql/ext4-dj40)
+  fi
+  [[ $rest == *" pg "* ]] && want+=(postgres/ext4 postgres/xfs)
+  [[ $rest == *" pg_dj40 "* ]] && want+=(postgres/ext4-dj40)
+  key=$(bash -c 'source bench/scripts/common.sh && main_image_key') || return 1
+  for img in "${want[@]}"; do
+    img="$TAU_BACKUP_ROOT/sysbench/${img%/*}/${img#*/}_$key.img"
+    [ -f "$img" ] || { echo "===== missing $img"; missing=1; }
+  done
+  return $missing
+}
+
 {
   source set_env.sh || { echo "===== set_env.sh failed"; exit 1; }
+  check_images || { echo "===== make the images first (create_image.sh)"; exit 1; }
   started=0
   for s in "${STEPS[@]}"; do
     [ "$s" = "$FROM" ] && started=1

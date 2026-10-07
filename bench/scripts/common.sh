@@ -3,7 +3,7 @@ set -e
 
 if [ -z "$TAUFS_ENV_SOURCED" ]; then
 	echo "Do source set_env.sh first."
-	exit
+	exit 1
 fi
 
 ### Common environment setup
@@ -78,8 +78,8 @@ do_mkfs() {
           -O logbias=throughput zfspool $DEVICE
       sudo zfs create -o recordsize=128k -o logbias=latency zfspool/log
       ;;
-    xfs-tau)
-      sudo mkfs.xfs $DEVICE -f -l tjmaxsize=1G
+    xfs-tau)  # the fork in the tree: the system one may predate s_segment_size
+      sudo $TAUFS_XFSPROGS/mkfs/mkfs.xfs $DEVICE -f -l tjmaxsize=1G
       ;;
     ext4-tau)
       sudo $TAUFS_E2FSPROGS/misc/mke2fs -t ext4 -E lazy_itable_init=0,lazy_journal_init=0 -F $DEVICE

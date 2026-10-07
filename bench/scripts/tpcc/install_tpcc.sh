@@ -5,7 +5,7 @@ set -o pipefail
 
 if [ -z "$TAUFS_ENV_SOURCED" ]; then
 	echo "Do source set_env.sh first."
-	exit
+	exit 1
 fi
 
 cd $TAUFS_BENCH_WS

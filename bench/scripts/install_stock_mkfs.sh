@@ -3,7 +3,7 @@ set -e
 
 if [ -z "$TAUFS_ENV_SOURCED" ]; then
 	echo "Do source set_env.sh first."
-	exit
+	exit 1
 fi
 
 # The system e2fsprogs/xfsprogs binaries are overwritten by the tau forks

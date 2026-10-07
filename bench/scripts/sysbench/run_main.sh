@@ -24,6 +24,7 @@ echo "✅ Kernel version check passed: $KERNEL_VERSION"
 
 # Main test use only TAU_MEM_GB of memory (bench/machines/<host>.env): the rest
 # is reserved as unused huge pages
+: "${TAU_MEM_GB:?is not set: source set_env.sh, which reads bench/machines/<host>.env}"
 MEM_TOTAL_KB=$(awk '/^MemTotal/{t=$2} /^Hugetlb/{h=$2} END{print t-h}' /proc/meminfo)
 MEM_TOTAL_GB=$((MEM_TOTAL_KB / 1024 / 1024))
 if [ "$MEM_TOTAL_GB" -gt "$TAU_MEM_GB" ]; then

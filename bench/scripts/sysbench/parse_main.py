@@ -49,7 +49,9 @@ def parse_io(path):
     names = [n for n in dev["end"] if n in dev["begin"]]
     paths = [n for n in names if re.match(r"nvme\d+c\d+n\d+$", n)] or names
     delta = {}
-    for field, idx in (("rd_sectors", 2), ("wr_sectors", 6), ("flushes", 14)):
+    # 0-based after the name (Documentation/admin-guide/iostats.rst): 2 sectors
+    # read, 6 sectors written, 15 flush requests (14 is ms spent discarding)
+    for field, idx in (("rd_sectors", 2), ("wr_sectors", 6), ("flushes", 15)):
         vals = [dev["end"][n][idx] - dev["begin"][n][idx]
                 for n in paths if len(dev["end"][n]) > idx]
         delta[field] = sum(vals) if vals else None

@@ -9,7 +9,7 @@ fi
 
 if [ -z "$TAUFS_ENV_SOURCED" ]; then
 	echo "Do source set_env.sh first."
-	exit
+	exit 1
 fi
 
 source "$TAUFS_BENCH/scripts/common.sh"
@@ -39,11 +39,20 @@ for FS in ${TARGET_FILESYSTEM}; do
 
     case "$MODE" in
       postgres)
-      PG_DATA="$MOUNT_DIR/postgres"
+      PG_DATA="$MOUNT_DIR/pgsql_data"
       sudo mkdir -p $PG_DATA
       sudo chown -R $PGUSER:$PGUSER $PG_DATA
-      $PG_BIN/initdb -D $PG_DATA -U $PGUSER
+      # as sysbench/create_image.sh: on zfs-8k/16k the WAL in its own dataset
+      # (do_mkfs), pg_wal a symlink to it
+      LOG_DIR=$(db_log_dir $FS)
+      if [[ -n "$LOG_DIR" ]]; then
+        sudo chown $PGUSER:$PGUSER "$LOG_DIR"
+        $PG_BIN/initdb -D $PG_DATA -U $PGUSER --waldir="$LOG_DIR/pg_wal"
+      else
+        $PG_BIN/initdb -D $PG_DATA -U $PGUSER
+      fi
       pg_fpw $PG_DATA "off"
+      case $FS in btrfs|zfs*) pg_cow_settings $PG_DATA ;; esac
       $PG_BIN/pg_ctl -D $PG_DATA start
 
       echo "[*] Create DB & hammerdb prepare"

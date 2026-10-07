@@ -112,13 +112,15 @@ for FPW in on off; do
 
         case "$MODE" in
           postgres)
-            PG_DATA="$MOUNT_DIR/postgres"
+            PG_DATA="$MOUNT_DIR/pgsql_data"
             pg_fpw $PG_DATA $FPW
+            # before the start, when the server reads it; every cell restores
+            # the image, so nothing carries over from the last one
             if [[ "$FPW" == "on" ]]; then
-              WALSIZE="16GB"
+              pg_wal_max_set $PG_DATA 16GB
             fi
+
             $PG_BIN/pg_ctl -D $PG_DATA start
-            pg_wal_max_set $PG_DATA $WALSIZE
             log_pg_specs "$OUT_DBSPEC" "$DBNAME"
 
             pushd $HAMMERDB
