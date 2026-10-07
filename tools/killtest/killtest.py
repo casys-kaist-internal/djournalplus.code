@@ -267,6 +267,21 @@ def die(msg):
     sys.exit(1)
 
 
+def need_space(nbytes, what):
+    """Refuse a run whose images WORK cannot hold at full size, plus slack for
+    the tools disk: they are sparse and fill as the guest writes, and a full
+    file system stalls the guest until its timeout -- and everyone else when
+    WORK is on a shared root file system, as on libra08."""
+    d = WORK
+    while not d.exists():
+        d = d.parent
+    free = shutil.disk_usage(d).free
+    if free < nbytes + (2 << 30):
+        die("%s can write %.0f GiB into %s, which has %.0f GiB free:"
+            " set KILLTEST_WORK to a bigger file system"
+            % (what, nbytes / 2**30, d, free / 2**30))
+
+
 def utcstamp():
     return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
@@ -823,6 +838,7 @@ def make_ctx(a, fs, workload):
 def cmd_probe(a):
     ctx = make_ctx(a, "probe", "seq")
     WORK.mkdir(parents=True, exist_ok=True)
+    need_space(16 << 30, "probe")
     name = "probe-" + utcstamp()
     ctx.tools = build_tools_disk(name, "probe", "seq", SOSP_TEST_OPT, 0,
                                  ctx.release, tau=False)
@@ -861,6 +877,7 @@ def cmd_run(a):
     ctx.size = size_arg(ctx.test_opt, "-s", 256 << 20)
     ctx.test_size = a.test_size << 30
     ctx.setup_timeout, ctx.verify_timeout = a.setup_timeout, a.verify_timeout
+    need_space(ctx.test_size, "run")
 
     name = "%s_%s_%s" % (utcstamp(), a.fs, a.workload)
     rundir = Path(a.out) / name if a.out else RESULTS / name
@@ -1591,13 +1608,6 @@ def cmd_db(a):
     if a.zfs_logbias and a.zfs_logbias != ctx.settings["zfs_logbias"]:
         name += "_logbias-" + a.zfs_logbias
     ctx.name = name
-    rundir = Path(a.out) / name if a.out else RESULTS / name
-    ctx.logs = rundir / "logs"
-    ctx.logs.mkdir(parents=True)
-    WORK.mkdir(parents=True, exist_ok=True)
-    ctx.tools = build_tools_disk(name, a.fs, "db", "", a.max_sectors_kb,
-                                 ctx.release, tau=False, conf=conf, db=True)
-    ctx.test_img = WORK / ("test-" + name + ".img")
     # an image per profile: it is prepared, and aged, with its settings
     # The revision profile's caches follow --mem (PostgreSQL's go into the
     # image's postgresql.conf), so its images are per memory size too.
@@ -1610,6 +1620,16 @@ def cmd_db(a):
         tag += "-logdefault"           # the redo files are made at --initialize
     golden = Path(a.image) if a.image else WORK / ("db-%s-%s%s.img"
                                                    % (a.db, a.fs, tag))
+    # a trial's copy of the image, and the image itself when it is made now
+    need_space(ctx.test_size * (2 if a.reprep or not golden.exists() else 1),
+               "db")
+    rundir = Path(a.out) / name if a.out else RESULTS / name
+    ctx.logs = rundir / "logs"
+    ctx.logs.mkdir(parents=True)
+    WORK.mkdir(parents=True, exist_ok=True)
+    ctx.tools = build_tools_disk(name, a.fs, "db", "", a.max_sectors_kb,
+                                 ctx.release, tau=False, conf=conf, db=True)
+    ctx.test_img = WORK / ("test-" + name + ".img")
 
     meta = {
         "tool": "killtest", "test": "db", "db": a.db, "fs": a.fs,

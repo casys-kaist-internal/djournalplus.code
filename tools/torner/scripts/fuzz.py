@@ -71,9 +71,11 @@ BIG_FILES = ("log.img", "base.img", "progress.img", "backing.img")
 
 
 def mutate(cfg, rng, max_knobs=3):
-    """Change 1..max_knobs knobs to a different value from their domain."""
+    """Change 1..max_knobs knobs to a different value from their domain
+    (knobs with a single value are fixed, e.g. direct on tau)."""
     child = dict(cfg)
-    knobs = rng.sample(sorted(SPACE), rng.randint(1, max_knobs))
+    knobs = rng.sample([k for k in sorted(SPACE) if len(SPACE[k]) > 1],
+                       rng.randint(1, max_knobs))
     for k in knobs:
         choices = [v for v in SPACE[k] if v != cfg.get(k)]
         child[k] = rng.choice(choices)
@@ -217,6 +219,11 @@ def main():
     ap.add_argument("--dry-run", action="store_true",
                     help="print the commands of the first iteration and stop")
     args = ap.parse_args()
+    # capture.sh opens the target with O_TAU_UNTORN on the tau configurations,
+    # which the kernel refuses together with O_DIRECT (EINVAL at open)
+    tau = args.fs.startswith("tau-")
+    if tau:
+        SPACE["direct"] = [0]
 
     rng = random.Random(args.seed)
     start = dict(SEED_CONFIG)
@@ -235,6 +242,8 @@ def main():
         with open(corpus_path) as f:
             saved = json.load(f)
         corpus = saved.get("corpus", corpus) or corpus
+        if tau:     # a corpus saved before direct was fixed may hold direct=1
+            corpus = [dict(c, direct=0) for c in corpus]
         seen = set(saved.get("features", []))
         tried = set(saved.get("tried", []))
 

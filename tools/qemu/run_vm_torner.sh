@@ -30,7 +30,11 @@ SCRATCH_SIZE="${SCRATCH_SIZE:-32G}"
 SRCDISK="${SRCDISK:-$HERE/vm_imgs/torner-src.raw}"
 ROOTFS="${ROOTFS:-$HERE/vm_imgs/qemu-image_2404.qcow2}"
 
-QEMU="${QEMU:-$ROOT/tools/bin/qemu-system-x86_64}"
+# tools/bin's build if there is one, else the one on PATH
+if [ -z "${QEMU:-}" ]; then
+	QEMU="$ROOT/tools/bin/qemu-system-x86_64"
+	[ -x "$QEMU" ] || QEMU="$(command -v qemu-system-x86_64 || echo "$QEMU")"
+fi
 
 die() { echo "run_vm_torner: $*" >&2; exit 1; }
 
@@ -50,6 +54,18 @@ grep -q '^CONFIG_DM_LOG_WRITES=[ym]' "$KERNEL/.config" \
 
 [ -f "$SRCDISK" ] || die "torner source disk missing: $SRCDISK (run tools/qemu/mksrcdisk.sh)"
 
+# The scratch disk is sparse and fills as the guest writes: its file system has
+# to take all of it, or a long run fills the host's disk -- on libra08 that is
+# the shared root file system.
+if [ -f "$SCRATCH" ]; then
+	grow=$(( $(stat -c %s "$SCRATCH") - $(stat -c '%b * %B' "$SCRATCH") ))
+else
+	grow=$(numfmt --from=iec "$SCRATCH_SIZE")
+fi
+free=$(df --output=avail -B1 "$(dirname "$SCRATCH")" | tail -1)
+[ "$grow" -le "$free" ] || die "scratch disk $SCRATCH can grow by $((grow >> 30)) GiB," \
+	"$(dirname "$SCRATCH") has $((free >> 30)) GiB free: set SCRATCH to a bigger file system"
+
 if [ ! -f "$SCRATCH" ]; then
 	echo "run_vm_torner: creating scratch disk $SCRATCH ($SCRATCH_SIZE)" >&2
 	truncate -s "$SCRATCH_SIZE" "$SCRATCH" || die "cannot create scratch disk"
@@ -64,6 +80,7 @@ run_vm_torner: kernel $RELEASE
 
 In the guest:
     mkdir -p /mnt/src && mount -o ro /dev/vdb /mnt/src
+    export PATH=/mnt/src/bin:\$PATH    # the tau mkfs/fsck forks (capture.sh)
     cp -r /mnt/src/torner /root/torner && cd /root/torner && make && make test
     mkdir -p /mnt/scratch && mkfs.ext4 -qF /dev/vda && mount /dev/vda /mnt/scratch
 

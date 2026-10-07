@@ -183,7 +183,7 @@ say "fs=$FS strategy=$STRATEGY enumerated=$ENUM_ALL live=$TOTAL examined=$PICKED
 # ---- one state ---------------------------------------------------------
 do_state() {
 	local slot="$1" line="$2"
-	local spec sid epoch img mnt loop pl rc p3 mountrc detail
+	local spec sid epoch img mnt loop pl rp rc p3 mountrc detail
 	local st="$WORK/st$slot" chk="$WORK/c$slot" cerr="$WORK/ce$slot"
 	local -a p2args focusargs
 
@@ -211,8 +211,10 @@ do_state() {
 	else
 		cp --sparse=always "$BASE" "$img" || return 1
 	fi
-	pl=$("$TORNER" replay --log "$LOG" --target "$img" --state-spec "$spec" \
-		| sed 's/.*"progress_limit":\([0-9]*\).*/\1/')
+	# a replay that failed built no crash state: not a result, so no record
+	rp=$("$TORNER" replay --log "$LOG" --target "$img" --state-spec "$spec") \
+		|| { say "state $sid: replay failed, skipped"; rm -f "$img"; return 1; }
+	pl=$(printf '%s\n' "$rp" | sed 's/.*"progress_limit":\([0-9]*\).*/\1/')
 
 	loop=$(losetup --show -f "$img") || { rm -f "$img"; return 1; }
 

@@ -446,6 +446,8 @@ static void check_i1(struct ctx *c, struct viol_out *v, uint64_t *checked,
 				continue;
 			if (c->jb[k].sequence != cm->sequence)
 				continue;
+			if (c->jb[k].inode_number != cm->inode_number)
+				continue;	/* tids are per file (tau->tx_seq) */
 			desc = &c->jb[k];
 			break;
 		}
