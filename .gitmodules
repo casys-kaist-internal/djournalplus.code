@@ -7,3 +7,12 @@
 [submodule "tools/crashmonkey"]
 	path = tools/crashmonkey
 	url = git@github.com:leesecre/crashmonkey.git
+[submodule "xfsprogs-dev"]
+	path = codes/xfsprogs-dev
+	url = git@github.com:junbongwe/xfsprogs-dev.git
+[submodule "e2fsprogs"]
+	path = codes/e2fsprogs
+	url = git@github.com:leesecre/e2fsprogs.git
+[submodule "djournalplus-kernel.code"]
+	path = codes/djournalplus-kernel.code
+	url = git@github.com:casys-kaist-internal/djournalplus-kernel.code.git

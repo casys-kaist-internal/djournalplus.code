@@ -19,7 +19,7 @@ set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
-KERNEL="${TAUFS_KERNEL:-$ROOT/../djournalplus-kernel.code}"
+KERNEL="${TAUFS_KERNEL:-$ROOT/codes/djournalplus-kernel.code}"
 
 SSH_PORT="${SSH_PORT:-5556}"
 GDB_PORT="${GDB_PORT:-1236}"

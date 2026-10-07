@@ -18,8 +18,8 @@ set -eu
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 SRC="$ROOT/tools/torner"
-E2FSPROGS="${TAUFS_E2FSPROGS:-$ROOT/../e2fsprogs}"     # the tau forks, next to
-XFSPROGS="${TAUFS_XFSPROGS:-$ROOT/../xfsprogs-dev}"   # this repository
+E2FSPROGS="${TAUFS_E2FSPROGS:-$ROOT/codes/e2fsprogs}"     # the tau forks
+XFSPROGS="${TAUFS_XFSPROGS:-$ROOT/codes/xfsprogs-dev}"
 IMG="${1:-$HERE/vm_imgs/torner-src.raw}"
 SIZE="${SIZE:-256M}"
 

@@ -1,21 +1,15 @@
 # djournalplus.code
 
 τJournal (tjournal; formerly DJPLUS), data journaling for ext4 and xfs: the
-benchmarks and the crash tests. The system itself lives in its own
-repositories, cloned next to this one (`set_env.sh` finds them there):
-
-| next to this repository | what |
-|---|---|
-| `djournalplus-kernel.code/` | the τJournal kernel, Linux 6.8 (casys-kaist-internal/djournalplus-kernel.code) |
-| `e2fsprogs/` | mke2fs fork that makes the tau journal (leesecre/e2fsprogs, branch `tau`) |
-| `xfsprogs-dev/` | mkfs.xfs fork (junbongwe/xfsprogs-dev) |
-
-`machine_info.sh` records their commits in every result's machine snapshot.
+kernel and file-system tools, the benchmarks and the crash tests.
 
 ## Layout
 
 | path | what |
 |---|---|
+| `codes/djournalplus-kernel.code/` | the τJournal kernel, Linux 6.8 (submodule; `$TAUFS_KERNEL`) |
+| `codes/e2fsprogs/` | mke2fs fork that makes the tau journal (submodule, branch `tau`; `$TAUFS_E2FSPROGS`) |
+| `codes/xfsprogs-dev/` | mkfs.xfs fork (submodule; `$TAUFS_XFSPROGS`) |
 | `set_env.sh` | environment for every script; reads this machine's `bench/machines/<host>.env` |
 | `bench/scripts/` | performance benchmarks: `sysbench/` (run_main.sh, run_campaign.sh, create_image.sh, parse_main.py), `tpcc/`, `mysql/` and `postgres/` (install, server settings), `common.sh` (mkfs, mount, images), `host_setup.sh`, `machine_info.sh`, `export_results.py` |
 | `bench/machines/` | per machine: `<host>.env` (SSDs, memory budget) and `<host>.txt` (machine_info.sh snapshot) |
@@ -31,12 +25,12 @@ repositories, cloned next to this one (`set_env.sh` finds them there):
 | `configs/` | kernel configs (not in git) |
 
 ```shell
-git submodule update --init --recursive   # the DB sources and CrashMonkey
-git -C .. clone git@github.com:casys-kaist-internal/djournalplus-kernel.code.git
-git -C .. clone -b tau git@github.com:leesecre/e2fsprogs.git
-git -C .. clone git@github.com:junbongwe/xfsprogs-dev.git
+git submodule update --init --recursive
 source set_env.sh        # from the repository root, in every shell
 ```
+
+`machine_info.sh` records the commits of the three `codes/` trees, and whether
+they had local changes, in every result's machine snapshot.
 
 ## A new machine
 
