@@ -5,7 +5,12 @@ export TAU_USERNAME=$(whoami)
 
 # Set directory paths.
 export TAUFS_ROOT=$PWD
-export TAUFS_KERNEL=$TAUFS_ROOT/djournalplus-kernel.code
+# The system sources live next to this repository: the tau kernel and the
+# mke2fs/mkfs.xfs forks (a machine's .env, read below, may point elsewhere)
+TAUFS_CODES=$(dirname "$TAUFS_ROOT")
+export TAUFS_KERNEL=$TAUFS_CODES/djournalplus-kernel.code
+export TAUFS_E2FSPROGS=$TAUFS_CODES/e2fsprogs
+export TAUFS_XFSPROGS=$TAUFS_CODES/xfsprogs-dev
 export TAUFS_BENCH=$TAUFS_ROOT/bench
 export TAUFS_BENCH_WS=$TAUFS_BENCH/workspace
 export TAU_BACKUP_ROOT=/mnt/tau_backup

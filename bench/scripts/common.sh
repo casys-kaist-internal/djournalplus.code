@@ -82,7 +82,7 @@ do_mkfs() {
       sudo mkfs.xfs $DEVICE -f -l tjmaxsize=1G
       ;;
     ext4-tau)
-      sudo $TAUFS_ROOT/e2fsprogs/misc/mke2fs -t ext4 -E lazy_itable_init=0,lazy_journal_init=0 -F $DEVICE
+      sudo $TAUFS_E2FSPROGS/misc/mke2fs -t ext4 -E lazy_itable_init=0,lazy_journal_init=0 -F $DEVICE
       ;;
     *)
       echo "Unknown FS: $FS"; exit 1;;

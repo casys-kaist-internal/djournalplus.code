@@ -1,24 +1,9 @@
-[submodule "djournalplus-kernel.code"]
-	path = djournalplus-kernel.code
-	url = git@github.com:casys-kaist-internal/djournalplus-kernel.code.git
-[submodule "spdk"]
-	path = tools/spdk
-	url = https://github.com/spdk/spdk
-[submodule "bench/micro"]
-	path = bench/micro
-	url = git@github.com:yulistic-benchmarks/FS_microbench.git
 [submodule "bench/postgresql"]
 	path = bench/postgresql
 	url = git@github.com:leesecre/PostgreSQL.git
 [submodule "bench/mysql-server"]
 	path = bench/mysql-server
 	url = git@github.com:leesecre/mysql-server.git
-[submodule "e2fsprogs"]
-	path = e2fsprogs
-	url = git@github.com:leesecre/e2fsprogs.git
-[submodule "xfsprogs-dev"]
-	path = xfsprogs-dev
-	url = git@github.com:junbongwe/xfsprogs-dev.git
 [submodule "tools/crashmonkey"]
 	path = tools/crashmonkey
 	url = git@github.com:leesecre/crashmonkey.git

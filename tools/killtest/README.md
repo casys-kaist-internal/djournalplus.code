@@ -228,7 +228,7 @@ with native AIO a host running OpenZFS 2.2.2 hard-locked, 2026-10-02).
 | rootfs | debootstrap noble + apt, systemd | debootstrap noble (minbase) with the same distro tools, booted read only; no systemd (udevd for zfs only) |
 | baseline kernel | vanilla v6.8 (`6.8.0-ge8f897f4afef`), built with `kernels/vmconfig` | `/boot/vmlinuz-6.8.0+`: vanilla 6.8 with `/boot/config-6.8.0+`; modules from the host |
 | writeback throttling | not built (`CONFIG_BLK_WBT=n`) | on (`wbt_lat_usec` 2000); `--wbt-lat-usec 0` turns it off |
-| tau kernel | `6.8.0tjournal+` | `djournalplus-kernel.code/arch/x86/boot/bzImage` (`--kernel` to change) |
+| tau kernel | `6.8.0tjournal+` | `$TAUFS_KERNEL/arch/x86/boot/bzImage`, next to the repository (`--kernel` to change) |
 | QEMU | 9.2.4 | 9.2.4 when `mkqemu.sh` has built it, else 7.2.1 (`tools/bin`); `--qemu` to choose |
 | privileges | QEMU under sudo (`SUDO_KEY`); `build_kernel.sh` installs into the host's `/boot` | the kvm group; sudo only in `mkrootfs.sh` |
 | `rand` | same as `seq`: `run.exp` never passed `-R` (every SOSP rand log reads `rand_write=NO`) | `-R` |

@@ -1,19 +1,22 @@
 #!/bin/bash
+# Hand an NVMe drive to QEMU for PCIe passthrough (vfio-pci), or give it back
+# to the nvme driver -- what SPDK's scripts/setup.sh and `setup.sh reset` did.
+# Needs the IOMMU on (README).  Usage: passthrough.sh [BDF] [reset]
 set -e
+BDF=${1:-0000:86:00.0}   # PM1735; PM1753 is 0000:af:00.0, the 990 PRO 0000:3b:00.0
+dev=/sys/bus/pci/devices/$BDF
+[ -e "$dev" ] || { echo "no PCI device $BDF" >&2; exit 1; }
 
-#OMMU가 켜져 있으면 vfio-pci, 아니면 uio_pci_generic 사용
-sudo modprobe vfio-pci || true
-# sudo modprobe uio_pci_generic || true
+# unbind from whatever driver has it
+[ -e "$dev/driver" ] && echo "$BDF" | sudo tee "$dev/driver/unbind" >/dev/null
 
-# 2) 타겟 BDF 지정 (예: 0000:5e:00.0)
-BDF=0000:86:00.0 # PM1735
-#BDF=0000:af:00.0 #PM1753
-#BDF=0000:3b:00.0
-
-# 3) 기존 드라이버에서 장치 unbind
-echo $BDF | sudo tee /sys/bus/pci/devices/$BDF/driver/unbind
-
-# 4) 원하는 드라이버로 강제 bind (driver_override + drivers_probe)
-echo vfio-pci | sudo tee /sys/bus/pci/devices/$BDF/driver_override
-echo $BDF | sudo tee /sys/bus/pci/drivers_probe
-echo "" | sudo tee /sys/bus/pci/devices/$BDF/driver_override
+if [ "${2:-}" = reset ]; then
+  echo "" | sudo tee "$dev/driver_override" >/dev/null
+else
+  sudo modprobe vfio-pci
+  echo vfio-pci | sudo tee "$dev/driver_override" >/dev/null
+fi
+echo "$BDF" | sudo tee /sys/bus/pci/drivers_probe >/dev/null
+# a later probe (rescan, reboot) binds the default driver again
+echo "" | sudo tee "$dev/driver_override" >/dev/null
+echo "$BDF -> $(basename "$(readlink "$dev/driver" 2>/dev/null || echo none)")"

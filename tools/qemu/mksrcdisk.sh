@@ -18,6 +18,8 @@ set -eu
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 SRC="$ROOT/tools/torner"
+E2FSPROGS="${TAUFS_E2FSPROGS:-$ROOT/../e2fsprogs}"     # the tau forks, next to
+XFSPROGS="${TAUFS_XFSPROGS:-$ROOT/../xfsprogs-dev}"   # this repository
 IMG="${1:-$HERE/vm_imgs/torner-src.raw}"
 SIZE="${SIZE:-256M}"
 
@@ -39,12 +41,12 @@ cp -r "$SRC"/Makefile "$SRC"/README.md "$SRC"/include "$SRC"/src \
 rm -f "$MNT/torner/src"/*.o
 
 mkdir -p "$MNT/bin"
-for f in "$ROOT"/e2fsprogs/misc/mke2fs \
-         "$ROOT"/e2fsprogs/misc/tune2fs \
-         "$ROOT"/e2fsprogs/e2fsck/e2fsck \
-         "$ROOT"/xfsprogs-dev/mkfs/mkfs.xfs \
-         "$ROOT"/xfsprogs-dev/repair/xfs_repair \
-         "$ROOT"/xfsprogs-dev/db/xfs_db; do
+for f in "$E2FSPROGS"/misc/mke2fs \
+         "$E2FSPROGS"/misc/tune2fs \
+         "$E2FSPROGS"/e2fsck/e2fsck \
+         "$XFSPROGS"/mkfs/mkfs.xfs \
+         "$XFSPROGS"/repair/xfs_repair \
+         "$XFSPROGS"/db/xfs_db; do
 	[ -f "$f" ] || { echo "mksrcdisk: missing $f -- build the fork first" >&2; exit 1; }
 	cp "$f" "$MNT/bin/"
 done

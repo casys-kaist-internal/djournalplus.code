@@ -64,14 +64,19 @@ STOCK = ROOT / "bench/workspace/stock"
 # and the tau kernel for tau.  /boot/vmlinuz-6.8.0+ is vanilla 6.8 with
 # /boot/config-6.8.0+, the baseline kernel of the revision's runs.
 BASE_KERNEL = "/boot/vmlinuz-6.8.0+"
-TAU_KERNEL = str(ROOT / "djournalplus-kernel.code/arch/x86/boot/bzImage")
+# the tau kernel and mkfs forks, next to this repository (set_env.sh)
+KERNEL_SRC = Path(os.environ.get("TAUFS_KERNEL",
+                                 ROOT.parent / "djournalplus-kernel.code"))
+E2FSPROGS = Path(os.environ.get("TAUFS_E2FSPROGS", ROOT.parent / "e2fsprogs"))
+XFSPROGS = Path(os.environ.get("TAUFS_XFSPROGS", ROOT.parent / "xfsprogs-dev"))
+TAU_KERNEL = str(KERNEL_SRC / "arch/x86/boot/bzImage")
 
 # tau-aware tools for the tau configurations; the rootfs carries only stock ones
 TAU_TOOLS = {
-    "mke2fs": ROOT / "e2fsprogs/misc/mke2fs",
-    "e2fsck": ROOT / "e2fsprogs/e2fsck/e2fsck",
-    "mkfs.xfs": ROOT / "xfsprogs-dev/mkfs/mkfs.xfs",
-    "xfs_repair": ROOT / "xfsprogs-dev/repair/xfs_repair",
+    "mke2fs": E2FSPROGS / "misc/mke2fs",
+    "e2fsck": E2FSPROGS / "e2fsck/e2fsck",
+    "mkfs.xfs": XFSPROGS / "mkfs/mkfs.xfs",
+    "xfs_repair": XFSPROGS / "repair/xfs_repair",
 }
 
 SOSP_TEST_OPT = "-t 32 -s 8M -b 16K -F 8"       # run.exp TEST_OPT_DFT

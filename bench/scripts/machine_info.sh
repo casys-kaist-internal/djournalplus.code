@@ -20,6 +20,13 @@ kv os "$(. /etc/os-release && echo "$PRETTY_NAME")"
 kv kernel "$(uname -r)"
 kv cmdline "$(cat /proc/cmdline)"
 
+section sources
+# the tau kernel and mkfs trees (set_env.sh): commit and local changes
+for t in TAUFS_KERNEL TAUFS_E2FSPROGS TAUFS_XFSPROGS; do
+  d=${!t}
+  kv "$t" "$d $(git -C "$d" describe --always --dirty --abbrev=12 2>/dev/null) ($(git -C "$d" rev-parse --abbrev-ref HEAD 2>/dev/null))"
+done
+
 section cpu
 kv model "$(lscpu | sed -n 's/^Model name: *//p')"
 kv topology "$(lscpu | sed -n 's/^Socket(s): *//p') sockets x $(lscpu | sed -n 's/^Core(s) per socket: *//p') cores x $(lscpu | sed -n 's/^Thread(s) per core: *//p') threads"
