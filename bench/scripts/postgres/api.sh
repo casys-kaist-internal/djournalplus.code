@@ -50,6 +50,14 @@ pg_fixed_settings() {
 }
 # sed -i "s/^#*max_connections = .*/max_connections = 200/" "$PG_DATA/postgresql.conf"
 
+# Copy-on-write file systems (btrfs, ZFS): the PG docs say zero-filling new WAL
+# files and recycling old ones do not help there (2026-10-01).
+pg_cow_settings() {
+  local pgdata="$1"
+  pg_conf_set "$pgdata" "wal_init_zero" "off"
+  pg_conf_set "$pgdata" "wal_recycle" "off"
+}
+
 log_pg_specs() {
   local out_log="$1"
   local dbname="$2"
@@ -66,6 +74,8 @@ log_pg_specs() {
     sudo -u "$PGUSER" "$PG_BIN/psql" -p "$PG_PORT" -d postgres -c "
       SHOW fsync;
       SHOW full_page_writes;
+      SHOW wal_init_zero;
+      SHOW wal_recycle;
       SHOW synchronous_commit;
       SHOW wal_level;
       SHOW max_wal_size;

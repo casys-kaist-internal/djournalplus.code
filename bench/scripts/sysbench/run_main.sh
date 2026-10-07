@@ -65,6 +65,9 @@ RUNNING_TIME=300       # 5 min per measurement, one PG checkpoint_timeout
 WARMUP_TIME=${WARMUP_TIME:-600}  # once, right after the restore
 WARMUP_THREADS=64
 POINT_WARMUP_TIME=60   # whenever the thread count changes
+# sysbench row-id distribution. The default (special) sends 75% of the accesses to
+# the middle 1% of each table and 99% to the middle 34%; uniform is the sensitivity point.
+SB_RAND_TYPE=special
 WORKLOADS=(oltp_update_index oltp_write_only oltp_update_non_index oltp_delete oltp_insert)
 # Workloads given after the DBMS replace the list, e.g. for a quick pilot
 if [ $# -gt 1 ]; then
@@ -88,6 +91,8 @@ case "$VARIANT" in
   nologwriter)  # no dedicated redo log writer/flusher threads
     [[ "$DBMS" == "mysql" ]] || { echo "❌ VARIANT=nologwriter is for mysql"; exit 1; }
     MY_EXTRA_ARGS="--innodb_log_writer_threads=OFF" ;;
+  uniform)  # row ids uniform over each table instead of sysbench's default (special)
+    SB_RAND_TYPE=uniform ;;
   binlog)  # MySQL 8.4 default binary log (on, sync_binlog=1) instead of off
     [[ "$DBMS" == "mysql" ]] || { echo "❌ VARIANT=binlog is for mysql"; exit 1; }
     MY_BINLOG=ON ;;
@@ -178,6 +183,7 @@ run_postgres_block() {
   DBNAME="main_t${TABLE}"
   pg_fpw $PG_DATA $FPW
   pg_fixed_settings $PG_DATA
+  case $FS in btrfs|zfs*) pg_cow_settings $PG_DATA ;; esac
 
   $PG_BIN/pg_ctl -D $PG_DATA -l "$RESULT_DIR/${BLOCK}_server.log" start
   log_pg_specs "$RESULT_DIR/${BLOCK}.spec" "$DBNAME" "$BLOCK"
@@ -185,7 +191,7 @@ run_postgres_block() {
   SB_ARGS=(--db-driver=pgsql --auto_inc=on
            --pgsql-host=127.0.0.1 --pgsql-port="$PG_PORT"
            --pgsql-user="$PGUSER" --pgsql-db="$DBNAME"
-           --tables=$TABLE --table-size=$ROWS)
+           --tables=$TABLE --table-size=$ROWS --rand-type=$SB_RAND_TYPE)
   run_sweep
 
   # The shutdown checkpoint can write all of shared_buffers; on ext4 data=journal
@@ -204,13 +210,6 @@ run_mysql_block() {
     DBW=OFF
   fi
 
-  if [[ "$FS" == "zfs-16k" ]]; then
-    MY_LOGS="$MOUNT_DIR/mysql_logs"
-    MY_BINLOGS="$MOUNT_DIR/mysql_binlogs"
-    sudo chown -R $MYUSER:$MYUSER $MY_LOGS
-    sudo chown -R $MYUSER:$MYUSER $MY_BINLOGS
-  fi
-
   # The image must hold the full pre-created redo log, or the first ~16 GB of
   # redo run at about half speed while InnoDB creates the files.
   local redo_bytes want_bytes
@@ -221,13 +220,18 @@ run_mysql_block() {
     exit 1
   fi
 
+  # OpenZFS Workload Tuning (InnoDB): native AIO off on ZFS. With it on, OpenZFS
+  # 2.2.2 crashed the kernel in io_submit completion (2026-10-02).
+  local my_extra=$MY_EXTRA_ARGS
+  case $FS in zfs*) MY_EXTRA_ARGS="$MY_EXTRA_ARGS --innodb_use_native_aio=OFF" ;; esac
   echo "[*] Start mysqld"
   start_mysqld "$MY_DATA" "$MY_SOCK" $DBW "$RESULT_DIR/${BLOCK}_server.log"
+  MY_EXTRA_ARGS=$my_extra
   log_mysql_specs $MY_SOCK "$RESULT_DIR/${BLOCK}.spec" $DBNAME
 
   SB_ARGS=(--db-driver=mysql
            --mysql-user=root --mysql-socket="$MY_SOCK" --mysql-db="$DBNAME"
-           --tables=$TABLE --table-size=$ROWS)
+           --tables=$TABLE --table-size=$ROWS --rand-type=$SB_RAND_TYPE)
   run_sweep
 
   log_numa_maps $MYSQLD_PID "$RESULT_DIR/${BLOCK}.spec"

@@ -14,6 +14,9 @@ GOVERNOR=performance
 EPB=0                   # energy_perf_bias: 0 = performance
 TURBO=on
 CSTATE_MAX_LATENCY=2    # us: POLL and C1 stay, C1E and C6 are disabled
+# OpenZFS caps the ARC at half of MemTotal, which still counts the reserved huge
+# pages (~188 GB). 32 GiB is the default a machine with 64 GB installed gets.
+ZFS_ARC_MAX=$((32 << 30))
 
 fail=0
 ok()  { echo "✓ $*"; }
@@ -28,6 +31,9 @@ apply() {
   for s in $cpu/cpu[0-9]*/cpuidle/state[0-9]*; do
     echo "$([ "$(cat $s/latency)" -gt $CSTATE_MAX_LATENCY ] && echo 1 || echo 0)" | sudo tee $s/disable >/dev/null
   done
+  if modinfo zfs >/dev/null 2>&1; then
+    sudo modprobe zfs && echo $ZFS_ARC_MAX | sudo tee /sys/module/zfs/parameters/zfs_arc_max >/dev/null
+  fi
 }
 
 check() {
@@ -60,6 +66,12 @@ check() {
     ok "C-states with exit latency > ${CSTATE_MAX_LATENCY}us disabled"
   else
     bad "C-states not as wanted (exit latency > ${CSTATE_MAX_LATENCY}us off):$(echo $bad_states | tr ' ' '\n' | sed 's|.*/||' | sort | uniq -c | xargs)"
+  fi
+
+  if [ -d /sys/module/zfs ]; then
+    uniq=$(cat /sys/module/zfs/parameters/zfs_arc_max)
+    [ "$uniq" = $ZFS_ARC_MAX ] && ok "zfs_arc_max $((ZFS_ARC_MAX >> 30)) GiB" \
+      || bad "zfs_arc_max=$uniq, want $ZFS_ARC_MAX"
   fi
 }
 

@@ -46,6 +46,7 @@ for FS in ${TARGET_FILESYSTEM}; do
       sudo chown -R $PGUSER:$PGUSER $PG_DATA
       $PG_BIN/initdb -D $PG_DATA
       pg_fpw $PG_DATA "off"
+      case $FS in btrfs|zfs*) pg_cow_settings $PG_DATA ;; esac
       $PG_BIN/pg_ctl -D $PG_DATA start
 
       echo "[*] Create DB & sysbench prepare"
@@ -56,7 +57,10 @@ for FS in ${TARGET_FILESYSTEM}; do
           --pgsql-user="$PGUSER" --pgsql-db="$DBNAME" \
           oltp_read_write --tables="$SB_TABLES" --table-size="$ROWS" prepare
 
-      $PG_BIN/psql -d "$DBNAME"  -c "ANALYZE;"
+      # Freeze the loaded rows now (also sets hint bits and the visibility map).
+      # Otherwise every restored run spends its measurements in aggressive
+      # autovacuums that freeze the whole freshly loaded dataset (2026-09-29).
+      $PG_BIN/vacuumdb -d "$DBNAME" --freeze --analyze --jobs="$SB_TABLES"
       $PG_BIN/psql -d postgres -c "CHECKPOINT;"
 
       echo "[*] Stop PostgreSQL"
@@ -79,7 +83,7 @@ for FS in ${TARGET_FILESYSTEM}; do
           --innodb_redo_log_capacity=$MY_REDO_LOG_CAPACITY
 
       # No binlog while loading, or the prepare binlogs (~ the data size) end up
-      # in the image. Benchmark runs keep the default (binlog on).
+      # in the image. Benchmark runs have no binlog either (MY_BINLOG in mysql/api.sh).
       echo "[*] Start mysqld"
       $MYSQL_BIN/mysqld \
           --datadir="$MY_DATA" \

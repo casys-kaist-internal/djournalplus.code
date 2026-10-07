@@ -98,6 +98,7 @@ log_mysql_specs() {
       SHOW VARIABLES LIKE 'innodb_log_spin_cpu%';
       SHOW VARIABLES LIKE 'innodb_log_writer_threads';
       SHOW VARIABLES LIKE 'innodb_numa_interleave';
+      SHOW VARIABLES LIKE 'innodb_use_native_aio';
       SHOW VARIABLES LIKE 'sync_binlog';
     "
 

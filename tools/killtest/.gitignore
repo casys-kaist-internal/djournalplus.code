@@ -1,0 +1,7 @@
+/work/
+# Results stay on the machine that made them (results/<host>/: each
+# experiment's ANALYSIS.md, run directories, logs, scripts); git keeps one
+# summary per machine, results/<host>/SUMMARY.md.
+/results/**
+!/results/*/
+!/results/*/SUMMARY.md

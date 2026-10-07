@@ -52,7 +52,7 @@ do_mkfs() {
     f2fs)
       sudo mkfs.f2fs -f $DEVICE
       ;;
-    btrfs)
+    btrfs|btrfs-nodatacow)
       sudo mkfs.btrfs -f $DEVICE
       ;;
     xfs|xfs-cow)
@@ -63,18 +63,11 @@ do_mkfs() {
       sudo zpool destroy -f zfspool || true
       sudo zpool create -o ashift=12 zfspool $DEVICE
       ;;
-    zfs-8k)
-      sudo wipefs -a $DEVICE
+    zfs-8k|zfs-16k)  # one dataset, recordsize = DB page (PG 8k, MySQL 16k), no compression
+      # destroy first: a pool re-imported at boot keeps the device busy for wipefs
       sudo zpool destroy -f zfspool || true
-      sudo zpool create -o ashift=12 zfspool $DEVICE
-      ;;
-    zfs-16k)
       sudo wipefs -a $DEVICE
-      sudo zpool destroy -f zfspool || true
-      sudo zpool create -o ashift=12 zfspool $DEVICE
-      sudo zfs create -o recordsize=16k -o compress=lz4 -o redundant_metadata=most zfspool/mysql_data
-      sudo zfs create -o compress=gzip -o primarycache=none zfspool/mysql_logs
-      sudo zfs create -o compress=lz4 zfspool/mysql_binlogs
+      sudo zpool create -o ashift=12 -O recordsize=${FS#zfs-} -O compression=off zfspool $DEVICE
       ;;
     xfs-tau)
       sudo mkfs.xfs $DEVICE -f -l tjmaxsize=1G
@@ -106,6 +99,9 @@ mount_fs() {
     btrfs)
       sudo mount -t btrfs $DEVICE $MOUNT_DIR
       ;;
+    btrfs-nodatacow)  # files created on it skip CoW (and data checksums): the no-CoW floor
+      sudo mount -t btrfs -o nodatacow $DEVICE $MOUNT_DIR
+      ;;
     xfs|xfs-cow)
       sudo mount -t xfs $DEVICE $MOUNT_DIR
       ;;
@@ -116,11 +112,8 @@ mount_fs() {
       sudo zfs set recordsize=4k zfspool
       sudo zfs set mountpoint=$MOUNT_DIR zfspool
       ;;
-    zfs-8k)
-      sudo zfs set recordsize=8k zfspool
-      sudo zfs set mountpoint=$MOUNT_DIR zfspool
-      ;;
-    zfs-16k)
+    zfs-8k|zfs-16k)
+      sudo zfs set recordsize=${FS#zfs-} compression=off zfspool
       sudo zfs set mountpoint=$MOUNT_DIR zfspool
       ;;
     ext4-tau)
@@ -143,7 +136,7 @@ clear_fs() {
       ;;
     f2fs)
       ;;
-    btrfs)
+    btrfs|btrfs-nodatacow)
       ;;
     xfs|xfs-cow)
       ;;
@@ -267,13 +260,16 @@ create_backup_fs_image()
     xfs|xfs-cow|xfs-tau)
       sudo partclone.xfs -c -s $DEVICE -o "$BACKUP_DIR/${FS}_${KEY}.img"
       ;;
-    zfs|zfs-8k)
+    btrfs|btrfs-nodatacow)
+      sudo partclone.btrfs -c -s $DEVICE -o "$BACKUP_DIR/${FS}_${KEY}.img"
+      ;;
+    zfs)
       mount_fs $FS $MOUNT_DIR
       sudo zfs snapshot zfspool@pgbackup
       sudo sh -c "zfs send zfspool@pgbackup > '$BACKUP_DIR/${FS}_${KEY}.img'"
       umount_fs $MOUNT_DIR
       ;;
-    zfs-16k)
+    zfs-8k|zfs-16k)  # replication stream: keeps recordsize and compression
       mount_fs $FS $MOUNT_DIR
       sudo zfs snapshot -r zfspool@pgbackup
       sudo sh -c "zfs send -R zfspool@pgbackup > '$BACKUP_DIR/${FS}_${KEY}.img'"
@@ -297,6 +293,9 @@ restore_filesystem() {
       ;;
     xfs|xfs-cow|xfs-tau)
       sudo partclone.xfs -r -s $BACKUP_DIR/${FS}_${KEY}.img -o $TAU_DEVICE
+      ;;
+    btrfs|btrfs-nodatacow)
+      sudo partclone.btrfs -r -s $BACKUP_DIR/${FS}_${KEY}.img -o $TAU_DEVICE
       ;;
     zfs|zfs-4k|zfs-8k|zfs-16k)
       do_mkfs $FS $DEVICE

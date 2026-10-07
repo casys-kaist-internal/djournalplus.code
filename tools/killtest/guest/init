@@ -1,0 +1,27 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0
+#
+# killtest guest init, PID 1.  mkrootfs.sh installs this as /opt/killtest/init
+# and killtest.py boots the kernel with init=/opt/killtest/init.
+#
+# The root file system is mounted read only and stays that way -- a SIGKILLed
+# VM never leaves it to repair.  Everything a run needs (guest.sh, its
+# settings, the verifier, kernel modules) is on the tools disk, which
+# killtest.py rebuilds for every run, so this stub is all the rootfs carries.
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mountpoint -q /dev || mount -t devtmpfs devtmpfs /dev
+mount -t tmpfs tmpfs /run
+mount -t tmpfs tmpfs /tmp
+
+if mount -o ro /dev/vdb /kt && [ -x /kt/guest.sh ]; then
+	exec /kt/guest.sh
+fi
+
+echo "killtest-init: no tools disk at /dev/vdb" > /dev/console
+echo o > /proc/sysrq-trigger
+while :; do sleep 3600; done
