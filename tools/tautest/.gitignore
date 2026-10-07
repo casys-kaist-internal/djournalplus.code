@@ -1,0 +1,12 @@
+# built by the Makefile (inside the guest; see README)
+tauwrite
+tauwrite_nofsync
+taurace
+tauappend
+tauoverwrite
+tausync
+taucprace
+tautorn
+pgscan
+taushort
+tauabort

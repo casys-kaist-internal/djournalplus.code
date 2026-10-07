@@ -1,0 +1,58 @@
+#!/bin/bash
+# An unlinked tau file is let go once nothing holds it, not at unmount; the
+# blocks it gave back can be reused across a power cut (#24).
+#   usage: unlink-test.sh [xfs|ext4|both] [live|crash|all]
+# WARNING: runs mkfs on $TAU_DEV inside the guest.
+
+set -u
+cd "$(dirname "$0")" || exit 1
+. ./vm.sh
+
+FSLIST=${1:-both}
+CASES=${2:-all}
+case "$FSLIST" in
+both) FSLIST="xfs ext4" ;;
+xfs|ext4) ;;
+*) echo "usage: $0 [xfs|ext4|both] [live|crash|all]" >&2; exit 2 ;;
+esac
+[ "$CASES" = all ] && CASES="live crash"
+
+rc=0
+summary=""
+for fs in $FSLIST; do
+	for c in $CASES; do
+		tag="$fs $c"
+		echo
+		echo "############ $tag ############"
+		vm_boot_tested || { rc=1; break 2; }
+		vm_sync_tests || { rc=1; break 2; }
+		if [ "$c" = live ]; then
+			vm_ssh "~/tautest/guest/unlink.sh $fs live"
+			case $? in
+			0) summary+="$tag: PASS\n" ;;
+			*) summary+="$tag: FAIL\n"; vm_console_faults; rc=1 ;;
+			esac
+			continue
+		fi
+		vm_ssh "TAU_FS_SIZE=${TAU_FS_SIZE:-8g} ~/tautest/guest/unlink.sh $fs write"
+		case $? in
+		0) ;;
+		3) summary+="$tag: INCONCLUSIVE\n"; vm_crash; continue ;;
+		*) summary+="$tag: FAIL (before the power cut)\n"; vm_console_faults
+		   rc=1; vm_crash; continue ;;
+		esac
+		vm_crash || { rc=1; break 2; }
+		vm_boot || { rc=1; break 2; }
+		vm_ssh "~/tautest/guest/unlink.sh $fs verify"
+		case $? in
+		0) summary+="$tag: PASS\n" ;;
+		*) summary+="$tag: FAIL\n"; vm_console_faults; rc=1 ;;
+		esac
+	done
+done
+
+echo
+echo "== summary =="
+printf "%b" "$summary"
+[ $rc -eq 0 ] && echo "ALL PASS" || echo "FAILURES (console log: $VM_LOG)"
+exit $rc
