@@ -2,8 +2,10 @@
 # Flush order (taudocs/plan.md §10): every crash state a volatile write cache
 # can leave, rebuilt from a dm-log-writes log and recovered (guest/flushorder.sh).
 #   usage: flushorder-test.sh [xfs|ext4|both] [cases, comma list] [fsyncs]
-# cases: append falloc subappend overwrite (default: all).  CONTROL=0 skips the
-# control run (records FUA without PREFLUSH: overwrite must FAIL).
+# cases: append falloc subappend overwrite reuse (default: all).  CONTROL=0 skips
+# the control runs (records FUA without PREFLUSH, and the segment map FUA without
+# PREFLUSH: overwrite must FAIL in both; a freed segment reused while the disk
+# map still names it: reuse must FAIL).
 # Loop devices on the guest's /dev/shm: no real disk is written.
 
 set -u
@@ -11,7 +13,7 @@ cd "$(dirname "$0")" || exit 1
 . ./vm.sh
 
 FSLIST=${1:-both}
-CASES=${2:-append,falloc,subappend,overwrite}
+CASES=${2:-append,falloc,subappend,overwrite,reuse}
 N=${3:-24}
 [ "$FSLIST" = both ] && FSLIST="xfs ext4"
 CASES=${CASES//,/ }
@@ -44,6 +46,20 @@ if [ "${CONTROL:-1}" = 1 ]; then
 		case "$out" in
 		*"RESULT: FAIL"*) summary+="$fs control (FUA-only records, overwrite): FAIL, as it must\n" ;;
 		*) summary+="$fs control: did not fail -- the test cannot see a missing flush\n"; rc=1 ;;
+		esac
+		echo; echo "############ $fs control: segment map FUA without PREFLUSH ############"
+		out=$(vm_ssh "SEGMAP_FUA_ONLY=1 ~/tautest/guest/flushorder.sh $fs overwrite $N" 2>&1)
+		echo "$out"
+		case "$out" in
+		*"RESULT: FAIL"*) summary+="$fs control (FUA-only segment map, overwrite): FAIL, as it must\n" ;;
+		*) summary+="$fs segment map control: did not fail -- the unmount is not covered\n"; rc=1 ;;
+		esac
+		echo; echo "############ $fs control: segment reused before the map stops naming it ############"
+		out=$(vm_ssh "REUSE_FLUSH_ONLY=1 ~/tautest/guest/flushorder.sh $fs reuse $N" 2>&1)
+		echo "$out"
+		case "$out" in
+		*"RESULT: FAIL"*) summary+="$fs control (reuse without the map write): FAIL, as it must\n" ;;
+		*) summary+="$fs reuse control: did not fail -- the reuse case does not see it\n"; rc=1 ;;
 		esac
 	done
 fi

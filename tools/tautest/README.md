@@ -1054,11 +1054,26 @@ dm-log-writes, which logs a plain write only once a later flush makes it
 durable and a FUA write when it completes. The log is then replayed entry by
 entry, and at every flush, FUA and mark the disk is copied, mounted (tau
 recovery) and the file checked: every write whole, in order, and every write
-an fsync returned for present (a mark follows each fsync). Cases: `append`
+an fsync returned for present (a mark follows each fsync). The replay goes on
+to the end of the log, so the unmount -- its last checkpoint and segment map
+write -- is checked as well. At every flush it also checks each state that
+lost one plain write of that flush's interval (single-drop: a volatile cache
+may lose any of them; `FO_DROP=0` skips these). Cases: `append`
 (allocating commits), `falloc` (conversions), `subappend` (size-only commits),
-`overwrite` (no host log force). The control (`RECORD_FUA_ONLY=1`, kernel knob
+`overwrite` (no host log force), `reuse` (2 MiB segments: file 1 fills its first
+segment and goes idle, its txs age out, file 2 is given that segment; file 1
+must keep its twenty 128 KiB writes -- taudocs/bug.md #57; INCONCLUSIVE unless a
+freed segment was really reused). The control (`RECORD_FUA_ONLY=1`, kernel knob
 `tau_record_fua_only`) sends every record FUA without PREFLUSH -- durable
-before its data -- and `overwrite` must FAIL. Needs `drivers/md/dm-log-writes.ko`
+before its data -- and `overwrite` must FAIL. A second control
+(`SEGMAP_FUA_ONLY=1`, `tau_segmap_fua_only`) writes the segment map FUA without
+PREFLUSH, as before #347 (taudocs/bug.md #53): a map that frees segments can
+reach the disk before the home writes, and `overwrite` must FAIL during the
+unmount. A third (`REUSE_FLUSH_ONLY=1`, `tau_reuse_flush_only`) reuses a freed
+segment after a bare flush, the map not written, as before #349, and `reuse`
+must FAIL in single-drop states (#348's `TAIL_UNFLUSHED` control went with
+#345's record without a flush). `FO_KEEP=1` keeps the log in the guest's
+`/dev/shm` for a look at the entries a failure names. Needs `drivers/md/dm-log-writes.ko`
 from the kernel tree (`make drivers/md/dm-log-writes.ko`); the host script
 copies it in.
 
@@ -1066,6 +1081,14 @@ copies it in.
 |---|---|---|
 | #345, 24 fsyncs | all four PASS, 301 crash states; 23/23/24/0 records without a flush | all four PASS, 298 states |
 | #345, control | FAIL 45 of 51 states | FAIL 47 of 49 |
+| #347, 24 fsyncs, through the unmount | all four PASS, 355 states, 52 of them in the unmount | all four PASS, 366 states, 66 in the unmount |
+| #347, control: records FUA only | FAIL 46 of 64 | FAIL 48 of 65 |
+| #347, control: segment map FUA only | FAIL at the unmount's map write (entry 609): 23 of 24 fsync'd writes there | FAIL (entry 1295): 17 of 24 |
+| #348, with single-drop | all four PASS: 409 states, 576 single-drop; records without a flush 20/19/4/0 of 24 | all four PASS: 424 states, 759 single-drop; 18/18/5/0 of 24 |
+| #348, control: tail moves without a flush (append) | prefix OK 90, single-drop FAIL 40 of 157 (torn) | prefix OK 95, single-drop FAIL 36 of 268 |
+| #348, reuse (1 MiB segments then) | FAIL: single-drop, file 1 holds file 2's data; and a no-flush record's lost descriptor made an orphan floor drop file 1's fsync'd writes | FAIL, both alike |
+| #349 (#345 reverted, map before reuse), all five cases | PASS: prefix 718, single-drop 2251 (reuse 1718) | PASS: prefix 736, single-drop 2620 (reuse 1901) |
+| #349, control: reuse without the map write | FAIL: file 1's first write holds file 2's data | FAIL, the same |
 
 ### One fsync, request by request
 
