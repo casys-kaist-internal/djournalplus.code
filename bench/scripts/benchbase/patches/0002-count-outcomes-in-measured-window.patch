@@ -1,0 +1,30 @@
+diff --git a/src/main/java/com/oltpbenchmark/api/Worker.java b/src/main/java/com/oltpbenchmark/api/Worker.java
+index e50cbcea..c34ae94a 100644
+--- a/src/main/java/com/oltpbenchmark/api/Worker.java
++++ b/src/main/java/com/oltpbenchmark/api/Worker.java
+@@ -623,13 +623,18 @@ public abstract class Worker<T extends BenchmarkModule> implements Runnable {
+             LOG.warn("Connection error detected.");
+           }
+ 
+-          switch (status) {
+-            case UNKNOWN -> this.txnUnknown.put(transactionType);
+-            case SUCCESS -> this.txnSuccess.put(transactionType);
+-            case USER_ABORTED -> this.txnAbort.put(transactionType);
+-            case RETRY -> this.txnRetry.put(transactionType);
+-            case RETRY_DIFFERENT -> this.txtRetryDifferent.put(transactionType);
+-            case ERROR -> this.txnErrors.put(transactionType);
++          // Count the outcome only in the measured window, as the latencies are:
++          // otherwise the warm-up's transactions go into the goodput and the
++          // per-type counts, which are divided by the measured time
++          if (this.workloadState.getGlobalState() == MEASURE) {
++            switch (status) {
++              case UNKNOWN -> this.txnUnknown.put(transactionType);
++              case SUCCESS -> this.txnSuccess.put(transactionType);
++              case USER_ABORTED -> this.txnAbort.put(transactionType);
++              case RETRY -> this.txnRetry.put(transactionType);
++              case RETRY_DIFFERENT -> this.txtRetryDifferent.put(transactionType);
++              case ERROR -> this.txnErrors.put(transactionType);
++            }
+           }
+         }
+       }

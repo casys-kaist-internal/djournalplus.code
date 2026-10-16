@@ -61,9 +61,12 @@ ROOTFS = WORK / "rootfs.img"
 STOCK = ROOT / "bench/workspace/stock"
 
 # The SOSP round booted vanilla v6.8 (6.8.0-ge8f897f4afef) for the baselines
-# and the tau kernel for tau.  /boot/vmlinuz-6.8.0+ is vanilla 6.8 with
-# /boot/config-6.8.0+, the baseline kernel of the revision's runs.
-BASE_KERNEL = "/boot/vmlinuz-6.8.0+"
+# and the tau kernel for tau.  The revision's baselines boot the performance
+# runs' kernel (TAU_BASE_KERNEL in bench/machines/<host>.env, 6.8.0-base+:
+# vanilla 6.8 with /boot/config-6.8.0+ plus the aio and jbd2 stable fixes)
+# with the host's modules, so ZFS is the host's OpenZFS 2.2.2 as well.  Runs
+# up to 2026-10-07 booted /boot/vmlinuz-6.8.0+ (vanilla, OpenZFS 2.2.11).
+BASE_KERNEL = "/boot/vmlinuz-" + os.environ.get("TAU_BASE_KERNEL", "6.8.0-base+")
 # the tau kernel and mkfs forks: submodules under codes/ (set_env.sh)
 KERNEL_SRC = Path(os.environ.get("TAUFS_KERNEL",
                                  ROOT / "codes/djournalplus-kernel.code"))
@@ -242,10 +245,11 @@ KILL_DELAY_S = {"mysql": (30, 240), "postgres": (0, 240)}
 # run, and reads back what the guest last saw in flight (ktwatch's page)
 RANDOM_DELAY_S = (30, 270)
 KILL_GATE = {"mysql": "none", "postgres": "checkpoint"}
-# MySQL on ZFS: native AIO off (OpenZFS's workload tuning guide; with it on, a
-# host running OpenZFS 2.2.2 hard-locked in the io_submit completion path,
-# 2026-10-02).  The SOSP round did not set it.
-DB_MY_ZFS_OPTS = "--innodb_use_native_aio=OFF"
+# MySQL on ZFS: native AIO stays on (MySQL 8.4's default), as in the
+# performance runs.  The io_submit hard lock with it on (2026-10-02) was the
+# Linux 6.8 aio_complete() wakeup bug, fixed in the baseline kernel
+# (caeb4b0a11b3); runs up to 2026-10-07 had it off.
+DB_MY_ZFS_OPTS = ""
 
 # What exp_db.sh counted as a torn page, per database
 DB_TORN_PAT = {"postgres": "invalid page",
@@ -1040,7 +1044,7 @@ def db_conf(a, c, ctx):
     zfs_split = a.fs.startswith("zfs") and settings["zfs_log_dataset"]
     if a.fs.startswith("zfs"):
         pg_conf += settings["pg_cow_conf"]
-        if a.db == "mysql":
+        if a.db == "mysql" and DB_MY_ZFS_OPTS:
             my_opts += " " + DB_MY_ZFS_OPTS
     v = {
         "FS": a.fs, "WORKLOAD": "db", "TEST_OPT": "",
@@ -1639,7 +1643,7 @@ def cmd_db(a):
         "max_sectors_kb": a.max_sectors_kb,
         "wbt_lat_usec": a.wbt_lat_usec, "test_size_gib": test_size,
         "db_start_timeout": a.db_start_timeout, "db_giveup_s": a.db_giveup_s,
-        "fsconf": c, "image": str(golden),
+        "fsconf": c, "image": str(golden), "test_image": str(ctx.test_img),
         "kernel": ctx.kernel, "release": ctx.release,
         "kernel_version": ctx.kversion, "qemu": ctx.qemu,
         "qemu_version": qemu_version(ctx.qemu), "smp": ctx.smp, "mem": ctx.mem,

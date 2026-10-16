@@ -1,0 +1,93 @@
+diff --git a/src/main/java/com/oltpbenchmark/benchmarks/tpcc/TPCCBenchmark.java b/src/main/java/com/oltpbenchmark/benchmarks/tpcc/TPCCBenchmark.java
+index 4d79e405..c83b9804 100644
+--- a/src/main/java/com/oltpbenchmark/benchmarks/tpcc/TPCCBenchmark.java
++++ b/src/main/java/com/oltpbenchmark/benchmarks/tpcc/TPCCBenchmark.java
+@@ -71,6 +71,17 @@ public final class TPCCBenchmark extends BenchmarkModule {
+ 
+     int numTerminals = workConf.getTerminals();
+ 
++    // <randomWarehouse>true</randomWarehouse>: every transaction picks its warehouse
++    // and district at random over all warehouses (as HammerDB's "Use All Warehouses")
++    // instead of the terminal's home warehouse, so that fewer terminals than
++    // warehouses still touch the whole database
++    boolean randomWarehouse =
++        workConf.getXmlConfig() != null
++            && workConf.getXmlConfig().getBoolean("randomWarehouse", false);
++    if (randomWarehouse) {
++      LOG.info("TPC-C: warehouse and district chosen at random for every transaction");
++    }
++
+     // We distribute terminals evenly across the warehouses
+     // Eg. if there are 10 terminals across 7 warehouses, they
+     // are distributed as
+@@ -107,7 +118,14 @@ public final class TPCCBenchmark extends BenchmarkModule {
+         lowerDistrictId += 1;
+ 
+         TPCCWorker terminal =
+-            new TPCCWorker(this, workerId++, w_id, lowerDistrictId, upperDistrictId, numWarehouses);
++            new TPCCWorker(
++                this,
++                workerId++,
++                w_id,
++                lowerDistrictId,
++                upperDistrictId,
++                numWarehouses,
++                randomWarehouse);
+         terminals[lowerTerminalId + terminalId] = terminal;
+       }
+     }
+diff --git a/src/main/java/com/oltpbenchmark/benchmarks/tpcc/TPCCWorker.java b/src/main/java/com/oltpbenchmark/benchmarks/tpcc/TPCCWorker.java
+index cc79b36f..086d7b86 100644
+--- a/src/main/java/com/oltpbenchmark/benchmarks/tpcc/TPCCWorker.java
++++ b/src/main/java/com/oltpbenchmark/benchmarks/tpcc/TPCCWorker.java
+@@ -42,13 +42,17 @@ public final class TPCCWorker extends Worker<TPCCBenchmark> {
+ 
+   private final int numWarehouses;
+ 
++  /** Pick the warehouse and district of every transaction at random. */
++  private final boolean randomWarehouse;
++
+   public TPCCWorker(
+       TPCCBenchmark benchmarkModule,
+       int id,
+       int terminalWarehouseID,
+       int terminalDistrictLowerID,
+       int terminalDistrictUpperID,
+-      int numWarehouses) {
++      int numWarehouses,
++      boolean randomWarehouse) {
+     super(benchmarkModule, id);
+ 
+     this.terminalWarehouseID = terminalWarehouseID;
+@@ -56,6 +60,7 @@ public final class TPCCWorker extends Worker<TPCCBenchmark> {
+     this.terminalDistrictUpperID = terminalDistrictUpperID;
+ 
+     this.numWarehouses = numWarehouses;
++    this.randomWarehouse = randomWarehouse;
+   }
+ 
+   /** Executes a single TPCC transaction of type transactionType. */
+@@ -64,14 +69,15 @@ public final class TPCCWorker extends Worker<TPCCBenchmark> {
+       throws UserAbortException, SQLException {
+     try {
+       TPCCProcedure proc = (TPCCProcedure) this.getProcedure(nextTransaction.getProcedureClass());
+-      proc.run(
+-          conn,
+-          gen,
+-          terminalWarehouseID,
+-          numWarehouses,
+-          terminalDistrictLowerID,
+-          terminalDistrictUpperID,
+-          this);
++      int warehouseID = terminalWarehouseID;
++      int districtLowerID = terminalDistrictLowerID;
++      int districtUpperID = terminalDistrictUpperID;
++      if (randomWarehouse) {
++        warehouseID = TPCCUtil.randomNumber(1, numWarehouses, gen);
++        districtLowerID = 1;
++        districtUpperID = TPCCConfig.configDistPerWhse;
++      }
++      proc.run(conn, gen, warehouseID, numWarehouses, districtLowerID, districtUpperID, this);
+     } catch (ClassCastException ex) {
+       // fail gracefully
+       LOG.error("We have been invoked with an INVALID transactionType?!", ex);

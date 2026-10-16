@@ -303,6 +303,26 @@ restore_filesystem() {
   local KEY=$2
   local BACKUP_DIR=$3
   warning
+  # Every run starts from the same SSD state: trim the whole test device first,
+  # so nothing written by earlier runs is still valid inside the SSD (garbage
+  # collection otherwise depends on the run order; 2026-10-09). The FS and DB
+  # never trim afterwards (no discard mount option, autotrim off).
+  if [[ "${TAU_TRIM_BEFORE_RESTORE:-1}" == 1 ]]; then
+    sudo zpool export zfspool 2>/dev/null || true
+    echo "[+] Trimming $TAU_DEVICE (blkdiscard)"
+    sudo blkdiscard -f "$TAU_DEVICE" || { echo "blkdiscard $TAU_DEVICE failed"; exit 1; }
+  fi
+  # SSD sensitivity runs (run_main.sh VARIANT=fullfill): then write the whole
+  # device once sequentially, so every LBA holds valid data and the SSD keeps
+  # only its own spare area free (one pass of SNIA PTS's workload-independent
+  # preconditioning); the image is restored over it.
+  if [[ "${TAU_FILL_BEFORE_RESTORE:-0}" == 1 ]]; then
+    echo "[+] Filling $TAU_DEVICE sequentially (fio, 1 MiB, QD32) $(date -u --rfc-3339=seconds)"
+    sudo fio --name=fill --filename="$TAU_DEVICE" --direct=1 --ioengine=libaio --rw=write \
+      --bs=1m --iodepth=32 --size=100% --eta=never --group_reporting \
+      | grep -E "WRITE:|write:" || { echo "fill of $TAU_DEVICE failed"; exit 1; }
+    echo "[+] Fill done $(date -u --rfc-3339=seconds)"
+  fi
   echo "[+] Restoring filesystem: $FS"
 
   case $FS in

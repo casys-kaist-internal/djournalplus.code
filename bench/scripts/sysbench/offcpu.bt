@@ -1,0 +1,47 @@
+// Where MySQL's user threads ("connection") spend their time off the CPU:
+// from switching out (sched_switch, which records the state the thread left
+// in) to running again (finish_task_switch, where the thread's stacks show
+// what it waited on). Waiting for a CPU (preempted: TASK_REPORT_MAX, or
+// yielded: running) is summed apart; blocked time is summed per user stack
+// and per kernel stack. Usage: bpftrace offcpu.bt <mysqld pid>   (the window
+// ends with SIGINT; run with BPFTRACE_MAP_KEYS_MAX raised, the stacks are many)
+
+tracepoint:sched:sched_switch
+/pid == $1 && comm == "connection"/
+{
+	@t0[tid] = nsecs;
+	@st[tid] = args.prev_state;
+}
+
+kprobe:finish_task_switch
+/pid == $1 && @t0[tid]/
+{
+	$ns = nsecs - @t0[tid];
+	$s = @st[tid];
+	delete(@t0[tid]);
+	delete(@st[tid]);
+	if ($s == 0 || $s == 256) {
+		@runq_ns = sum($ns);
+		@runq_n = count();
+	} else {
+		@blocked_ns = sum($ns);
+		@blocked_n = count();
+		if ($s == 2) {
+			@blocked_d_ns = sum($ns);
+		}
+		@blk_u[ustack(perf, 48)] = sum($ns);
+		@blk_k[kstack(perf, 16)] = sum($ns);
+	}
+}
+
+BEGIN
+{
+	printf("window_begin_ns %llu\n", nsecs);
+}
+
+END
+{
+	printf("window_end_ns %llu\n", nsecs);
+	clear(@t0);
+	clear(@st);
+}

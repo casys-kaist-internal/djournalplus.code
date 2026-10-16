@@ -119,7 +119,10 @@ def main():
     runs = {}
     for db in ("mysql", "postgres"):
         src = raw / "sysbench" / db
-        names = sorted(d.name for d in src.glob("20*") if d.is_dir()) \
+        # profiling runs (run_main.sh PROFILE=..., <run>_prof-<mode>) carry
+        # instruments and one point only: not throughput data
+        names = sorted(d.name for d in src.glob("20*")
+                       if d.is_dir() and "_prof-" not in d.name) \
             if src.is_dir() else []
         kept = [n for n in names if have_summary(src / n)]
         if kept:

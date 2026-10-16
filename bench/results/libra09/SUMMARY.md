@@ -4,11 +4,11 @@ Made by `bench/scripts/export_results.py` from the results in
 `bench/workspace/results/libra09/sysbench/<db>/<run>/` (outside git, on libra09);
 notes on the runs in `README.md`.
 
-Machine (`env.txt` of mysql/20261002_083534_uniform; full snapshot in `bench/machines/libra09.txt`):
+Machine (`env.txt` of postgres/20261010_023220_fullfill; full snapshot in `bench/machines/libra09.txt`):
 
     host:                    libra09
     product:                 Supermicro SYS-1029U-TR4
-    kernel:                  6.8.0+
+    kernel:                  6.8.0-base+
     model:                   Intel(R) Xeon(R) Gold 5218 CPU @ 2.30GHz
     topology:                2 sockets x 16 cores x 1 threads
     turbo:                   on
@@ -51,15 +51,19 @@ full_page_writes / InnoDB doublewrite; KB/trx = device writes per transaction at
 | update_non_index | zfs-16k | off | 4235 | 25765 | 37935 | 51486 | 74452 | 9.1 | `20261002_031438` |
 | write_only | btrfs | off | 239 | 907 | 1216 | 1721 | 2080 | 68.9 | `20261001_171503` |
 | write_only | btrfs-uniform | off |  |  |  |  | 811 | 226.4 | `20261002_072816_uniform` |
-| write_only | ext4 | off | 2332 | 16326 | 27276 | 38380 | 45715 | 25.6 | `20260929_063532` |
-| write_only | ext4 | on | 2008 | 12586 | 19286 | 25717 | 32230 | 47.5 | `20260929_063532` |
-| write_only | ext4-dj40 | off | 1708 | 8456 | 12604 | 16414 | 20502 | 43.5 | `20260929_231455` |
+| write_only | ext4 | off | 2362 | 16824 | 28294 | 40319 | 47902 | 25.5 | `20261009_081451` |
+| write_only | ext4 | on | 2089 | 13473 | 20737 | 27490 | 35030 | 47.2 | `20261009_081451` |
+| write_only | ext4-dj40 | off | 1671 | 8547 | 12679 | 16829 | 21021 | 43.6 | `20261009_081451` |
+| write_only | ext4-dj40-fullfill | off | 1631 | 8364 | 12508 | 16495 | 20765 | 43.5 | `20261009_212738_fullfill` |
 | write_only | ext4-dj40-uniform | off |  |  |  |  | 8590 | 123.9 | `20261001_044332_uniform` |
+| write_only | ext4-fullfill | off | 2388 | 16662 | 27414 | 38897 | 45597 | 25.7 | `20261009_212738_fullfill` |
+| write_only | ext4-fullfill | on | 2047 | 13091 | 19840 | 26331 | 33192 | 47.5 | `20261009_212738_fullfill` |
 | write_only | ext4-uniform | off |  |  |  |  | 21539 | 72.8 | `20261001_032505_uniform` |
 | write_only | ext4-uniform | on |  |  |  |  | 11935 | 139.1 | `20261001_032505_uniform` |
-| write_only | xfs | off | 2282 | 15061 | 26105 | 36000 | 42036 | 24.8 | `20260929_063532` |
-| write_only | xfs | on | 1945 | 12273 | 19507 | 25860 | 32602 | 46.5 | `20260929_063532` |
-| write_only | zfs-16k | off | 1053 | 4804 | 8158 | 9307 | 10085 | 78.1 | `20261002_031438` |
+| write_only | xfs | off | 2293 | 15660 | 26190 | 36156 | 44017 | 24.7 | `20261009_081451` |
+| write_only | xfs | on | 2089 | 13117 | 20314 | 27547 | 34838 | 45.7 | `20261009_081451` |
+| write_only | zfs-16k | off | 1520 | 9268 | 15983 | 22813 | 27355 | 53.3 | `20261009_081451` |
+| write_only | zfs-16k-fullfill | off | 1504 | 9250 | 15844 | 22614 | 25721 | 53.8 | `20261009_212738_fullfill` |
 | write_only | zfs-16k-uniform | off |  |  |  |  | 5287 | 297.7 | `20261002_083534_uniform` |
 
 ## sysbench postgres
@@ -89,13 +93,17 @@ full_page_writes / InnoDB doublewrite; KB/trx = device writes per transaction at
 | update_non_index | zfs-8k | off | 6312 | 34720 | 55294 | 76805 | 105516 | 8.4 | `20261001_212126` |
 | write_only | btrfs | off | 1469 | 1202 | 6218 | 4732 | 12372 | 21.9 | `20261001_123918` |
 | write_only | btrfs-uniform | off |  |  |  |  | 2370 | 57.2 | `20261002_064708_uniform` |
-| write_only | ext4 | off | 3031 | 20730 | 34691 | 49401 | 61345 | 16.6 | `20260930_054131` |
-| write_only | ext4 | on | 2720 | 15461 | 22257 | 26339 | 27207 | 49.0 | `20260930_054131` |
-| write_only | ext4-dj40 | off | 2551 | 13057 | 15235 | 24339 | 26331 | 31.3 | `20260930_223555` |
+| write_only | ext4 | off | 3004 | 20387 | 35092 | 50925 | 62207 | 17.3 | `20261009_151712` |
+| write_only | ext4 | on | 2661 | 15770 | 23610 | 28810 | 29240 | 50.4 | `20261009_151712` |
+| write_only | ext4-dj40 | off | 2336 | 12721 | 19095 | 24077 | 27902 | 34.8 | `20261009_151712` |
+| write_only | ext4-dj40-fullfill | off | 2268 | 12724 | 19110 | 23369 | 27382 | 35.0 | `20261010_023220_fullfill` |
 | write_only | ext4-dj40-uniform | off |  |  |  |  | 13312 | 77.1 | `20261001_064502_uniform` |
+| write_only | ext4-fullfill | off | 2977 | 20278 | 35029 | 49947 | 61332 | 17.4 | `20261010_023220_fullfill` |
+| write_only | ext4-fullfill | on | 2724 | 15715 | 23145 | 28174 | 28737 | 50.2 | `20261010_023220_fullfill` |
 | write_only | ext4-uniform | off |  |  |  |  | 37738 | 44.5 | `20261001_052459_uniform` |
 | write_only | ext4-uniform | on |  |  |  |  | 14506 | 99.8 | `20261001_052459_uniform` |
-| write_only | xfs | off | 3129 | 20267 | 33347 | 46943 | 56750 | 16.6 | `20260930_054131` |
-| write_only | xfs | on | 2795 | 15481 | 22558 | 26904 | 27672 | 49.4 | `20260930_054131` |
-| write_only | zfs-8k | off | 2371 | 13094 | 19207 | 24536 | 25341 | 62.7 | `20261001_212126` |
+| write_only | xfs | off | 2981 | 20070 | 33662 | 48098 | 58655 | 17.3 | `20261009_151712` |
+| write_only | xfs | on | 2754 | 15918 | 24186 | 29834 | 29858 | 51.5 | `20261009_151712` |
+| write_only | zfs-8k | off | 2210 | 12508 | 18593 | 23539 | 24160 | 70.8 | `20261009_151712` |
+| write_only | zfs-8k-fullfill | off | 2205 | 12484 | 18577 | 23463 | 23939 | 60.2 | `20261010_023220_fullfill` |
 | write_only | zfs-8k-uniform | off |  |  |  |  | 8958 | 206.0 | `20261002_080556_uniform` |

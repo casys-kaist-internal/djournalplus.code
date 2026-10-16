@@ -1,0 +1,62 @@
+// Time MySQL threads spend getting a free buffer-pool page: from entering
+// buf_LRU_get_free_block() to its return, which covers the free-list and LRU
+// scans, LRU_list_mutex waits and the single-page flushes a user thread does
+// when nothing is free (the libra08 waits2.bt definition). Per thread name;
+// user (connection) threads are "connection". Also the single-page flushes
+// themselves (buf_flush_single_page_from_LRU) and the free-list fast path.
+// Usage: bpftrace freepage_wait.bt <mysqld pid>   (MYSQLD is replaced with the
+// binary's path before running; the window ends with SIGINT)
+
+uprobe:MYSQLD:_Z22buf_LRU_get_free_blockP10buf_pool_t
+/pid == $1/
+{
+	@t0[tid] = nsecs;
+}
+
+uretprobe:MYSQLD:_Z22buf_LRU_get_free_blockP10buf_pool_t
+/pid == $1 && @t0[tid]/
+{
+	$ns = nsecs - @t0[tid];
+	delete(@t0[tid]);
+	@get_ns[comm] = sum($ns);
+	@get_calls[comm] = count();
+	@get_us[comm] = hist($ns / 1000);
+	// the uprobe pair itself adds a few us to every call; calls over 20 us
+	// are the ones that waited (mutex, flush), and barely move with it
+	if ($ns > 20000) {
+		@slow_ns[comm] = sum($ns);
+		@slow_calls[comm] = count();
+	}
+}
+
+uprobe:MYSQLD:_Z30buf_flush_single_page_from_LRUP10buf_pool_t
+/pid == $1/
+{
+	@f0[tid] = nsecs;
+}
+
+uretprobe:MYSQLD:_Z30buf_flush_single_page_from_LRUP10buf_pool_t
+/pid == $1 && @f0[tid]/
+{
+	@single_flush_ns[comm] = sum(nsecs - @f0[tid]);
+	@single_flush_calls[comm] = count();
+	delete(@f0[tid]);
+}
+
+uprobe:MYSQLD:_Z21buf_LRU_get_free_onlyP10buf_pool_t
+/pid == $1/
+{
+	@free_only_calls[comm] = count();
+}
+
+BEGIN
+{
+	printf("window_begin_ns %llu\n", nsecs);
+}
+
+END
+{
+	printf("window_end_ns %llu\n", nsecs);
+	clear(@t0);
+	clear(@f0);
+}

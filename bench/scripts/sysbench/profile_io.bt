@@ -1,0 +1,199 @@
+#!/usr/bin/env bpftrace
+/*
+ * Write and sync paths of one DBMS during a measurement, per file type
+ * (run_main.sh PROFILE=trace). Needs kernel BTF.
+ *
+ * $1  task filter: 0 = tasks named "postgres", otherwise the mysqld pid
+ * $2  dev_t of the test device (major << 20 | minor), for the jbd2 tracepoints
+ *
+ * File type (first map key), from file->f_path.dentry->d_name:
+ *   0 log    PG WAL segment (24 characters, timeline-1 prefix "00000001"),
+ *            MySQL "#ib_redo*"
+ *   1 dwb    "*.dblwr"
+ *   2 data   PG relation file (name starts with 1-9), "*.ibd"
+ *   3 other
+ * Writes enter through vfs_write (write, pwrite), vfs_writev (pwritev: PG data
+ * files) or aio_write (io_submit: InnoDB native AIO); second key 0/1/2. Bytes
+ * are the return values (aio_write: the request size). Syncs: vfs_fsync_range,
+ * second key = datasync (0 fsync, 1 fdatasync).
+ * Nested times, per type of the enclosing call: jbd2_log_wait_commit in syncs
+ * (ext4), zil_commit in syncs and dmu_tx_wait in writes and syncs (ZFS).
+ * jbd2 commit and checkpoint statistics of the test device, and
+ * __jbd2_log_wait_for_space. Latencies in microseconds.
+ */
+
+kprobe:vfs_write, kprobe:vfs_writev
+/($1 == 0 && comm == "postgres") || ($1 != 0 && pid == $1)/
+{
+	$d = ((struct file *)arg0)->f_path.dentry;
+	$s = str($d->d_name.name);
+	$t = 3;
+	if (strncmp($s, "#ib_redo", 8) == 0) { $t = 0; }
+	else if (strncmp($s, "00000001", 8) == 0 && *(uint8 *)($d->d_name.name + 24) == 0 &&
+	    *(uint8 *)($d->d_name.name + 23) != 0) { $t = 0; }
+	else if (strcontains($s, ".dblwr")) { $t = 1; }
+	else if (strcontains($s, ".ibd")) { $t = 2; }
+	else {
+		$c = *(uint8 *)$d->d_name.name;
+		if ($c >= 49 && $c <= 57) { $t = 2; }
+	}
+	@w_t[tid] = nsecs;
+	@w_ty[tid] = $t;
+	@w_path[tid] = probe == "kprobe:vfs_write" ? 0 : 1;
+	@in_w[tid] = $t + 1;
+}
+
+kretprobe:vfs_write, kretprobe:vfs_writev
+/@w_t[tid]/
+{
+	$us = (nsecs - @w_t[tid]) / 1000;
+	$t = @w_ty[tid];
+	$p = @w_path[tid];
+	@write_n[$t, $p] = count();
+	@write_us[$t, $p] = sum($us);
+	if ((int64)retval > 0) { @write_bytes[$t, $p] = sum(retval); }
+	@write_lat[$t] = lhist($us, 0, 20000, 10);
+	@write_log2[$t] = hist($us);
+	delete(@w_t[tid]); delete(@w_ty[tid]); delete(@w_path[tid]); delete(@in_w[tid]);
+}
+
+kprobe:aio_write
+/($1 == 0 && comm == "postgres") || ($1 != 0 && pid == $1)/
+{
+	$d = ((struct kiocb *)arg0)->ki_filp->f_path.dentry;
+	$s = str($d->d_name.name);
+	$t = 3;
+	if (strncmp($s, "#ib_redo", 8) == 0) { $t = 0; }
+	else if (strncmp($s, "00000001", 8) == 0 && *(uint8 *)($d->d_name.name + 24) == 0 &&
+	    *(uint8 *)($d->d_name.name + 23) != 0) { $t = 0; }
+	else if (strcontains($s, ".dblwr")) { $t = 1; }
+	else if (strcontains($s, ".ibd")) { $t = 2; }
+	else {
+		$c = *(uint8 *)$d->d_name.name;
+		if ($c >= 49 && $c <= 57) { $t = 2; }
+	}
+	@a_t[tid] = nsecs;
+	@a_ty[tid] = $t;
+	@a_len[tid] = ((struct iocb *)arg1)->aio_nbytes;
+	@in_w[tid] = $t + 1;
+}
+
+kretprobe:aio_write
+/@a_t[tid]/
+{
+	$us = (nsecs - @a_t[tid]) / 1000;
+	$t = @a_ty[tid];
+	@write_n[$t, 2] = count();
+	@write_us[$t, 2] = sum($us);
+	if ((int64)retval == 0) { @write_bytes[$t, 2] = sum(@a_len[tid]); }
+	@write_lat[$t] = lhist($us, 0, 20000, 10);
+	@write_log2[$t] = hist($us);
+	delete(@a_t[tid]); delete(@a_ty[tid]); delete(@a_len[tid]); delete(@in_w[tid]);
+}
+
+kprobe:vfs_fsync_range
+/($1 == 0 && comm == "postgres") || ($1 != 0 && pid == $1)/
+{
+	$d = ((struct file *)arg0)->f_path.dentry;
+	$s = str($d->d_name.name);
+	$t = 3;
+	if (strncmp($s, "#ib_redo", 8) == 0) { $t = 0; }
+	else if (strncmp($s, "00000001", 8) == 0 && *(uint8 *)($d->d_name.name + 24) == 0 &&
+	    *(uint8 *)($d->d_name.name + 23) != 0) { $t = 0; }
+	else if (strcontains($s, ".dblwr")) { $t = 1; }
+	else if (strcontains($s, ".ibd")) { $t = 2; }
+	else {
+		$c = *(uint8 *)$d->d_name.name;
+		if ($c >= 49 && $c <= 57) { $t = 2; }
+	}
+	@s_t[tid] = nsecs;
+	@s_ty[tid] = $t;
+	@s_ds[tid] = arg3 ? 1 : 0;
+	@in_s[tid] = $t + 1;
+}
+
+kretprobe:vfs_fsync_range
+/@s_t[tid]/
+{
+	$us = (nsecs - @s_t[tid]) / 1000;
+	$t = @s_ty[tid];
+	@sync_n[$t, @s_ds[tid]] = count();
+	@sync_us[$t, @s_ds[tid]] = sum($us);
+	@sync_lat[$t] = lhist($us, 0, 100000, 20);
+	@sync_log2[$t] = hist($us);
+	delete(@s_t[tid]); delete(@s_ty[tid]); delete(@s_ds[tid]); delete(@in_s[tid]);
+}
+
+/* Nested waits, charged to the type of the enclosing write or sync */
+kprobe:jbd2_log_wait_commit /@in_s[tid]/ { @jw_t[tid] = nsecs; }
+kretprobe:jbd2_log_wait_commit /@jw_t[tid]/
+{
+	@sync_jbd2_wait_n[@in_s[tid] - 1] = count();
+	@sync_jbd2_wait_us[@in_s[tid] - 1] = sum((nsecs - @jw_t[tid]) / 1000);
+	delete(@jw_t[tid]);
+}
+
+kprobe:zil_commit /@in_s[tid]/ { @zc_t[tid] = nsecs; }
+kretprobe:zil_commit /@zc_t[tid]/
+{
+	@sync_zil_commit_n[@in_s[tid] - 1] = count();
+	@sync_zil_commit_us[@in_s[tid] - 1] = sum((nsecs - @zc_t[tid]) / 1000);
+	delete(@zc_t[tid]);
+}
+
+kprobe:dmu_tx_wait /@in_w[tid] || @in_s[tid]/ { @dt_t[tid] = nsecs; }
+kretprobe:dmu_tx_wait /@dt_t[tid]/
+{
+	$us = (nsecs - @dt_t[tid]) / 1000;
+	if (@in_w[tid]) {
+		@write_dmu_tx_wait_n[@in_w[tid] - 1] = count();
+		@write_dmu_tx_wait_us[@in_w[tid] - 1] = sum($us);
+	} else {
+		@sync_dmu_tx_wait_n[@in_s[tid] - 1] = count();
+		@sync_dmu_tx_wait_us[@in_s[tid] - 1] = sum($us);
+	}
+	delete(@dt_t[tid]);
+}
+
+/* jbd2 of the test device */
+tracepoint:jbd2:jbd2_run_stats /args->dev == $2/
+{
+	@jbd2_commits = count();
+	@jbd2_blocks = sum(args->blocks);
+	@jbd2_blocks_logged = sum(args->blocks_logged);
+	@jbd2_handles = sum(args->handle_count);
+	@jbd2_wait_ms = sum(args->wait);
+	@jbd2_request_delay_ms = sum(args->request_delay);
+	@jbd2_running_ms = sum(args->running);
+	@jbd2_locked_ms = sum(args->locked);
+	@jbd2_flushing_ms = sum(args->flushing);
+	@jbd2_logging_ms = sum(args->logging);
+	@jbd2_blocks_logged_hist = hist(args->blocks_logged);
+}
+
+tracepoint:jbd2:jbd2_checkpoint_stats /args->dev == $2/
+{
+	@jbd2_ckpt_n = count();
+	@jbd2_ckpt_ms = sum(args->chp_time);
+	@jbd2_ckpt_forced_to_close = sum(args->forced_to_close);
+	@jbd2_ckpt_written = sum(args->written);
+	@jbd2_ckpt_dropped = sum(args->dropped);
+}
+
+kprobe:__jbd2_log_wait_for_space { @ws_t[tid] = nsecs; }
+kretprobe:__jbd2_log_wait_for_space /@ws_t[tid]/
+{
+	$us = (nsecs - @ws_t[tid]) / 1000;
+	@jbd2_wait_for_space_n = count();
+	@jbd2_wait_for_space_us = sum($us);
+	@jbd2_wait_for_space_max_us = max($us);
+	delete(@ws_t[tid]);
+}
+
+END
+{
+	clear(@w_t); clear(@w_ty); clear(@w_path); clear(@in_w);
+	clear(@a_t); clear(@a_ty); clear(@a_len);
+	clear(@s_t); clear(@s_ty); clear(@s_ds); clear(@in_s);
+	clear(@jw_t); clear(@zc_t); clear(@dt_t); clear(@ws_t);
+}

@@ -30,7 +30,7 @@ if [[ ! -f "$TAU_MACHINE_ENV" ]]; then
   return 1
 fi
 source "$TAU_MACHINE_ENV"
-export TAU_MEM_GB TAU_BOOT_ARGS TAU_DB_CACHE_GB TAU_ZFS_ARC_GB
+export TAU_MEM_GB TAU_BOOT_ARGS TAU_DB_CACHE_GB TAU_ZFS_ARC_GB TAU_BASE_KERNEL
 # Results stay outside git, per machine
 export TAU_RESULTS=$TAUFS_BENCH_WS/results/$TAU_HOST
 

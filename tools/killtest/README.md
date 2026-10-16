@@ -185,9 +185,10 @@ caches; the performance runs' data does not.
 The databases are this tree's builds (`bench/workspace/pg_install`, PostgreSQL
 17.5; `bench/mysql-server/build`, MySQL 8.4.5), copied onto the tools disk;
 the rootfs carries their system libraries and sysbench (`WITH_DB=1`).  The
-server runs as the unprivileged `ktdb`.  One deviation from the SOSP round:
-MySQL on ZFS runs with `innodb_use_native_aio=OFF` (OpenZFS's tuning guide;
-with native AIO a host running OpenZFS 2.2.2 hard-locked, 2026-10-02).
+server runs as the unprivileged `ktdb`.  MySQL on ZFS keeps native AIO on, as
+in the performance runs: the hard lock seen with it on (2026-10-02) was the
+Linux 6.8 `aio_complete()` wakeup bug, fixed in the baseline kernel; runs up
+to 2026-10-07 had `innodb_use_native_aio=OFF`.
 
 ## What this crash model can and cannot produce
 
@@ -226,7 +227,7 @@ with native AIO a host running OpenZFS 2.2.2 hard-locked, 2026-10-02).
 |---|---|---|
 | guest control | expect over the serial console, root login | init stub (`guest/init`) runs `guest.sh` from a tools disk; markers come back on a second serial port |
 | rootfs | debootstrap noble + apt, systemd | debootstrap noble (minbase) with the same distro tools, booted read only; no systemd (udevd for zfs only) |
-| baseline kernel | vanilla v6.8 (`6.8.0-ge8f897f4afef`), built with `kernels/vmconfig` | `/boot/vmlinuz-6.8.0+`: vanilla 6.8 with `/boot/config-6.8.0+`; modules from the host |
+| baseline kernel | vanilla v6.8 (`6.8.0-ge8f897f4afef`), built with `kernels/vmconfig` | the performance runs' kernel, `/boot/vmlinuz-6.8.0-base+` (`TAU_BASE_KERNEL`): vanilla 6.8 with `/boot/config-6.8.0+` plus the aio and jbd2 stable fixes; modules from the host (OpenZFS 2.2.2). Until 2026-10-07: `/boot/vmlinuz-6.8.0+`, OpenZFS 2.2.11 |
 | writeback throttling | not built (`CONFIG_BLK_WBT=n`) | on (`wbt_lat_usec` 2000); `--wbt-lat-usec 0` turns it off |
 | tau kernel | `6.8.0tjournal+` | `codes/djournalplus-kernel.code/arch/x86/boot/bzImage` (`--kernel` to change) |
 | QEMU | 9.2.4 | 9.2.4 when `mkqemu.sh` has built it, else 7.2.1 (`tools/bin`); `--qemu` to choose |

@@ -1,10 +1,12 @@
-# QEMU kill 테스트 요약 — libra09, 2026-10-03 ~ 10-07
+# QEMU kill 테스트 요약 — libra09, 2026-10-03 ~ 10-14
 
 > `tools/killtest`로 libra09에서 돌린 실험 전부의 요약이다. 실험별 분석(`ANALYSIS.md`)과
 > 실행 기록(`run.json`, `trials.jsonl`, `summary.txt`, 로그, 스크립트)은 libra09의
 > `tools/killtest/results/libra09/<날짜_주제>/`에만 있다(§6). 방법과 크래시 모델은
 > [`../../README.md`](../../README.md). **비율은 이 환경의 숫자다** — 같은 하네스로도
 > 환경이 바뀌면 0–30%를 오간다(§3.1). τJournal은 돌리지 않았다(복구 경로 패치 중).
+> 논문 수치는 §3.11의 x100 캠페인이다(libra09의
+> `bench/workspace/results/libra09/paper/motivation/killtest_db_x100/`에 사본과 README).
 
 ## 0. 결론
 
@@ -35,6 +37,7 @@
 | 3.7 기본 로그 크기 (10-06) | **유지 설정** | 13/80 (16%) |
 | 3.8 ZFS 분리 구성 (10-07) | 같은 설정, ZFS | 0/40 |
 | 3.9 4 KiB 분할 없이 (10-07) | MySQL ext4 | 1/20 (분할 있을 때 7/20) |
+| 3.11 x100 캠페인 (10-10 ~ 10-14) | §2 설정, 게스트 6.8.0-base+, config당 100회 | MySQL ext4 54, xfs 32, ext4-dj 12, ZFS 0; PG ext4 15, xfs 15, ext4-dj 6, ZFS 0 (/100) |
 
 ## 1. 도구와 크래시 모델
 
@@ -244,6 +247,35 @@ WAL 조건 체크포인트가 run 시작 ~140 s 뒤부터 연달아 돈다.
 8회(1 찢어짐), PG ext4 `checkpoint_flush_after=0`·`bgwriter_flush_after=0` 1회, PG xfs 체크포인트
 중 kill 0회.
 
+### 3.11 x100 캠페인 — config당 100회 (10-10 ~ 10-14)
+
+§2 설정에서 바꾼 것: 게스트 커널을 성능 실험의 `6.8.0-base+`(aio·jbd2 수정 포함)와 호스트
+모듈로(OpenZFS 2.2.2), MySQL native AIO를 ZFS에서도 켬. 테스트 디스크는 모든 config에서 루트
+SATA 위 파일, ZFS golden 이미지만 PM1753(`--image`). 20회씩 5라운드(ZFS는 7라운드 중 SATA 5개),
+config를 번갈아, 시드는 라운드·config마다 고정(`scripts/db100*.sh`). 집계 `scripts/tally.py`:
+
+| config | trials | 찢어짐 (95% CI) | 그중 DB 재시작 실패 | 그중 재시작됨 |
+|---|---|---|---|---|
+| MySQL ext4 | 100 | 54 (44–64%) | 54 | 0 |
+| MySQL xfs | 100 | 32 (23–42%) | 32 | 0 |
+| MySQL ext4 data=journal | 100 | 12 (6–20%) | 10 | 2 |
+| MySQL ZFS | 100 | 0 (0–4%) | – | – |
+| PostgreSQL ext4 | 100 | 15 (9–24%) | 14 | 1 |
+| PostgreSQL xfs | 100 | 15 (9–24%) | 15 | 0 |
+| PostgreSQL ext4 data=journal | 100 | 6 (2–13%) | 6 | 0 |
+| PostgreSQL ZFS | 100 | 0 (0–4%) | – | – |
+
+- 재시작 실패는 모두 찢어짐과 함께 났고, 실패한 시도의 DB 로그에는 전부 찢어진 페이지 오류가
+  있다: MySQL `Database page corruption on disk`(MY-011906, 복구 2–8 s 만에) 뒤 91/96은 멈춰
+  60 s 뒤 포기, 5/96은 InnoDB assertion으로 종료; PostgreSQL은 `invalid page in block` 뒤 스스로
+  종료(35/35). 600 s 제한에 걸린 것은 없고, 재시작된 MySQL 복구는 최대 16 s.
+- 재시작된 찢어짐 3건(PG ext4 1, MySQL data=journal 2)은 복구 전 검사에서만 찢어진 페이지가
+  보였고, 복구가 그 페이지를 다시 썼다.
+- ZFS 3–4라운드는 시도별 테스트 디스크까지 PM1753에 둔 채 돌았다(`KILLTEST_WORK`). 게스트 I/O가
+  달라져(쓰기 64개 이상 걸린 시간 7% → 32%(MySQL), 1% → 58%(PG)) 민감도로 따로 둔다: 0/40, 0/40.
+- MySQL이 §3.7(바닐라 6.8.0+)보다 많이 찢어진다(ext4 30% → 54%, xfs 17% → 32%, 모든 라운드에서).
+  PostgreSQL은 그대로. native AIO와 커널의 aio 수정이 걸린 차이로 보이나 확인하지 않았다.
+
 ## 4. 정정
 
 - 10-05·06의 분석은 MySQL ext4의 쓰기 0개 torn을 "커널 writeback이 16 KiB 페이지의 4 KiB 조각
@@ -253,8 +285,7 @@ WAL 조건 체크포인트가 run 시작 ~140 s 뒤부터 연달아 돈다.
 
 ## 5. 남은 일
 
-- config당 100회 — §2 설정으로.
-- ext4 data=journal과 τJournal을 §2 설정으로(τ는 복구 경로 패치 중).
+- τJournal을 §2 설정으로(복구 경로 패치 중). config당 100회와 ext4 data=journal은 §3.11.
 - FPW/DWB를 켠 대조군: 찢어진 페이지가 있어도 복구되는지.
 - 쓰기 0개 torn의 정확한 경로(§3.9).
 
@@ -273,6 +304,8 @@ WAL 조건 체크포인트가 run 시작 ~140 s 뒤부터 연달아 돈다.
 | `2026-10-06_db_logdefault` | 감시 `104038`·`105555`; kill `110135`·`122934`·`141533`·`155203` |
 | `2026-10-07_db_zfs` | 감시 `172547`·`201222`; kill `174238`·`203039` |
 | `2026-10-07_db_msk512` | `20261006_231033` |
+| `2026-10-10_base_kernel_smoke` | `20261010_120609`(게스트 6.8.0-base+ 확인, MySQL ZFS 1회) |
+| `2026-10-10_db_x100` | `20261010_123546` … `20261014_055814`, 45개(첫 PG ZFS `20261010_220036`은 디스크 부족으로 0회); `scripts/db100.sh`·`db100b.sh`·`db100c.sh`·`db100d.sh`, `tally.py` |
 | `99_Archive` | `20261006_023520`·`065310`·`103503` |
 
 이미지는 `tools/killtest/work/db-<db>-<fs>[-revision[-mem<size>][-logdefault]].img`(gitignore).

@@ -22,6 +22,14 @@ command -v sysbench >/dev/null || { echo "sysbench not found"; exit 1; }
 command -v partclone.ext4 >/dev/null || { echo "partclone.ext4 not found"; exit 1; }
 mkdir -p "$BACKUP_DIR"
 
+# MySQL loads with native AIO on: on ZFS that needs the fixed kernel
+# (TAU_BASE_KERNEL in bench/machines/<host>.env)
+if [[ "$MODE" == "mysql" && -n "$TAU_BASE_KERNEL" && "$(uname -r)" != "$TAU_BASE_KERNEL" \
+      && " ${TARGET_FILESYSTEM} " == *zfs* ]]; then
+  echo "❌ MySQL on ZFS needs kernel $TAU_BASE_KERNEL (running $(uname -r))"
+  exit 1
+fi
+
 for FS in ${TARGET_FILESYSTEM}; do
   # partclone will not overwrite an image; fail before the hour of loading
   if [ -e "$BACKUP_DIR/${FS}_$(main_image_key).img" ]; then
@@ -89,8 +97,6 @@ for FS in ${TARGET_FILESYSTEM}; do
         sudo chown $MYUSER:$MYUSER "$LOG_DIR"
         MY_FS_ARGS=(--innodb_log_group_home_dir="$LOG_DIR")
       fi
-      # native AIO off on ZFS, as in run_main.sh
-      case $FS in zfs*) MY_FS_ARGS+=(--innodb_use_native_aio=OFF) ;; esac
       echo "[*] Initialize MySQL"
       # Redo log at the run-time capacity from the start: InnoDB pre-creates all
       # 32 redo files and keeps them through shutdown, so a restored image does

@@ -11,11 +11,13 @@ kernel and file-system tools, the benchmarks and the crash tests.
 | `codes/e2fsprogs/` | mke2fs fork that makes the tau journal (submodule, branch `tau`; `$TAUFS_E2FSPROGS`) |
 | `codes/xfsprogs-dev/` | mkfs.xfs fork (submodule; `$TAUFS_XFSPROGS`) |
 | `set_env.sh` | environment for every script; reads this machine's `bench/machines/<host>.env` |
-| `bench/scripts/` | performance benchmarks: `sysbench/` (run_main.sh, run_campaign.sh, create_image.sh, parse_main.py), `tpcc/`, `mysql/` and `postgres/` (install, server settings), `common.sh` (mkfs, mount, images), `host_setup.sh`, `machine_info.sh`, `export_results.py` |
+| `bench/scripts/` | performance benchmarks: `sysbench/` (run_main.sh, run_campaign.sh, create_image.sh, parse_main.py), `tpcc/`, `vectordb/` (pgvector through VectorDBBench: install.sh, fetch_dataset.sh, run_pgvector.sh, parse_pgvector.py), `benchbase/` (BenchBase TPC-C: install.sh builds the pinned upstream with patches/, pilot_tpcc.sh, pilot_report.py), `mysql/` and `postgres/` (install, server settings), `common.sh` (mkfs, mount, images), `host_setup.sh`, `machine_info.sh`, `export_results.py` |
 | `bench/machines/` | per machine: `<host>.env` (SSDs, memory budget) and `<host>.txt` (machine_info.sh snapshot) |
 | `bench/results/<host>/` | per-machine summary of the benchmark runs (`SUMMARY.md`) and what each run was (`README.md`) |
 | `bench/mysql-server/`, `bench/postgresql/` | MySQL 8.4 and PostgreSQL 17 sources (submodules) |
-| `bench/hammerDB/` | TPC-C templates for HammerDB |
+| `bench/hammerDB/` | TPC-C templates for HammerDB (HammerDB itself in `bench/workspace/`) |
+| `bench/VectorDBBench/` | VectorDBBench (zilliztech), the vector database benchmark: Milvus, pgvector, Qdrant, ... (submodule) |
+| `bench/benchbase/` | BenchBase (cmu-db), the TPC-C-derived workload (submodule at the pinned commit; `bench/scripts/benchbase/install.sh` applies our patches and builds into `bench/workspace/benchbase/`) |
 | `bench/workspace/` | not in git: the PostgreSQL install, stock mkfs, HammerDB, and the raw results (`results/<host>/`) |
 | `tools/killtest/` | QEMU kill test: torn pages after a crash, microbenchmark and databases; summary in `results/<host>/SUMMARY.md` |
 | `tools/torner/` | Torner: crash states enumerated from a dm-log-writes log (the plan in `CRASH_TODO.md`) |
@@ -46,7 +48,8 @@ they had local changes, in every result's machine snapshot.
    `bench/scripts/postgres/install_postgres.sh`,
    `bench/scripts/install_stock_mkfs.sh` (baselines use the distro mkfs; the
    system ones are the tau forks, built and installed from `$TAUFS_E2FSPROGS`
-   and `$TAUFS_XFSPROGS`), `bench/scripts/tpcc/install_tpcc.sh`.
+   and `$TAUFS_XFSPROGS`), `bench/scripts/tpcc/install_tpcc.sh`,
+   `bench/scripts/vectordb/install.sh` (pgvector, VectorDBBench venv).
 4. Make the file-system images once per database:
    `TARGET_FILESYSTEM="ext4 xfs" bench/scripts/sysbench/create_image.sh mysql`.
 5. Run: `bench/scripts/sysbench/run_campaign.sh <log>` (host setup and

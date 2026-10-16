@@ -59,17 +59,33 @@ FS_FPWOFF="${FS_FPWOFF-ext4 xfs}"
 #   postgres: FS_GROUPS="ext4-dj20 zfs-8k"   FS_FPWON=""  FS_FPWOFF="ext4-dj20 zfs-8k"
 # Stage 3: FS_GROUPS="ext4-tau xfs-tau"  FS_FPWON=""  FS_FPWOFF="ext4-tau xfs-tau"
 
+# Every baseline configuration runs on one kernel build (TAU_BASE_KERNEL in
+# bench/machines/<host>.env); the τ configurations run on the τ kernel.
+if [[ -n "$TAU_BASE_KERNEL" && "$KERNEL_VERSION" != "$TAU_BASE_KERNEL" && " $FS_GROUPS " != *tau* ]]; then
+  echo "❌ Baseline runs need kernel $TAU_BASE_KERNEL (running $KERNEL_VERSION)"
+  exit 1
+fi
+
 # Protocol (EVAL_PLAN §1): restore once per FS x FPW x workload, warm up, then
 # sweep the thread points on the same running DB without restoring.
 THREADS_LIST=(${THREADS_LIST:-1 8 16 32 64})
 LAST_POINT_RUNS=3      # the last point (64) is measured 3 times
-RUNNING_TIME=300       # 5 min per measurement, one PG checkpoint_timeout
+RUNNING_TIME=${RUNNING_TIME:-300}  # 5 min per measurement, one PG checkpoint_timeout
 WARMUP_TIME=${WARMUP_TIME:-600}  # once, right after the restore
 WARMUP_THREADS=64
 POINT_WARMUP_TIME=60   # whenever the thread count changes
 # sysbench row-id distribution. The default (special) sends 75% of the accesses to
 # the middle 1% of each table and 99% to the middle 34%; uniform is the sensitivity point.
 SB_RAND_TYPE=special
+# sysbench random seeds: fixed per invocation and the same for every
+# configuration, so all of them replay the same request streams (up to which
+# thread draws which stream); the repeated last-point runs get different seeds.
+# Warm-up 1, point warm-up 100 + threads, measurement 1000 x run + threads.
+# The images are loaded once per FS without a fixed seed (create_image.sh).
+# SB_FIXED_SEED=0 goes back to sysbench's default (seeded from the clock).
+SEED_WARMUP=1
+SB_FIXED_SEED=${SB_FIXED_SEED:-1}
+seed_opt() { if (( SB_FIXED_SEED )); then echo "--rand-seed=$1"; fi; }
 WORKLOADS=(oltp_update_index oltp_write_only oltp_update_non_index oltp_delete oltp_insert)
 # Workloads given after the DBMS replace the list, e.g. for a quick pilot
 if [ $# -gt 1 ]; then
@@ -98,8 +114,34 @@ case "$VARIANT" in
   binlog)  # MySQL 8.4 default binary log (on, sync_binlog=1) instead of off
     [[ "$DBMS" == "mysql" ]] || { echo "❌ VARIANT=binlog is for mysql"; exit 1; }
     MY_BINLOG=ON ;;
+  fullfill)  # SSD sensitivity: the whole device written once after the trim (common.sh)
+    TAU_FILL_BEFORE_RESTORE=1 ;;
   *) echo "❌ Unknown VARIANT: $VARIANT"; exit 1 ;;
 esac
+
+# PG checkpoints follow their own schedule (checkpoint_timeout = one 5-min
+# measurement, or max_wal_size). PG_PRE_CHECKPOINT=1 restores the old protocol,
+# a CHECKPOINT right before each measurement: it starts every run at the same
+# checkpoint phase, but then the FPW-off configurations, whose next checkpoint
+# is the timed one 5 min later, write their checkpoints outside the measured
+# window (2026-10-09).
+PG_PRE_CHECKPOINT=${PG_PRE_CHECKPOINT:-0}
+
+# Profiling runs (PROFILE=trace|perf|walkeep|diag, bench/scripts/sysbench/profile.sh):
+# one 5-min measurement at 64 threads after the usual restore and warm-up, with
+# collectors around it. PROFILE_THREADS="1 8 16 32 64" first measures the lower
+# points as the throughput runs do (no collectors), so that the profiled last
+# point sees the same history. The throughput runs (no PROFILE) carry no
+# tracing; with IOSTAT=0 they skip the per-second iostat too.
+PROFILE="${PROFILE:-}"
+IOSTAT=${IOSTAT:-1}
+if [[ -n "$PROFILE" ]]; then
+  source "$TAUFS_BENCH/scripts/sysbench/profile.sh"
+  profile_check || exit 1
+  THREADS_LIST=(${PROFILE_THREADS:-64})
+  LAST_POINT_RUNS=1
+  IOSTAT=1
+fi
 
 TABLE=$MAIN_TABLES
 ROWS=$MAIN_ROWS_PER_TABLE
@@ -130,7 +172,7 @@ block_sec=$(( WARMUP_TIME + ${#THREADS_LIST[@]} * POINT_WARMUP_TIME
 echo "=== $n_blocks blocks x ~$((block_sec / 60)) min = ~$((n_blocks * block_sec / 3600)) h ==="
 
 DATE=$(date +%Y%m%d_%H%M%S)
-RESULT_DIR="$TAU_RESULTS/sysbench/$DBMS/$DATE${VARIANT:+_$VARIANT}"
+RESULT_DIR="$TAU_RESULTS/sysbench/$DBMS/$DATE${VARIANT:+_$VARIANT}${PROFILE:+_prof-$PROFILE}"
 mkdir -p "$RESULT_DIR"
 
 # Device and DB-internal write counters around one measurement
@@ -144,17 +186,17 @@ log_io_counters() {
 }
 
 # Warm up, then measure every thread point on the running DB (needs SB_ARGS
-# and BLOCK). PG takes a CHECKPOINT right before each measurement so that every
-# configuration starts its 5 minutes at the same checkpoint phase.
+# and BLOCK). With PG_PRE_CHECKPOINT=1, PG takes a CHECKPOINT right before each
+# measurement.
 run_sweep() {
   local points=("${THREADS_LIST[@]}") last=${THREADS_LIST[-1]} prev=$WARMUP_THREADS i
   local -A runs=()
   for (( i=1; i<LAST_POINT_RUNS; i++ )); do points+=("$last"); done
 
   echo "--> Warming up $BLOCK (${WARMUP_TIME}s, $WARMUP_THREADS threads)"
-  iostat_start "$RESULT_DIR/${BLOCK}_warmup.iostat" $((WARMUP_TIME + 10))
+  if (( IOSTAT )); then iostat_start "$RESULT_DIR/${BLOCK}_warmup.iostat" $((WARMUP_TIME + 10)); fi
   sysbench $WORKLOAD "${SB_ARGS[@]}" --threads=$WARMUP_THREADS --time=$WARMUP_TIME \
-    --report-interval=10 run >> "$RESULT_DIR/${BLOCK}_warmup.log"
+    $(seed_opt $SEED_WARMUP) --report-interval=10 run >> "$RESULT_DIR/${BLOCK}_warmup.log"
   iostat_stop
 
   for THREADS in "${points[@]}"; do
@@ -163,20 +205,25 @@ run_sweep() {
     if [[ "$THREADS" != "$prev" ]]; then
       echo "--> Warming up $LABEL (${POINT_WARMUP_TIME}s)"
       sysbench $WORKLOAD "${SB_ARGS[@]}" --threads=$THREADS --time=$POINT_WARMUP_TIME \
-        --report-interval=10 run >> "$RESULT_DIR/${BLOCK}_warmup.log"
+        $(seed_opt $((100 + THREADS))) --report-interval=10 run >> "$RESULT_DIR/${BLOCK}_warmup.log"
       prev=$THREADS
     fi
-    if [[ "$DBMS" == "postgres" ]]; then
+    if [[ "$DBMS" == "postgres" ]] && (( PG_PRE_CHECKPOINT )); then
       sudo -u "$PGUSER" "$PG_BIN/psql" -p "$PG_PORT" -d postgres -qc "CHECKPOINT;"
     fi
 
     echo "--> Benchmarking $LABEL"
+    if [[ -n "$PROFILE" && "$THREADS" == "$last" ]]; then profile_begin "$LABEL"; fi
     log_io_counters begin "$RESULT_DIR/${LABEL}.io" || true
-    iostat_start "$RESULT_DIR/${LABEL}.iostat" $((RUNNING_TIME + 10))
+    if (( IOSTAT )); then iostat_start "$RESULT_DIR/${LABEL}.iostat" $((RUNNING_TIME + 10)); fi
     sysbench $WORKLOAD "${SB_ARGS[@]}" --threads=$THREADS --time=$RUNNING_TIME \
+      $(seed_opt $((1000 * runs[$THREADS] + THREADS))) \
       --report-interval=10 --percentile=99 --histogram=on run > "$RESULT_DIR/${LABEL}.log"
     iostat_stop
     log_io_counters end "$RESULT_DIR/${LABEL}.io" || true
+    # an `if`, not `&&`: as the last command of the loop a false test would
+    # return 1 from run_sweep and stop the script under set -e
+    if [[ -n "$PROFILE" && "$THREADS" == "$last" ]]; then profile_end "$LABEL"; fi
   done
 }
 
@@ -192,9 +239,11 @@ run_postgres_block() {
   pg_fpw $PG_DATA $FPW
   pg_fixed_settings $PG_DATA
   case $FS in btrfs|zfs*) pg_cow_settings $PG_DATA ;; esac
+  if [[ -n "$PROFILE" ]]; then profile_pg_settings $PG_DATA; fi
 
   $PG_BIN/pg_ctl -D $PG_DATA -l "$RESULT_DIR/${BLOCK}_server.log" start
   log_pg_specs "$RESULT_DIR/${BLOCK}.spec" "$DBNAME" "$BLOCK"
+  if [[ -n "$PROFILE" ]]; then profile_dump_once "$RESULT_DIR/$BLOCK"; fi
 
   SB_ARGS=(--db-driver=pgsql --auto_inc=on
            --pgsql-host=127.0.0.1 --pgsql-port="$PG_PORT"
@@ -231,10 +280,10 @@ run_mysql_block() {
     exit 1
   fi
 
-  # OpenZFS Workload Tuning (InnoDB): native AIO off on ZFS. With it on, OpenZFS
-  # 2.2.2 crashed the kernel in io_submit completion (2026-10-02).
+  # Native AIO stays on (8.4 default) on every FS, ZFS included: the io_submit
+  # crash on ZFS (2026-10-02) was the Linux 6.8 aio_complete() wakeup bug,
+  # fixed upstream by caeb4b0a11b3 and applied to the benchmark kernel.
   local my_extra=$MY_EXTRA_ARGS
-  case $FS in zfs*) MY_EXTRA_ARGS="$MY_EXTRA_ARGS --innodb_use_native_aio=OFF" ;; esac
   if [[ -n "$log_dir" ]]; then
     MY_EXTRA_ARGS="$MY_EXTRA_ARGS --innodb_log_group_home_dir=$log_dir"
   fi
@@ -242,6 +291,10 @@ run_mysql_block() {
   start_mysqld "$MY_DATA" "$MY_SOCK" $DBW "$RESULT_DIR/${BLOCK}_server.log"
   MY_EXTRA_ARGS=$my_extra
   log_mysql_specs $MY_SOCK "$RESULT_DIR/${BLOCK}.spec" $DBNAME
+  if [[ -n "$PROFILE" ]]; then
+    profile_mysql_settings
+    profile_dump_once "$RESULT_DIR/$BLOCK"
+  fi
 
   SB_ARGS=(--db-driver=mysql
            --mysql-user=root --mysql-socket="$MY_SOCK" --mysql-db="$DBNAME"
@@ -252,6 +305,13 @@ run_mysql_block() {
   $MYSQL_BIN/mysqladmin -uroot --socket="$MY_SOCK" shutdown
   wait $MYSQLD_PID || true
   umount_fs $MOUNT_DIR
+}
+
+# Discards seen by the test SSD (/proc/diskstats): restore_filesystem trims the
+# device, and nothing may trim it again during the block
+log_discards() {
+  echo "$1 $(awk -v d="$(tau_stat_devs)" '$3 == d {print "discards=" $15, "discard_sectors=" $17}' /proc/diskstats)" \
+    >> "$RESULT_DIR/${BLOCK}.spec"
 }
 
 ## Start here
@@ -268,8 +328,12 @@ for WORKLOAD in "${WORKLOADS[@]}"; do
       fi
       BLOCK="${DBMS}_${WORKLOAD}_${FS}${VARIANT:+-$VARIANT}_fpw_${FPW}_t${TABLE}"
       echo "=== $BLOCK: restoring ${FS}_${IMAGE_KEY} on $DEVICE ==="
+      echo "protocol: trim_before_restore=${TAU_TRIM_BEFORE_RESTORE:-1}" \
+        "fill_before_restore=${TAU_FILL_BEFORE_RESTORE:-0} pg_pre_checkpoint=$PG_PRE_CHECKPOINT" \
+        "fixed_seed=$SB_FIXED_SEED" >> "$RESULT_DIR/${BLOCK}.spec"
       restore_filesystem $FS "$IMAGE_KEY" $BACKUP_DIR
       mount_fs $FS $MOUNT_DIR
+      log_discards "discard counters after restore:"
       if [[ "$FS" == zfs* ]]; then
         sudo zfs get -H -r -t filesystem -o name,property,value \
           recordsize,compression,logbias zfspool >> "$RESULT_DIR/${BLOCK}.spec"
@@ -278,6 +342,7 @@ for WORKLOAD in "${WORKLOADS[@]}"; do
         postgres) run_postgres_block ;;
         mysql)    run_mysql_block ;;
       esac
+      log_discards "discard counters at block end:"
       log_ssd_state "$RESULT_DIR/${BLOCK}.spec"
       clear_fs $FS $DEVICE
     done # FPW

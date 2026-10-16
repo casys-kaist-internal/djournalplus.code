@@ -16,3 +16,9 @@
 [submodule "djournalplus-kernel.code"]
 	path = codes/djournalplus-kernel.code
 	url = git@github.com:casys-kaist-internal/djournalplus-kernel.code.git
+[submodule "bench/VectorDBBench"]
+	path = bench/VectorDBBench
+	url = https://github.com/zilliztech/VectorDBBench.git
+[submodule "bench/benchbase"]
+	path = bench/benchbase
+	url = https://github.com/cmu-db/benchbase.git

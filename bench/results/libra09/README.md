@@ -16,10 +16,16 @@ point (`bench/scripts/sysbench/run_main.sh`).
 | Stage 1 | `20260929_063532` | `20260930_054131` | ext4, xfs; protection (DWB/FPW) on and off; write_only, update_index, update_non_index, insert |
 | ext4 data=journal | `20260929_231455` | `20260930_223555` | ext4-dj40, protection off, the four workloads |
 | btrfs | `20261001_171503` | `20261001_123918` | protection off, the four workloads |
-| ZFS, old layout | `20261002_031438` | `20261001_212126` | zfs-16k / zfs-8k as one dataset, logbias latency, OpenZFS 2.2.2. To run again with the data/log split (2026-10-06) |
+| ZFS, old layout | `20261002_031438` | `20261001_212126` | zfs-16k / zfs-8k as one dataset, logbias latency, OpenZFS 2.2.2; for write_only superseded by the motivation runs below (data/log split) |
 | uniform | `20261001_032505_uniform`, `044332_uniform`, `20261002_072816_uniform`, `083534_uniform` | `20261001_052459_uniform`, `064502_uniform`, `20261002_064708_uniform`, `080556_uniform` | write_only at 64 threads, `--rand-type uniform`: ext4 on/off, ext4-dj40, btrfs, ZFS (old layout) |
-| crashed | `20261002_010451_crashed-aio` | | ZFS with native AIO on, until the host hard-locked (64 threads, 3rd run); since then native AIO is off on ZFS |
+| crashed | `20261002_010451_crashed-aio` | | ZFS with native AIO on, until the host hard-locked (64 threads, 3rd run): the Linux 6.8 aio_complete() bug, fixed in the 6.8.0-base+ kernel (caeb4b0a11b3); native AIO is on everywhere since 2026-10-08 |
+| motivation, no TRIM | `20261008_113515` | `20261008_051022`, `20261008_061809` | write_only on kernel 6.8.0-base+, fixed seeds: ext4/xfs on/off, ext4-dj40, ZFS with the data/log split. Superseded: the SSD's latency drifted up during the campaign and MySQL ran last (`sysbench/diag/drift_20261008_2311`) |
+| drift check | `20261008_231822`, `20261009_001853` | | MySQL XFS_App write_only after a full blkdiscard of the SSD, fixed / clock seeds |
+| motivation, TRIM | `20261009_081451` | `20261009_015201` | the same with a blkdiscard of the test SSD before every restore; MySQL is the paper's Figure 2 data (`paper/motivation/sysbench_write_only/`), PG still forced a CHECKPOINT before each measurement (superseded) |
+| motivation, PG checkpoints | | `20261009_151712` | PG write_only with the TRIM and without the forced CHECKPOINT (`PG_PRE_CHECKPOINT=0`): the paper's PG data |
+| SSD sensitivity | `20261009_212738_fullfill` | `20261010_023220_fullfill` | EXT4 Raw/App, EXT4_Data, ZFS with the test SSD written over its whole capacity after the trim (`VARIANT=fullfill`) |
+| profiling | `20261013_141643_prof-diag`, `20261014_074820_prof-diag` (off-CPU) | `20261013_122418_prof-diag`, `20261013_154102_prof-diag` | §3 Tables 2/3: write_only at 64 threads with counters, then a diagnosis window (`PROFILE=diag`): PG log sync on EXT4 Raw/App, EXT4_Data, ZFS (the second run measures 64 after 1–32 threads, as Figure 2), MySQL free-page waits and an off-CPU profile of the user threads on EXT4 Raw/App, ZFS perf profiles. Not exported; analysis in `paper/motivation/sysbench_profile_20261013/`. Smoke tests: `20261013_115659_prof-diag`, `20261013_121345_prof-diag` |
 
-Raw only, not exported: `sysbench/diag/` (ZFS and btrfs diagnosis, 2026-10-02/03), `fio/`
+Raw only, not exported: `benchbase/` (BenchBase TPC-C: pilot at 100 warehouses, and the 1,100-warehouse runs whose sweeps are the paper's data in `paper/evaluation/tpcc_benchbase/`, 2026-10-14/15; its README), `sysbench/diag/` (ZFS and btrfs diagnosis, 2026-10-02/03), `fio/`
 (pwrite and ext4 data=journal microbenchmarks, 2026-10-03), `pgbench/` and `tpcc/` (earlier
 rounds), every `99_Archive/`. The QEMU kill tests: `tools/killtest/results/libra09/SUMMARY.md`.

@@ -1,0 +1,15 @@
+diff --git a/src/main/java/com/oltpbenchmark/api/Worker.java b/src/main/java/com/oltpbenchmark/api/Worker.java
+--- a/src/main/java/com/oltpbenchmark/api/Worker.java
++++ b/src/main/java/com/oltpbenchmark/api/Worker.java
+@@ -726,8 +726,9 @@
+     // ------------------
+     // POSTGRES: https://www.postgresql.org/docs/current/errcodes-appendix.html
+     // ------------------
+-    // Postgres serialization_failure
+-    return errorCode == 0 && sqlState.equals("40001");
++    // Postgres serialization_failure, and deadlock_detected (as MySQL's ER_LOCK_DEADLOCK
++    // above: TPC-C NewOrder updates its stock rows in random item order)
++    return errorCode == 0 && (sqlState.equals("40001") || sqlState.equals("40P01"));
+   }
+ 
+   /**
