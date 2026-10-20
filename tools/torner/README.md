@@ -497,6 +497,14 @@ scripts/explore.sh --capture DIR --strategy atom-order --limit 200 --jobs 8
 scripts/report.py DIR/states-*.jsonl --atoms DIR/atoms.json
 ```
 
+`campaign/` runs the atomicity table (paper §6.2) from the host: `table.sh`
+boots the Torner VM on a kernel tree and runs `table_guest.sh` over cells
+(configuration × write kind × interference profile); `full.sh` runs the whole
+table in four VMs (the tau tree for the tau columns, `build_basevm.sh`'s build of
+the performance baseline for the others) and `cell_csv.py` / `paper_table.py`
+summarize it.  Baseline columns are formatted with the stock e2fsprogs/xfsprogs
+of `bench/workspace/stock`, tau columns with the forks.
+
 The input surface is explored by `scripts/fuzz.py`, which drives the two
 scripts above in a loop:
 

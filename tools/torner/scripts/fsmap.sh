@@ -24,6 +24,15 @@ fs_mount_opts() {
 	case "$1" in
 	ext4)		;;
 	ext4-data)	FS_MOUNT_OPTS="-o data=journal" ;;
+	# Controls for ext4's append path.  By default (dioread_nolock, delalloc)
+	# writeback allocates new blocks unwritten and logs the size with the
+	# allocation, before the IO completes, converting at IO end: a commit in
+	# between leaves the size over blocks that read as zeros.  dioread_lock
+	# keeps delalloc but allocates written blocks the ordered list waits for;
+	# nodelalloc allocates at write time, page by page (and turns
+	# dioread_nolock off too: ext4_should_dioread_nolock() needs delalloc).
+	ext4-dioread-lock)	FS_MOUNT_OPTS="-o dioread_lock" ;;
+	ext4-nodelalloc)	FS_MOUNT_OPTS="-o nodelalloc" ;;
 	xfs)		FS_REPLAY_OPTS="-o nouuid" ;;
 	btrfs)		;;
 	f2fs)		;;
@@ -139,10 +148,13 @@ fs_setup() {
 
 	fs_mount_opts "$fs" || return 1
 	case "$fs" in
-	ext4|ext4-data)	mkfs.ext4 -q -F "$dev" ;;
-	# the tau superblock check requires 4 KiB blocks
-	tau-ext4)	mkfs.ext4 -q -F -b 4096 "$dev" ;;
-	xfs|tau-xfs)	mkfs.xfs -f -q "$dev" ;;
+	ext4|ext4-data|ext4-dioread-lock|ext4-nodelalloc)	mkfs.ext4 -q -F "$dev" ;;
+	# the tau superblock check requires 4 KiB blocks.  TORNER_TAU_MKFS_OPTS
+	# reaches the tau journal's geometry, e.g. "-E tau_segsize=1m" (ext4) or
+	# "-l tjsegsize=1m" (xfs): small segments make reuse reachable
+	tau-ext4)	mkfs.ext4 -q -F -b 4096 ${TORNER_TAU_MKFS_OPTS:-} "$dev" ;;
+	xfs)		mkfs.xfs -f -q "$dev" ;;
+	tau-xfs)	mkfs.xfs -f -q ${TORNER_TAU_MKFS_OPTS:-} "$dev" ;;
 	btrfs)		mkfs.btrfs -f -q "$dev" ;;
 	f2fs)		mkfs.f2fs -f -q "$dev" ;;
 	zfs|zfs-4k|zfs-8k|zfs-16k|zfs-16k-lz4|zfs-recordsize-16k)	fs_zfs_create "$fs" "$dev" ;;
@@ -153,7 +165,7 @@ fs_fsck() {
 	local fs="$1" dev="$2"
 
 	case "$fs" in
-	ext4|ext4-data|tau-ext4)	e2fsck -f -n "$dev" >/dev/null 2>&1 ;;
+	ext4|ext4-data|ext4-dioread-lock|ext4-nodelalloc|tau-ext4)	e2fsck -f -n "$dev" >/dev/null 2>&1 ;;
 	xfs|tau-xfs)			xfs_repair -n "$dev" >/dev/null 2>&1 ;;
 	btrfs)				btrfs check --readonly "$dev" >/dev/null 2>&1 ;;
 	f2fs)				fsck.f2fs --dry-run "$dev" >/dev/null 2>&1 ;;
@@ -179,7 +191,7 @@ fs_fsck_report() {
 	local fs="$1" dev="$2"
 
 	case "$fs" in
-	ext4|ext4-data|tau-ext4)	e2fsck -f -n "$dev" 2>&1 ;;
+	ext4|ext4-data|ext4-dioread-lock|ext4-nodelalloc|tau-ext4)	e2fsck -f -n "$dev" 2>&1 ;;
 	xfs|tau-xfs)			xfs_repair -n "$dev" 2>&1 ;;
 	btrfs)				btrfs check --readonly "$dev" 2>&1 ;;
 	f2fs)				fsck.f2fs --dry-run "$dev" 2>&1 ;;

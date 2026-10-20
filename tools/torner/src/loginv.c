@@ -59,6 +59,7 @@ struct jblk {
 	uint64_t next_segment;
 	uint64_t inode_number;
 	uint64_t commit_epoch_field;	/* commit blocks: h_epoch */
+	uint32_t commit_flags;		/* commit blocks: h_flags */
 };
 
 /*
@@ -356,6 +357,7 @@ static void scan_payload(struct ctx *c, const uint8_t *buf, uint64_t bytes,
 			break;
 		case TAU_COMMIT_BLOCK:
 			j.commit_epoch_field = be64_at(b, TAU_COMMIT_OFF_EPOCH);
+			j.commit_flags = be32_at(b, TAU_COMMIT_OFF_FLAGS);
 			c->n_commit++;
 			break;
 		case TAU_REVOKE_BLOCK:
@@ -422,9 +424,16 @@ static void viol_close(struct viol_out *v)
  * A transaction occupies [first descriptor with this sequence, commit block).
  * Every journal-region write in that extent is part of it -- descriptors,
  * their data blocks, and any revoke blocks.
+ *
+ * A commit sent without a preflush because a host log commit follows it is
+ * gated in recovery instead: one naming a host epoch (h_epoch) is replayed
+ * only if that epoch is durable in the host journal, whose commit flushes
+ * first, and the newest one recording a size (TAU_COMMIT_F_ISIZE) is rolled
+ * back unless the host inode reached that size.  *ungated counts the
+ * violations with neither: nothing vetoes their replay.
  */
 static void check_i1(struct ctx *c, struct viol_out *v, uint64_t *checked,
-		     uint64_t *skipped, uint64_t *blocks)
+		     uint64_t *skipped, uint64_t *blocks, uint64_t *ungated)
 {
 	size_t i, k;
 
@@ -479,13 +488,20 @@ static void check_i1(struct ctx *c, struct viol_out *v, uint64_t *checked,
 		}
 		*blocks += n_in;
 
-		if (have_worst && cm->fepoch <= worst_epoch && viol_begin(v)) {
+		if (!have_worst || cm->fepoch > worst_epoch)
+			continue;
+		if (!cm->commit_epoch_field &&
+		    !(cm->commit_flags & TAU_COMMIT_F_ISIZE))
+			(*ungated)++;
+		if (viol_begin(v)) {
 			printf("{\"invariant\":\"I1\""
 			       ",\"detail\":\"commit not ordered after data\""
 			       ",\"sequence\":%u"
 			       ",\"commit_lba\":%" PRIu64
 			       ",\"commit_epoch\":%" PRIu64
 			       ",\"commit_entry\":%" PRIu64
+			       ",\"commit_h_epoch\":%" PRIu64
+			       ",\"commit_h_flags\":%u"
 			       ",\"data_lba\":%" PRIu64
 			       ",\"data_epoch\":%" PRIu64
 			       ",\"data_entry\":%" PRIu64
@@ -493,6 +509,7 @@ static void check_i1(struct ctx *c, struct viol_out *v, uint64_t *checked,
 			       ",\"blocks_in_transaction\":%" PRIu64
 			       ",\"epoch_model\":\"flush\"}",
 			       cm->sequence, cm->lba, cm->fepoch, cm->entry_idx,
+			       cm->commit_epoch_field, cm->commit_flags,
 			       worst_lba, worst_epoch, worst_entry,
 			       desc->lba, n_in);
 		}
@@ -617,7 +634,7 @@ static void usage(void)
 "usage: torner loginv --log <logdev> [options]\n"
 "\n"
 "  --log <path>        dm-log-writes log device or image\n"
-"  --config <c>        tau-ext4 | tau-xfs | ext4-data      [tau-ext4]\n"
+"  --config <c>        tau-ext4 | tau-xfs | ext4-data | ext4[-*] | xfs | zfs*  [tau-ext4]\n"
 "  --check I1[,I5]     invariants to run                   [I1]\n"
 "                      I5 applies to every config; I1 needs a tau journal\n"
 "  --fsblock <bytes>   file system block size              [4096]\n"
@@ -635,6 +652,7 @@ int torner_loginv(int argc, char **argv)
 	struct log_write_super_d sup;
 	uint8_t *hdrbuf = NULL, *data = NULL;
 	uint64_t max_viol = 64, i1_checked = 0, i1_skipped = 0, i1_blocks = 0;
+	uint64_t i1_ungated = 0;
 	uint64_t i5_checked = 0, i5_split = 0, i5_max_entries = 0;
 	int want_i5;
 	size_t data_cap = 0;
@@ -676,7 +694,10 @@ int torner_loginv(int argc, char **argv)
 		c.dia = DIA_TAU;
 	else if (!strcmp(config, "ext4-data"))
 		c.dia = DIA_JBD2;
-	else if (!strcmp(config, "ext4") || !strcmp(config, "xfs"))
+	/* ext4's other variants (ext4-dioread-lock, ext4-nodelalloc) journal
+	 * metadata only, as plain ext4 does */
+	else if (!strcmp(config, "ext4") || !strcmp(config, "xfs") ||
+		 !strncmp(config, "ext4-", 5))
 		c.dia = DIA_NONE;
 	else if (!strncmp(config, "zfs", 3))
 		c.dia = DIA_COW;
@@ -877,7 +898,7 @@ int torner_loginv(int argc, char **argv)
 
 	viol_open(&v, max_viol);
 	if (want_i1)
-		check_i1(&c, &v, &i1_checked, &i1_skipped, &i1_blocks);
+		check_i1(&c, &v, &i1_checked, &i1_skipped, &i1_blocks, &i1_ungated);
 	if (want_i5)
 		check_bio_containment(&c, &v, &i5_checked, &i5_split,
 				      &i5_max_entries);
@@ -886,10 +907,11 @@ int torner_loginv(int argc, char **argv)
 	printf(",\"coverage\":{\"i1_transactions_checked\":%" PRIu64
 	       ",\"i1_transactions_skipped\":%" PRIu64
 	       ",\"i1_blocks_examined\":%" PRIu64
+	       ",\"i1_violations_ungated\":%" PRIu64
 	       ",\"app_writes_checked\":%" PRIu64
 	       ",\"app_writes_spanning_multiple_bios\":%" PRIu64
 	       ",\"max_bios_per_app_write\":%" PRIu64 "}",
-	       i1_checked, i1_skipped, i1_blocks,
+	       i1_checked, i1_skipped, i1_blocks, i1_ungated,
 	       i5_checked, i5_split, i5_max_entries);
 	printf(",\"violation_count\":%" PRIu64 "}\n", v.n);
 

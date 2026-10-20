@@ -77,6 +77,8 @@
 
 /* fs/taujournal/tau.h:170-190.  Commit header shares the prefix above. */
 #define TAU_COMMIT_OFF_EPOCH		32	/* static_assert'd at 32 */
+#define TAU_COMMIT_OFF_FLAGS		40	/* h_flags, TAU_COMMIT_F_* */
+#define TAU_COMMIT_F_ISIZE		0x2	/* h_isize valid: the size gate */
 #define TAU_COMMIT_OFF_SEC		48	/* static_assert'd at 48 */
 #define TAU_COMMIT_OFF_NSEC		56
 

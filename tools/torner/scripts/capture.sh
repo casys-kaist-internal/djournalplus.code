@@ -51,7 +51,7 @@ usage() {
 usage: capture.sh --workdir DIR [options]
 
   --workdir DIR      where artifacts and loop-backed images are created
-  --fs FS            ext4 | ext4-data | tau-ext4 | tau-xfs        [ext4]
+  --fs FS            a configuration of fsmap.sh (ext4, ext4-data, tau-ext4, ...) [ext4]
   --dev-size SZ      backing device size                          [1G]
   --log-size SZ      dm-log-writes log size                       [1G]
   --mode M           torner gen mode                              [overwrite]
@@ -228,8 +228,13 @@ STAT=$("$TORNER" loginv --log "$LOG" --config "$FS" --stat-only)
 STAT_RC=$?
 echo "$STAT"
 
+# what the run was: the kernel, and the tools and options the FS was made with
+TOOLS=$(for t in mkfs.ext4 mkfs.xfs e2fsck xfs_repair; do
+	printf '%s=%s ' "$t" "$(command -v $t)"; done)
 cat > "$WORKDIR/capture.json" <<EOF
 {"fs":"$FS","mode":"$MODE","threads":$THREADS,"pages":$PAGES,"unit":$UNIT,
+ "kernel":"$(uname -r) $(uname -v)","mount_opts":"$FS_MOUNT_OPTS",
+ "mkfs_opts":"${TORNER_TAU_MKFS_OPTS:-}","tools":"${TOOLS% }",
  "gen_args":"$GEN_ARGS",
  "duration_s":$DURATION,"fsync_every":$FSYNC_EVERY,"run_id":$RUN_ID,
  "dev_size":"$DEV_SIZE","write_cache":"$WC","file":"torner.dat",
