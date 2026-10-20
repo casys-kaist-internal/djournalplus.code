@@ -231,10 +231,11 @@ echo "$STAT"
 # what the run was: the kernel, and the tools and options the FS was made with
 TOOLS=$(for t in mkfs.ext4 mkfs.xfs e2fsck xfs_repair; do
 	printf '%s=%s ' "$t" "$(command -v $t)"; done)
+fs_is_zfs "$FS" && TOOLS="$TOOLS zpool=$(command -v zpool) $(zfs version 2>/dev/null | tr '\n' ' ')"
 cat > "$WORKDIR/capture.json" <<EOF
 {"fs":"$FS","mode":"$MODE","threads":$THREADS,"pages":$PAGES,"unit":$UNIT,
  "kernel":"$(uname -r) $(uname -v)","mount_opts":"$FS_MOUNT_OPTS",
- "mkfs_opts":"${TORNER_TAU_MKFS_OPTS:-}","tools":"${TOOLS% }",
+ "mkfs_opts":"${TORNER_TAU_MKFS_OPTS:-${FS_MKFS_DESC:-}}","tools":"${TOOLS% }",
  "gen_args":"$GEN_ARGS",
  "duration_s":$DURATION,"fsync_every":$FSYNC_EVERY,"run_id":$RUN_ID,
  "dev_size":"$DEV_SIZE","write_cache":"$WC","file":"torner.dat",

@@ -51,14 +51,14 @@ fs_mount_opts() {
 	# single unit, so it cannot tear no matter what the device does.  Below
 	# the application unit it spans several records.  bench/scripts/common.sh
 	# benchmarks 4k/8k/16k, so those are the interesting ones.
-	zfs|zfs-4k|zfs-8k|zfs-16k|zfs-16k-lz4|zfs-recordsize-16k)	;;
+	zfs|zfs-4k|zfs-8k|zfs-16k|zfs-16k-lz4|zfs-recordsize-16k|zfs-16k-tp)	;;
 	*) echo "fsmap: unknown fs '$1'" >&2; return 1 ;;
 	esac
 	return 0
 }
 
 fs_is_zfs() {
-	case "$1" in zfs|zfs-4k|zfs-8k|zfs-16k|zfs-16k-lz4|zfs-recordsize-16k) return 0 ;;
+	case "$1" in zfs|zfs-4k|zfs-8k|zfs-16k|zfs-16k-lz4|zfs-recordsize-16k|zfs-16k-tp) return 0 ;;
 	*) return 1 ;; esac
 }
 
@@ -67,7 +67,7 @@ fs_zfs_recordsize() {
 	case "$1" in
 	zfs-4k)				echo 4k ;;
 	zfs-8k)				echo 8k ;;
-	zfs-16k|zfs-16k-lz4|zfs-recordsize-16k)	echo 16k ;;
+	zfs-16k|zfs-16k-lz4|zfs-recordsize-16k|zfs-16k-tp)	echo 16k ;;
 	*)				echo "" ;;
 	esac
 }
@@ -93,14 +93,26 @@ fs_zfs_create() {
 	# lz4.
 	local comp=off
 	case "$fs" in zfs-16k-lz4) comp=lz4 ;; esac
+	# zfs-16k-tp is the performance baselines' zfs-16k (bench/scripts/common.sh:
+	# recordsize 16k, compression off, logbias=throughput on the data).  At the
+	# latency default an fsync'd write under zfs_immediate_write_sz is copied
+	# into the ZIL; at throughput it is written in place and the ZIL holds a
+	# pointer (openzfs/zfs#17879, tools/killtest/results/libra09/SUMMARY.md §3.3)
+	local lb=()
+	case "$fs" in zfs-16k-tp) lb=(-O logbias=throughput) ;; esac
 
-	zpool create -f -o ashift=12 -O compression="$comp" -O checksum=on \
+	zpool create -f -o ashift=12 -O compression="$comp" -O checksum=on "${lb[@]}" \
 		"$TORNER_ZPOOL" "$dev" || return 1
 	rs="$(fs_zfs_recordsize "$fs")"
 	if [ -n "$rs" ]; then
 		# must be set before the file is created; it applies to new files
 		zfs set recordsize="$rs" "$TORNER_ZPOOL" || return 1
 	fi
+	# for capture.json: what the pool says it was made with
+	FS_MKFS_DESC="ashift=$(zpool get -H -o value ashift "$TORNER_ZPOOL") $(zfs get -H \
+		-o property,value compression,checksum,logbias,recordsize,sync "$TORNER_ZPOOL" |
+		tr '\t\n' '= ')"
+	FS_MKFS_DESC=${FS_MKFS_DESC% }
 	return 0
 }
 
@@ -157,7 +169,7 @@ fs_setup() {
 	tau-xfs)	mkfs.xfs -f -q ${TORNER_TAU_MKFS_OPTS:-} "$dev" ;;
 	btrfs)		mkfs.btrfs -f -q "$dev" ;;
 	f2fs)		mkfs.f2fs -f -q "$dev" ;;
-	zfs|zfs-4k|zfs-8k|zfs-16k|zfs-16k-lz4|zfs-recordsize-16k)	fs_zfs_create "$fs" "$dev" ;;
+	zfs|zfs-4k|zfs-8k|zfs-16k|zfs-16k-lz4|zfs-recordsize-16k|zfs-16k-tp)	fs_zfs_create "$fs" "$dev" ;;
 	esac
 }
 
@@ -195,7 +207,7 @@ fs_fsck_report() {
 	xfs|tau-xfs)			xfs_repair -n "$dev" 2>&1 ;;
 	btrfs)				btrfs check --readonly "$dev" 2>&1 ;;
 	f2fs)				fsck.f2fs --dry-run "$dev" 2>&1 ;;
-	zfs|zfs-4k|zfs-8k|zfs-16k|zfs-16k-lz4|zfs-recordsize-16k)
+	zfs|zfs-4k|zfs-8k|zfs-16k|zfs-16k-lz4|zfs-recordsize-16k|zfs-16k-tp)
 		zpool scrub -w "$TORNER_ZPOOL" >/dev/null 2>&1
 		zpool status -v "$TORNER_ZPOOL" 2>&1 | sed -n '/errors:/,$p'
 		;;

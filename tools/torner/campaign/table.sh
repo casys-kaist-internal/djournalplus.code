@@ -8,6 +8,8 @@
 #          CAP_PARAM, TAU_SEG, MKFS_OPTS, TAG -- passed to table_guest.sh
 #          PORT [5556], GDB_PORT [1236], NAME [table]: two calls with different
 #          ones run side by side; DEADLINE_MIN [600]; MEM [16G]
+#          ZFS_KIT: build_zfs.sh's kit (spl/zfs modules for the basevm kernel,
+#          the noble userland they match), for the zfs-* configs
 #
 # Kernels: the tau columns boot the kernel tree's test-config build (dm-log-
 # writes a module, loaded from the tree; the control switches need its
@@ -77,12 +79,27 @@ ST=$R/bench/workspace/stock
 tar -C "$ST" -chzf - usr/sbin/mke2fs usr/sbin/e2fsck usr/sbin/tune2fs usr/sbin/xfs_db \
 	sbin/mkfs.xfs sbin/xfs_repair etc/mke2fs.conf |
 	g "rm -rf ~/stock && mkdir ~/stock && tar -C ~/stock -xzf -" || die "copy stock tools"
+if [ -n "${ZFS_KIT:-}" ]; then
+	[ -f "$ZFS_KIT/zfs.ko" ] || die "no zfs.ko in $ZFS_KIT"
+	tar -C "$ZFS_KIT" -czf - . | g "rm -rf ~/zfs-kit && mkdir ~/zfs-kit && tar -C ~/zfs-kit -xzf -" ||
+		die "copy zfs kit"
+fi
 g "KO=${KO:+\$HOME/dm-log-writes.ko} bash -s" > "$OUT/setup.log" 2>&1 <<'EOF'
 set -eu
 if [ -n "$KO" ]; then
 	lsmod | grep -q '^dm_log_writes' || sudo insmod "$KO"
 fi
 sudo dmsetup targets | grep log-writes
+# the zfs kit goes into the overlay, which the run throws away: no dpkg, so no
+# postinst starting services or modprobing a module the guest has no tree for
+if [ -d ~/zfs-kit ]; then
+	sudo insmod ~/zfs-kit/spl.ko && sudo insmod ~/zfs-kit/zfs.ko
+	sudo cp -a ~/zfs-kit/root/lib/x86_64-linux-gnu/. /usr/local/lib/ && sudo ldconfig
+	sudo cp -a ~/zfs-kit/root/sbin/. /usr/local/sbin/
+	sudo ln -sf /usr/local/sbin/mount.zfs /sbin/mount.zfs
+	sudo mkdir -p /etc/zfs
+	sudo /usr/local/sbin/zfs version
+fi
 sudo mkdir -p /mnt/scratch
 sudo /sbin/mkfs.ext4 -qF /dev/vda && sudo mount /dev/vda /mnt/scratch
 sudo chown jhlee:jhlee /mnt/scratch
