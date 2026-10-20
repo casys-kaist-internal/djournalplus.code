@@ -21,7 +21,8 @@ from pathlib import Path
 
 WORKLOADS = ["oltp_write_only", "oltp_update_index", "oltp_update_non_index",
              "oltp_insert"]
-CONFIGS = ["EXT4_Raw", "EXT4_App", "XFS_Raw", "XFS_App", "EXT4_Data", "ZFS", "BTRFS"]
+CONFIGS = ["EXT4_Raw", "EXT4_App", "XFS_Raw", "XFS_App", "EXT4_Data", "ZFS", "BTRFS",
+           "tau-EXT4", "tau-XFS"]
 THREADS = [1, 8, 16, 32, 64]
 VARIANTS = tuple(f"-{v}" for v in
                  ["uniform", "fullfill", "odirect", "spin", "nologwriter", "binlog"])
@@ -41,6 +42,8 @@ def config(fs, fpw):
         return "ZFS"
     if fs == "btrfs":
         return "BTRFS"
+    if fs in ("ext4-tau", "xfs-tau"):
+        return "tau-" + fs.split("-")[0].upper()
     return None
 
 
@@ -81,7 +84,8 @@ def main():
     # For plotting: one row per run (the 64-client point has one row per run),
     # full_page_write = PG full_page_writes / MySQL innodb_doublewrite
     order = {k: i for i, k in enumerate(
-        ["postgres", "mysql", "ext4", "xfs", "ext4-dj", "zfs", "btrfs", "off", "on"])}
+        ["postgres", "mysql", "ext4", "xfs", "ext4-dj", "zfs", "btrfs", "ext4-tau", "xfs-tau",
+         "off", "on"])}
     plot = sorted(rows, key=lambda r: (
         r["workload"], order.get(r["db"], 9), order.get(plot_fs(r["fs"]), 9),
         order.get(r["fpw"], 9), int(r["threads"]), int(r["run"])))
@@ -149,6 +153,21 @@ def main():
                       f"{ratio('ZFS', 'EXT4_App')} | "
                       f"{ratio('BTRFS', 'EXT4_App')} |")
         md.append("")
+        if any(tps[(db, wl, c, 64)] for wl in workloads for c in ("tau-EXT4", "tau-XFS")):
+            md.append(f"### {name}: tau against App and Raw (64 threads, mean)\n")
+            md.append("| workload | tau-EXT4/EXT4_App | tau-EXT4/EXT4_Raw | tau-XFS/XFS_App"
+                      " | tau-XFS/XFS_Raw |")
+            md.append("|---|---|---|---|---|")
+            for wl in workloads:
+                m = {c: statistics.mean(tps[(db, wl, c, 64)]) for c in CONFIGS
+                     if tps[(db, wl, c, 64)]}
+
+                def ratio(a, b):
+                    return f"{m[a] / m[b]:.2f}" if a in m and b in m else "–"
+                md.append(f"| {wl} | {ratio('tau-EXT4', 'EXT4_App')} | "
+                          f"{ratio('tau-EXT4', 'EXT4_Raw')} | {ratio('tau-XFS', 'XFS_App')} | "
+                          f"{ratio('tau-XFS', 'XFS_Raw')} |")
+            md.append("")
         md.append(f"### {name}: device write KB per transaction (64 threads, mean)\n")
         md.append("| workload | " + " | ".join(CONFIGS) + " |")
         md.append("|---|" + "---|" * len(CONFIGS))

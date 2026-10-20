@@ -375,6 +375,31 @@ main_image_key () {
 # /proc/diskstats lines of the test device (sector = 512 B), taken before and
 # after each measurement for the device-level I/O volume. With NVMe multipath
 # the I/O is accounted on the path node (nvme0c0n1), not on nvme0n1.
+# τ check, between the warm-up and the first measurement: of the files under
+# $MOUNT_DIR that the database server processes hold open, how many carry
+# O_TAU_UNTORN (040000000) in their open flags, and the mount options. The flag
+# shows that the DB asked for τ on a τ kernel (other kernels drop it, so
+# baseline runs log 0); τ is active on those files only if the mount has
+# "tjournal" (otherwise the flag stays in f_flags unused). WAL, redo, temp
+# files, PG's other forks and MySQL's doublewrite file run without τ. Appends
+# one line to <file>.
+log_tau_fds() {
+  local out=$1
+  sudo env MNT="$MOUNT_DIR" bash -c '
+    n=0; tau=0
+    for p in $(pgrep -x "postgres|mysqld"); do
+      for fd in /proc/$p/fd/*; do
+        t=$(readlink "$fd" 2>/dev/null) || continue
+        [[ $t == "$MNT"/* ]] || continue
+        fl=$(awk "/^flags:/{print \$2}" "/proc/$p/fdinfo/${fd##*/}" 2>/dev/null) || continue
+        [[ -n $fl ]] || continue
+        n=$((n + 1))
+        (( 8#$fl & 8#40000000 )) && tau=$((tau + 1))
+      done
+    done
+    echo "tau-flagged fds under $MNT: $tau of $n; mount options: $(findmnt -no OPTIONS "$MNT" | head -1)"' >> "$out" 2>/dev/null || true
+}
+
 log_dev_stat() {
   local tag="$1" out="$2" re="^${TAU_DEVICE_NAME}\$"
   if [[ "$TAU_DEVICE_NAME" =~ ^(nvme[0-9]+)(n[0-9]+)$ ]]; then

@@ -198,6 +198,7 @@ run_sweep() {
   sysbench $WORKLOAD "${SB_ARGS[@]}" --threads=$WARMUP_THREADS --time=$WARMUP_TIME \
     $(seed_opt $SEED_WARMUP) --report-interval=10 run >> "$RESULT_DIR/${BLOCK}_warmup.log"
   iostat_stop
+  log_tau_fds "$RESULT_DIR/${BLOCK}.spec"
 
   for THREADS in "${points[@]}"; do
     runs[$THREADS]=$(( ${runs[$THREADS]:-0} + 1 ))

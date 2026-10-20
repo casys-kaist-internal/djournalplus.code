@@ -8,11 +8,12 @@
 # just those, in order. The extra steps run only when named: fullfill (SSD
 # sensitivity), the profiling steps, workloads (the evaluation's other
 # sysbench workloads with the same protocol, EVAL_PLAN DB1), uniform (the
-# row-id distribution sensitivity), and btrfs (DB1's four workloads on BTRFS).
+# row-id distribution sensitivity), btrfs (DB1's four workloads on BTRFS), and
+# tau (the same four on tau-EXT4 and tau-XFS, on the tau kernel).
 # Usage: run_motivation.sh <log file> [step ...]
 LOG="$1"
 STEPS=(host zfs_images pg mysql)
-EXTRA_STEPS=(fullfill profile_smoke profile profile_seq offcpu workloads uniform btrfs)
+EXTRA_STEPS=(fullfill profile_smoke profile profile_seq offcpu workloads uniform btrfs tau)
 [ -n "$LOG" ] || { echo "Usage: $0 <log file> [${STEPS[*]} ${EXTRA_STEPS[*]}]"; exit 1; }
 for s in "${@:2}"; do
   [[ " ${STEPS[*]} ${EXTRA_STEPS[*]} " == *" $s "* ]] || { echo "Unknown step: $s"; exit 1; }
@@ -132,6 +133,16 @@ step() {
       run postgres env IOSTAT=0 PG_PRE_CHECKPOINT=0 FS_GROUPS="btrfs" FS_FPWON="" FS_FPWOFF="btrfs" \
         $R postgres oltp_write_only oltp_update_index oltp_update_non_index oltp_insert
       run mysql env IOSTAT=0 FS_GROUPS="btrfs" FS_FPWON="" FS_FPWOFF="btrfs" \
+        $R mysql oltp_write_only oltp_update_index oltp_update_non_index oltp_insert
+      ;;
+    tau)
+      # tau-EXT4 / tau-XFS for EVAL_PLAN DB1 on the tau kernel (6.8.0tjournal+),
+      # libra08's 2026-10-19 setup: tau mkfs from codes/, tjournal mounts as in
+      # common.sh, protection off; the Figure 2 protocol as the baselines
+      run postgres env IOSTAT=0 PG_PRE_CHECKPOINT=0 FS_GROUPS="ext4-tau xfs-tau" FS_FPWON="" \
+        FS_FPWOFF="ext4-tau xfs-tau" $R postgres oltp_write_only oltp_update_index \
+        oltp_update_non_index oltp_insert
+      run mysql env IOSTAT=0 FS_GROUPS="ext4-tau xfs-tau" FS_FPWON="" FS_FPWOFF="ext4-tau xfs-tau" \
         $R mysql oltp_write_only oltp_update_index oltp_update_non_index oltp_insert
       ;;
     offcpu)

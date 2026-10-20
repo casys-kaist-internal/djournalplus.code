@@ -24,7 +24,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import pilot_report  # noqa: E402
 
 LABEL = re.compile(r"(mysql|postgres)_tpcc_(.+?)_fpw_(on|off)_w(\d+)_c(\d+)_r(\d+)$")
-ORDER = ["EXT4_Raw", "EXT4_App", "XFS_Raw", "XFS_App", "EXT4_Data", "ZFS", "BTRFS"]
+ORDER = ["EXT4_Raw", "EXT4_App", "XFS_Raw", "XFS_App", "EXT4_Data", "ZFS", "BTRFS",
+         "tau-EXT4", "tau-XFS"]
 
 
 def config(fs, fpw):
@@ -37,6 +38,8 @@ def config(fs, fpw):
         return "ZFS"
     if fs == "btrfs":
         return "BTRFS"
+    if fs in ("ext4-tau", "xfs-tau"):
+        return "tau-" + fs.split("-")[0].upper()
     return fs
 
 

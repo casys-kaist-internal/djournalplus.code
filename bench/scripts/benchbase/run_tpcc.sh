@@ -59,6 +59,7 @@ for FS in $FS_GROUPS; do
     TERMINALS=$WARMUP_TERMINALS
     bb_config "$OUT/${BLOCK}_warmup.xml" true "$WARMUP_TIME" 0
     bb "${BLOCK}_warmup" --execute=true -d "$OUT/${BLOCK}_warmup" -s 10
+    log_tau_fds "$OUT/${BLOCK}.tau"
     points=("${THREADS_LIST[@]}")
     for (( i = 1; i < LAST_POINT_RUNS; i++ )); do points+=("${THREADS_LIST[-1]}"); done
     prev=$WARMUP_TERMINALS
