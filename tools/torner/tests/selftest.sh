@@ -129,6 +129,43 @@ cp "$WORK/pristine.dat" "$F"
 expect_exit 2 "stale run_id is rejected" \
 	"$TORNER" check --file "$F" --run-id 999999
 
+# --------------------------------------------- the size rule (check --append)
+# One writer's appends: a blank unit below EOF, or a unit EOF cuts, is torn.
+A="$WORK/append1.dat"; APL="$WORK/append1.prog"
+if "$TORNER" gen --file "$A" --progress-log "$APL" --run-id "$RUN_ID" \
+	--pages "$PAGES" --threads 1 --mode append --duration 0 \
+	--fsync-every 1 --quiet; then
+	cp "$A" "$WORK/append1.pristine"
+	expect_exit 0 "clean one-writer append passes the size rule" \
+		"$TORNER" check --file "$A" --progress-log "$APL" --run-id "$RUN_ID" --append
+
+	# 7. the size covers a unit whose data never arrived
+	"$TORNER" tear --file "$A" --page 10 --sectors 4 --kind blank >/dev/null
+	expect_exit 0 "a blank unit below EOF is legal without --append" \
+		"$TORNER" check --file "$A" --run-id "$RUN_ID"
+	expect_exit 2 "a blank unit below EOF is caught with --append" \
+		"$TORNER" check --file "$A" --run-id "$RUN_ID" --append
+	expect_kind "p1_size_blank_unit" "  ...reported as p1_size_blank_unit"
+
+	# 8. EOF inside a unit: part of one append's size
+	cp "$WORK/append1.pristine" "$A"
+	"$TORNER" tear --file "$A" --page $((PAGES - 1)) --sectors 1 --kind cut >/dev/null
+	expect_exit 0 "a unit EOF cuts is not judged without --append" \
+		"$TORNER" check --file "$A" --run-id "$RUN_ID"
+	expect_exit 2 "a unit EOF cuts is caught with --append" \
+		"$TORNER" check --file "$A" --run-id "$RUN_ID" --append
+	expect_kind "p1_size_cut_unit" "  ...reported as p1_size_cut_unit"
+
+	# 9. a write aimed at by a state is judged by the same rule
+	printf '%d 1\n%d 1\n' $((PAGES - 1)) $((PAGES + 5)) > "$WORK/append1.focus"
+	expect_exit 2 "a focus target EOF cuts is torn" \
+		"$TORNER" check --file "$A" --run-id "$RUN_ID" --append \
+		--focus-file "$WORK/append1.focus"
+	expect_kind "size_cut_unit" "  ...reported as size_cut_unit, the target past it absent"
+else
+	bad "gen append --threads 1"
+fi
+
 echo
 printf 'passed %d, failed %d\n' "$pass" "$fail"
 [ "$fail" = 0 ]

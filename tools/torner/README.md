@@ -177,6 +177,18 @@ run_id)`. So:
   only *after* `fsync()` returns, so the log is a lower bound on what must
   survive. A file version older than a logged one is a violation. A record lost
   because the crash landed between `fsync()` returning and the append is not.
+- **Size** (`check --append`, one writer's appends) — an append moves EOF and
+  fills what it covers, so a unit below EOF must be intact and EOF must fall on
+  a unit boundary. A blank unit inside the file (`p1_size_blank_unit`: the size
+  reached the disk, the data did not) or a unit EOF cuts (`p1_size_cut_unit`:
+  part of one append's size) is a P1 violation of its own kind, and
+  `"oracle":{"size":...}` tells these apart from content tears. Without
+  `--append` a blank unit is legal — nothing has been written there yet — and so
+  it is with several writers: a concurrent extend leaves holes below EOF that
+  are not tears, so the rule does not apply. P2 already catches a durable
+  append that reads back blank; the size rule adds the append still in flight
+  at the crash, which P2 cannot see. `explore.sh` passes `--append` for
+  `--mode append --threads 1` captures.
 
 `check` classifies each unit as intact / absent / torn, and reports violations
 with `page_id` and the versions actually observed — enough to go straight to
@@ -265,7 +277,7 @@ single-threaded `write()`-at-EOF loop.
 
 ```
 torner check --file <path> [--progress-log <path> [--progress-limit N]]
-             [--run-id <u64>] [--focus-file <path>]
+             [--run-id <u64>] [--focus-file <path>] [--append]
              [--tier T2b] [--config tau-ext4] [--workload ...]
              [--run-tag ...] [--state-id ...] [--strategy ...] [--epoch N]
 ```
@@ -603,7 +615,7 @@ Do not cite the zeros above as "ZFS does not tear".
 Deliberately damages one unit, so the oracle can be seen to fire:
 
 ```sh
-torner tear --file <path> --page <id> [--sectors 1] [--kind version|blank|bitflip]
+torner tear --file <path> --page <id> [--sectors 1] [--kind version|blank|bitflip|cut]
 ```
 
 CRASH_TODO §3.7 makes this point about the invariant checker, and it applies
@@ -611,4 +623,6 @@ just as hard here — an oracle that has never been observed to fire cannot be
 distinguished from one incapable of firing. `make test` uses `tear` to assert
 that each damage shape produces its own specific verdict, and that truncation
 trips P2 *without* tripping P1 (so the oracle is not collapsing every fault
-into one answer).
+into one answer). For the size rule, `--kind blank` over a whole unit and
+`--kind cut` (EOF n sectors into the page) must pass without `--append` and be
+torn with it.

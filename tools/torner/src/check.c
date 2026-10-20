@@ -10,6 +10,14 @@
  * P2 (durability): the progress log records {page_id, version} only after
  * fsync() returned, so it is a lower bound.  A file version older than the
  * logged one is a violation; newer is not.
+ *
+ * Size (--append, one writer's appends): an append moves EOF and fills what it
+ * covers, so after a crash a unit below EOF must be intact, not blank, and EOF
+ * must fall on a unit boundary.  A blank unit inside the file (the size reached
+ * the disk, the data did not) or a unit EOF cuts (part of one append's size) is
+ * a P1 violation of its own kind.  Without --append a blank unit is legal --
+ * nothing has been written there yet -- and so it is with several writers:
+ * a concurrent extend leaves holes below EOF that are not tears.
  */
 #include "torner.h"
 
@@ -37,6 +45,7 @@ struct viol {
 	uint64_t page_id;
 	uint64_t v_lo, v_hi;
 	uint64_t want, got;
+	uint64_t eof;		/* size violations: the file size, else 0 */
 	const char *detail;
 };
 
@@ -173,9 +182,18 @@ static size_t read_focus(const char *path, struct focus **out)
 	return n;
 }
 
+/* a target torn by the size rule: blank below EOF, or the unit EOF cuts */
+static void report_size_torn(size_t *shown, const struct focus *f,
+			     const char *kind, uint64_t fsize)
+{
+	printf("%s{\"page\":%" PRIu64 ",\"version\":%" PRIu64
+	       ",\"kind\":\"%s\",\"eof\":%" PRIu64 "}",
+	       (*shown)++ ? "," : "", f->page, f->version, kind, fsize);
+}
+
 static void report_focus(int fd, uint32_t unit, uint32_t sector, uint32_t spu,
-			 uint64_t npages, uint64_t run_id,
-			 const struct focus *fv, size_t fn)
+			 uint64_t npages, uint64_t fsize, int append,
+			 uint64_t run_id, const struct focus *fv, size_t fn)
 {
 	uint8_t *u = malloc(unit);
 	uint64_t n_new = 0, n_old = 0, n_abs = 0;
@@ -188,7 +206,10 @@ static void report_focus(int fd, uint32_t unit, uint32_t sector, uint32_t spu,
 		enum page_state st;
 
 		if (fv[i].page >= npages) {
-			n_abs++;
+			if (append && fv[i].page == npages && fsize % unit)
+				report_size_torn(&shown, &fv[i], "size_cut_unit", fsize);
+			else
+				n_abs++;
 			continue;
 		}
 		if (read_all(fd, u, unit, (off_t)fv[i].page * unit) != (int)unit) {
@@ -205,7 +226,10 @@ static void report_focus(int fd, uint32_t unit, uint32_t sector, uint32_t spu,
 				n_old++;
 			break;
 		case PAGE_ABSENT:
-			n_abs++;
+			if (append)
+				report_size_torn(&shown, &fv[i], "size_blank_unit", fsize);
+			else
+				n_abs++;
 			break;
 		default:
 			printf("%s{\"page\":%" PRIu64 ",\"version\":%" PRIu64
@@ -240,6 +264,9 @@ static void usage(void)
 "                          from `torner replay` progress_limit    [0 = all]\n"
 "  --focus-file <path>     \"page version\" per line: judge these writes one by\n"
 "                          one (new / old / absent / torn), uncapped\n"
+"  --append                the file grew by ONE writer's appends (gen --mode\n"
+"                          append --threads 1): a blank unit below EOF, or a\n"
+"                          unit EOF cuts, is torn (the size rule)\n"
 "\n"
 "  metadata passed straight through to the JSONL record (see CRASH_TODO 2.4):\n"
 "  --tier --config --workload --run-tag --state-id --strategy --epoch\n"
@@ -261,13 +288,13 @@ int torner_check(int argc, char **argv)
 	size_t fn = 0;
 	uint64_t prog_considered = 0, prog_skipped = 0;
 	uint64_t pages_seen = 0, pages_intact = 0, pages_absent = 0;
-	uint64_t n_p1 = 0, n_p2 = 0, nviol = 0;
+	uint64_t n_p1 = 0, n_p2 = 0, n_size = 0, nviol = 0;
 	uint64_t *filever = NULL;
 	uint8_t *filestate = NULL;
 	uint64_t npages = 0, p;
 	struct viol *viols = NULL;
 	int fd = -1, pfd = -1, i, rc = 1;
-	int p1_pass = 1, p2_checked = 0, p2_pass = 1;
+	int p1_pass = 1, p2_checked = 0, p2_pass = 1, append = 0, size_pass = 1;
 	uint8_t *buf = NULL;
 	off_t fsize;
 
@@ -285,6 +312,7 @@ int torner_check(int argc, char **argv)
 		else if (!strcmp(a, "--max-violations")) { NEEDV(); max_viol = strtoull(v, NULL, 0); }
 		else if (!strcmp(a, "--progress-limit")) { NEEDV(); prog_limit = strtoull(v, NULL, 0); }
 		else if (!strcmp(a, "--focus-file")) { NEEDV(); focus_path = v; }
+		else if (!strcmp(a, "--append"))       { append = 1; }
 		else if (!strcmp(a, "--tier"))         { NEEDV(); tier = v; }
 		else if (!strcmp(a, "--config"))       { NEEDV(); config = v; }
 		else if (!strcmp(a, "--workload"))     { NEEDV(); workload = v; }
@@ -334,7 +362,7 @@ int torner_check(int argc, char **argv)
 		fprintf(stderr, "torner check: lseek: %s\n", strerror(errno));
 		goto out;
 	}
-	npages = (uint64_t)fsize / unit;	/* a trailing partial unit is itself torn */
+	npages = (uint64_t)fsize / unit;	/* a unit EOF cuts: the size rule */
 
 	viols = calloc(max_viol ? max_viol : 1, sizeof(*viols));
 	filever = calloc(npages ? npages : 1, sizeof(uint64_t));
@@ -376,7 +404,20 @@ int torner_check(int argc, char **argv)
 				pages_intact++;
 				break;
 			case PAGE_ABSENT:
-				pages_absent++;
+				if (!append) {
+					pages_absent++;
+					break;
+				}
+				/* the size reached the disk, the data did not */
+				p1_pass = size_pass = 0;
+				n_p1++;
+				n_size++;
+				if (nviol < max_viol) {
+					viols[nviol].kind = "p1_size_blank_unit";
+					viols[nviol].page_id = pid;
+					viols[nviol].eof = (uint64_t)fsize;
+					nviol++;
+				}
 				break;
 			default:
 				p1_pass = 0;
@@ -396,6 +437,18 @@ int torner_check(int argc, char **argv)
 			}
 		}
 		p += n;
+	}
+	/* part of one append's size: EOF inside a unit */
+	if (append && (uint64_t)fsize % unit) {
+		p1_pass = size_pass = 0;
+		n_p1++;
+		n_size++;
+		if (nviol < max_viol) {
+			viols[nviol].kind = "p1_size_cut_unit";
+			viols[nviol].page_id = npages;
+			viols[nviol].eof = (uint64_t)fsize;
+			nviol++;
+		}
 	}
 
 	/* ---- P2 ---- */
@@ -484,17 +537,21 @@ int torner_check(int argc, char **argv)
 	}
 	if (epoch >= 0)
 		printf(",\"epoch\":%lld", epoch);
-	printf(",\"oracle\":{\"p1\":\"%s\",\"p2\":\"%s\",\"p3\":\"n/a\",\"p4\":\"n/a\"}",
+	/* size failures are P1 failures too; "size" tells them apart */
+	printf(",\"oracle\":{\"p1\":\"%s\",\"p2\":\"%s\",\"size\":\"%s\""
+	       ",\"p3\":\"n/a\",\"p4\":\"n/a\"}",
 	       p1_pass ? "pass" : "fail",
-	       !p2_checked ? "n/a" : (p2_pass ? "pass" : "fail"));
+	       !p2_checked ? "n/a" : (p2_pass ? "pass" : "fail"),
+	       !append ? "n/a" : (size_pass ? "pass" : "fail"));
 	printf(",\"stats\":{\"pages\":%" PRIu64 ",\"intact\":%" PRIu64
 	       ",\"absent\":%" PRIu64 ",\"p1_violations\":%" PRIu64
+	       ",\"size_violations\":%" PRIu64 ",\"eof\":%" PRIu64
 	       ",\"p2_violations\":%" PRIu64
 	       ",\"progress_considered\":%" PRIu64
 	       ",\"progress_beyond_limit\":%" PRIu64
 	       ",\"progress_limit\":%" PRIu64 "}",
-	       pages_seen, pages_intact, pages_absent, n_p1, n_p2,
-	       prog_considered, prog_skipped, prog_limit);
+	       pages_seen, pages_intact, pages_absent, n_p1, n_size,
+	       (uint64_t)fsize, n_p2, prog_considered, prog_skipped, prog_limit);
 
 	printf(",\"violations\":[");
 	for (p = 0; p < nviol; p++) {
@@ -506,6 +563,8 @@ int torner_check(int argc, char **argv)
 		if (viols[p].want)
 			printf(",\"want_version\":%" PRIu64 ",\"got_version\":%" PRIu64,
 			       viols[p].want, viols[p].got);
+		if (viols[p].eof)
+			printf(",\"eof\":%" PRIu64, viols[p].eof);
 		if (viols[p].detail)
 			printf(",\"detail\":\"%s\"", viols[p].detail);
 		printf("}");
@@ -514,7 +573,8 @@ int torner_check(int argc, char **argv)
 	if (nviol < n_p1 + n_p2)
 		printf(",\"violations_truncated\":%" PRIu64, n_p1 + n_p2 - nviol);
 	if (focus_path)
-		report_focus(fd, unit, sector, spu, npages, run_id, fv, fn);
+		report_focus(fd, unit, sector, spu, npages, (uint64_t)fsize, append,
+			     run_id, fv, fn);
 	printf("}\n");
 
 	rc = (p1_pass && p2_pass) ? 0 : 2;
@@ -545,8 +605,11 @@ static void tear_usage(void)
 "usage: torner tear --file <path> --page <id> [--sectors <n>] [--kind <k>]\n"
 "\n"
 "  --kind version   rewrite the first n sectors at version+1   [default]\n"
-"  --kind blank     zero the first n sectors (partial unit)\n"
+"  --kind blank     zero the first n sectors (partial unit; all of them is a\n"
+"                   blank unit, torn only under check --append)\n"
 "  --kind bitflip   flip one bit in the first sector's body\n"
+"  --kind cut       truncate the file n sectors into the page (EOF cuts it:\n"
+"                   torn under check --append)\n"
 "  --sectors <n>    how many leading sectors to damage         [1]\n");
 }
 
@@ -604,6 +667,21 @@ int torner_tear(int argc, char **argv)
 	if (h.magic != TORNER_SECTOR_MAGIC) {
 		fprintf(stderr, "torner tear: page %" PRIu64 " has no torner sector\n",
 			page);
+		goto out;
+	}
+
+	if (!strcmp(kind, "cut")) {
+		if (n >= spu) {
+			fprintf(stderr, "torner tear: --kind cut needs --sectors below %u\n",
+				spu);
+			goto out;
+		}
+		if (ftruncate(fd, (off_t)page * unit + (off_t)n * sector) || fsync(fd)) {
+			fprintf(stderr, "torner tear: truncate: %s\n", strerror(errno));
+			goto out;
+		}
+		printf("cut page %" PRIu64 ": EOF after %u sector(s)\n", page, n);
+		rc = 0;
 		goto out;
 	}
 

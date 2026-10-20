@@ -105,7 +105,20 @@ MODE="$(jget mode)"
 THREADS="$(jnum threads)"
 UNIT="$(jnum unit)"
 [ -n "$UNIT" ] || UNIT=16384		# captures from before --unit existed
+# torner check must stamp-check with gen's sector; only --gen-args changes it
+SECTOR="$(sed -n 's/.*"gen_args":"[^"]*--sector \([0-9]*\).*/\1/p' "$CAPTURE/capture.json" | head -1)"
+[ -n "$SECTOR" ] || SECTOR=4096		# torner gen's default
 WORKLOAD="torner:$MODE:t$THREADS"
+# the size rule (check --append) holds for one writer's appends only: with
+# several, a concurrent extend leaves legal holes below EOF
+SIZEARGS=()
+if [ "$MODE" = append ]; then
+	if [ "$THREADS" = 1 ]; then
+		SIZEARGS=(--append)
+	else
+		echo "explore: append with $THREADS threads: the size rule is off" >&2
+	fi
+fi
 BASE_ZERO="$(sed -n 's/.*"base_is_zero":\(true\|false\).*/\1/p' "$CAPTURE/capture.json" | head -1)"
 [ -n "$BASE_ZERO" ] || BASE_ZERO=false
 BASE="$CAPTURE/base.img"
@@ -253,8 +266,8 @@ do_state() {
 	fi
 
 	"$TORNER" check --file "$(fs_data_dir "$FS" "$mnt")/$DATAFILE" \
-		"${p2args[@]}" "${focusargs[@]}" \
-		--run-id "$RUN_ID" --unit "$UNIT" \
+		"${p2args[@]}" "${focusargs[@]}" "${SIZEARGS[@]}" \
+		--run-id "$RUN_ID" --unit "$UNIT" --sector "$SECTOR" \
 		--tier "$TIER" --config "$FS" --workload "$WORKLOAD" \
 		--state-id "$sid" --strategy "$STRATEGY" --epoch "${epoch:-0}" \
 		--max-violations 8 > "$chk" 2>"$cerr"
@@ -317,7 +330,7 @@ say "results -> $OUT"
 python3 - "$OUT" <<'EOF' >&2
 import json, sys
 
-n = p1 = p2 = p3 = mf = nochk = 0
+n = p1 = sz = p2 = p3 = mf = nochk = 0
 targeted, torn, states_tearing = set(), set(), 0
 for line in open(sys.argv[1]):
     try:
@@ -327,6 +340,7 @@ for line in open(sys.argv[1]):
     n += 1
     o = r.get("oracle", {})
     p1 += o.get("p1") == "fail"
+    sz += o.get("size") == "fail"
     p2 += o.get("p2") == "fail"
     p3 += o.get("p3") == "fail"
     mf += r.get("mount") == "failed"
@@ -338,9 +352,9 @@ for line in open(sys.argv[1]):
         torn.update(map(tuple, tt))
         states_tearing += bool(tt)
 
-print("[explore] states=%d  P1 torn=%d (%.1f%%)  P2 lost=%d  P3 dirty=%d"
+print("[explore] states=%d  P1 torn=%d (%.1f%%, size %d)  P2 lost=%d  P3 dirty=%d"
       "  unmountable=%d  unjudged=%d"
-      % (n, p1, 100.0 * p1 / n if n else 0, p2, p3, mf, nochk))
+      % (n, p1, 100.0 * p1 / n if n else 0, sz, p2, p3, mf, nochk))
 if targeted:
     print("[explore] application writes targeted=%d  torn=%d (%.1f%%)"
           "  states tearing a target=%d"
