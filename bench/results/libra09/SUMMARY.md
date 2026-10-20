@@ -1,7 +1,7 @@
 # libra09: benchmark summary
 
 Made by `bench/scripts/export_results.py` from the results in
-`bench/workspace/results/libra09/sysbench/<db>/<run>/` (outside git, on libra09);
+`bench/workspace/results/libra09/{sysbench,benchbase}/<db>/<run>/` (outside git, on libra09);
 notes on the runs in `README.md`.
 
 Machine (`env.txt` of mysql/20261019_061714; full snapshot in `bench/machines/libra09.txt`):
@@ -111,3 +111,29 @@ full_page_writes / InnoDB doublewrite; KB/trx = device writes per transaction at
 | write_only | zfs-8k | off | 2210 | 12508 | 18593 | 23539 | 24160 | 70.8 | `20261009_151712` |
 | write_only | zfs-8k-fullfill | off | 2205 | 12484 | 18577 | 23463 | 23939 | 60.2 | `20261010_023220_fullfill` |
 | write_only | zfs-8k-uniform | off |  |  |  |  | 8958 | 206.0 | `20261002_080556_uniform` |
+
+TPC-C (BenchBase, warehouses chosen at random per transaction, no think time): tpmC = new orders per minute counted by the database over each 5-min measurement (mean of the runs at a point); p99 and device KB per new order (KB/NO) at the most terminals.
+
+## TPC-C mysql
+
+| fs | protection | WH | 1 term | 8 term | 16 term | 32 term | 64 term | p99 ms | KB/NO | run |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| btrfs | off | 1100 | 1594 | 3938 | 2983 | 3274 | 14184 | 2786.7 | 680 | `20261019_010023` |
+| ext4 | off | 1100 | 7313 | 53699 | 98322 | 145306 | 160446 | 40.8 | 300 | `20261015_011917` |
+| ext4 | on | 1100 | 7262 | 50009 | 86183 | 118345 | 135912 | 53.5 | 582 | `20261015_011917` |
+| ext4-dj40 | off | 1100 | 6754 | 39806 | 61554 | 82381 | 98184 | 89.5 | 590 | `20261015_100648` |
+| xfs | off | 1100 | 7247 | 52892 | 92799 | 116527 | 119350 | 104.1 | 322 | `20261015_100648` |
+| xfs | on | 1100 | 7048 | 48814 | 81260 | 102005 | 109515 | 112.3 | 591 | `20261015_100648` |
+| zfs-16k | off | 1100 | 6265 | 40717 | 65520 | 87640 | 95343 | 71.3 | 1138 | `20261015_100648` |
+
+## TPC-C postgres
+
+| fs | protection | WH | 1 term | 8 term | 16 term | 32 term | 64 term | p99 ms | KB/NO | run |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| btrfs | off | 1100 | 9784 | 12276 | 31315 | 26049 | 49028 | 128.0 | 242 | `20261018_235303` |
+| ext4 | off | 1100 | 18638 | 140595 | 263809 | 381409 | 457845 | 13.7 | 99 | `20261014_230651` |
+| ext4 | on | 1100 | 16538 | 115313 | 199450 | 263246 | 305602 | 20.5 | 264 | `20261014_230651` |
+| ext4-dj40 | off | 1100 | 16502 | 109266 | 179957 | 243801 | 297181 | 57.6 | 196 | `20261015_045502` |
+| xfs | off | 1100 | 18792 | 140484 | 262619 | 377616 | 449526 | 14.3 | 99 | `20261015_045502` |
+| xfs | on | 1100 | 16660 | 117860 | 201309 | 264036 | 260176 | 27.2 | 269 | `20261015_045502` |
+| zfs-8k | off | 1100 | 14900 | 92533 | 141657 | 185792 | 210977 | 40.1 | 485 | `20261015_045502` |

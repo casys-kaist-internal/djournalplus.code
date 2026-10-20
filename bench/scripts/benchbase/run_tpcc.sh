@@ -85,4 +85,5 @@ for FS in $FS_GROUPS; do
   done
 done
 python3 "$TAUFS_BENCH/scripts/benchbase/pilot_report.py" "$OUT" > "$OUT/summary.md" || true
+python3 "$TAUFS_BENCH/scripts/export_results.py" "$TAU_RESULTS" || true   # SUMMARY.md into git
 echo "=== done $(date -u --rfc-3339=seconds) -> $OUT"

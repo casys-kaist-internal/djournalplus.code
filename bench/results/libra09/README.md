@@ -1,10 +1,12 @@
 # libra09 benchmark results
 
-`SUMMARY.md` lists the machine and every measured point; the runs themselves stay outside
-git, on libra09, in `bench/workspace/results/libra09/` (each with `summary.txt`, `summary.csv`
--- a row per measurement: TPS, latency, device and DB write volumes -- and `env.txt`).
-`bench/scripts/export_results.py` remakes `SUMMARY.md` from them; `run_campaign.sh` runs it
-after every step. The machine: `bench/machines/libra09.{txt,env}`.
+`SUMMARY.md` lists the machine and every measured point of sysbench and of BenchBase TPC-C;
+the runs themselves stay outside git, on libra09, in `bench/workspace/results/libra09/`
+(sysbench runs each with `summary.txt`, `summary.csv` -- a row per measurement: TPS, latency,
+device and DB write volumes -- and `env.txt`; TPC-C runs with BenchBase's output per
+measurement and `summary.md`). `bench/scripts/export_results.py` remakes `SUMMARY.md` from
+them; the sysbench campaigns and `run_tpcc.sh` run it at the end. The machine:
+`bench/machines/libra09.{txt,env}`.
 
 ## Runs
 
@@ -30,6 +32,6 @@ point (`bench/scripts/sysbench/run_main.sh`).
 | uniform | `20261017_202936_uniform` | `20261017_171541_uniform` | write_only with `--rand-type=uniform` on EXT4 Raw/App and EXT4_Data, the Figure 2 protocol and thread sequence (`run_motivation.sh uniform`), 2026-10-18; paper data in `paper/motivation/sysbench_write_only/sensitivity_uniform/` |
 | btrfs | `20261019_061714` | `20261019_020217` | the four workloads on btrfs (defaults: CoW, data checksums, discard=async on 6.8), protection off, the Figure 2 protocol (`run_motivation.sh btrfs`), 2026-10-19; unstable (seconds-long btrfs commits, see the paper README); paper data in `paper/evaluation/sysbench_workloads/`, TPC-C on btrfs in `paper/evaluation/tpcc_benchbase/` |
 
-Raw only, not exported: `benchbase/` (BenchBase TPC-C: pilot at 100 warehouses, and the 1,100-warehouse runs whose sweeps are the paper's data in `paper/evaluation/tpcc_benchbase/`, 2026-10-14/15; its README), `sysbench/diag/` (ZFS and btrfs diagnosis, 2026-10-02/03), `fio/`
+Raw only, not exported: in `benchbase/` the pilot at 100 warehouses, the image and copy logs and the first single-point 1,100-warehouse runs (`postgres/20261014_140913`, `mysql/20261014_165433`); the sweeps are in `SUMMARY.md` and are the paper's data in `paper/evaluation/tpcc_benchbase/` (2026-10-14/15, BTRFS 10-19; its README); `vectordb/` (pgvector, paper data in `paper/evaluation/pgvector/`); `sysbench/diag/` (ZFS and btrfs diagnosis, 2026-10-02/03), `fio/`
 (pwrite and ext4 data=journal microbenchmarks, 2026-10-03), `pgbench/` and `tpcc/` (earlier
 rounds), every `99_Archive/`. The QEMU kill tests: `tools/killtest/results/libra09/SUMMARY.md`.
