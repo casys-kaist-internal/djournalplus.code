@@ -6,12 +6,13 @@
 # iostat (IOSTAT=0); the profiling runs (PROFILE=...) are separate.
 # One step resumes the campaign from it (after a failure); several steps run
 # just those, in order. The extra steps run only when named: fullfill (SSD
-# sensitivity), the profiling steps, and workloads (the evaluation's other
-# sysbench workloads with the same protocol, EVAL_PLAN DB1).
+# sensitivity), the profiling steps, workloads (the evaluation's other
+# sysbench workloads with the same protocol, EVAL_PLAN DB1), uniform (the
+# row-id distribution sensitivity), and btrfs (DB1's four workloads on BTRFS).
 # Usage: run_motivation.sh <log file> [step ...]
 LOG="$1"
 STEPS=(host zfs_images pg mysql)
-EXTRA_STEPS=(fullfill profile_smoke profile profile_seq offcpu workloads)
+EXTRA_STEPS=(fullfill profile_smoke profile profile_seq offcpu workloads uniform btrfs)
 [ -n "$LOG" ] || { echo "Usage: $0 <log file> [${STEPS[*]} ${EXTRA_STEPS[*]}]"; exit 1; }
 for s in "${@:2}"; do
   [[ " ${STEPS[*]} ${EXTRA_STEPS[*]} " == *" $s "* ]] || { echo "Unknown step: $s"; exit 1; }
@@ -114,6 +115,24 @@ step() {
         run mysql env IOSTAT=0 FS_GROUPS="ext4 xfs ext4-dj40 zfs-16k" FS_FPWON="ext4 xfs" \
           FS_FPWOFF="ext4 xfs ext4-dj40 zfs-16k" $R mysql $wl
       done
+      ;;
+    uniform)
+      # Distribution sensitivity (EVAL_PLAN 2.2): uniform row ids instead of
+      # special on EXT4 Raw/App and EXT4_Data, all thread counts in the Figure 2
+      # sequence (PG's 64 depends on what ran before it in the block)
+      run postgres env IOSTAT=0 VARIANT=uniform PG_PRE_CHECKPOINT=0 FS_GROUPS="ext4 ext4-dj40" \
+        FS_FPWON="ext4" FS_FPWOFF="ext4 ext4-dj40" $R postgres oltp_write_only
+      run mysql env IOSTAT=0 VARIANT=uniform FS_GROUPS="ext4 ext4-dj40" FS_FPWON="ext4" \
+        FS_FPWOFF="ext4 ext4-dj40" $R mysql oltp_write_only
+      ;;
+    btrfs)
+      # BTRFS for EVAL_PLAN DB1: the four workloads with the Figure 2 protocol,
+      # protection off, btrfs defaults (on 6.8 these include discard=async, so
+      # btrfs alone trims freed extents during the runs)
+      run postgres env IOSTAT=0 PG_PRE_CHECKPOINT=0 FS_GROUPS="btrfs" FS_FPWON="" FS_FPWOFF="btrfs" \
+        $R postgres oltp_write_only oltp_update_index oltp_update_non_index oltp_insert
+      run mysql env IOSTAT=0 FS_GROUPS="btrfs" FS_FPWON="" FS_FPWOFF="btrfs" \
+        $R mysql oltp_write_only oltp_update_index oltp_update_non_index oltp_insert
       ;;
     offcpu)
       # MySQL's mean latency rises 0.50 ms with doublewrite, 0.07 ms of it in
