@@ -4,8 +4,8 @@
 #   q2  tau kernel   tau-xfs, the same
 #   q3  basevm       ext4, all rows; ext4-dioread-lock and ext4-nodelalloc, the append rows
 #   q4  basevm       xfs and ext4-data, all rows
-#   q5  basevm+ZFS   zfs-16k-tp, the append rows    } with build_zfs.sh's kit
-#   q6  basevm+ZFS   zfs-16k-tp, the other rows     } (ZFS_KIT), else no ZFS
+#   q5  basevm+ZFS   zfs-16k-tp, the append rows, after q3 } with build_zfs.sh's kit
+#   q6  basevm+ZFS   zfs-16k-tp, the other rows, after q4  } (ZFS_KIT), else no ZFS
 # Each queue runs table.sh calls one after another; when all are done, the
 # table.csv files are merged and paper_table.py writes summary.md.
 #   usage: full.sh <tau kernel tree> <basevm kernel tree> <out dir>
@@ -13,6 +13,9 @@
 #   1G hugepages libra08 holds from boot); the ZFS VMs take ZFS_MEM [8G] and
 #   little CPU: ZFS explores one state at a time (every state is the same pool
 #   GUID), ~0.5 s a state, so its 14 cells take two VMs ~3.5 h.
+#   QUEUES [q1 q2 q3 q4 q5 q6] runs some of them, and MERGE names captures of an
+#   earlier run to merge in -- after a tau fix, the tau columns alone:
+#   QUEUES="q1 q2" MERGE="$(ls -d <earlier out>/{q3,q4,q5,q6}/cap-*)"
 set -u
 TC=$(cd "$(dirname "$0")" && pwd)
 KT=$(cd "${1:?usage: full.sh <tau tree> <basevm tree> <out dir>}" && pwd) || exit 1
@@ -53,23 +56,32 @@ zq() {	# <name> <port> <gdb> <cells>: baseline budgets, the kit installed
 		ZFS_KIT=$ZK NAME=$1 PORT=$2 GDB_PORT=$3 bash $TC/table.sh "$KB" "$OUT/$1"
 }
 
-echo "===== full start $(date '+%F %T')  tau $KT  base $KB"
-tq q1 5556 1236 tau-ext4 & p1=$!
-sleep 20; tq q2 5559 1239 tau-xfs & p2=$!
-sleep 20; bq q3 5560 1240 "$(cells ext4) $(cells ext4-dioread-lock ap2k ap4k ap16k) $(cells ext4-nodelalloc ap2k ap4k ap16k)" & p3=$!
-sleep 20; bq q4 5561 1241 "$(cells xfs) $(cells ext4-data)" & p4=$!
-pids="$p1 $p2 $p3 $p4"
-if [ -f "$ZK/zfs.ko" ]; then
-	sleep 20; zq q5 5562 1242 "$(cells zfs-16k-tp ap2k ap4k ap16k)" & pids="$pids $!"
-	sleep 20; zq q6 5563 1243 "$(cells zfs-16k-tp ow4k ow16k prealloc hole)" & pids="$pids $!"
-else
+QUEUES=${QUEUES:-q1 q2 q3 q4 q5 q6}
+on() { case " $QUEUES " in *" $1 "*) return 0 ;; esac; return 1; }
+if [ ! -f "$ZK/zfs.ko" ] && { on q5 || on q6; }; then
 	echo "no ZFS kit at $ZK (campaign/build_zfs.sh): no ZFS column"
+	QUEUES=${QUEUES//q5/}; QUEUES=${QUEUES//q6/}
 fi
+
+echo "===== full start $(date '+%F %T')  tau $KT  base $KB  queues" $QUEUES
+pids=
+on q1 && { tq q1 5556 1236 tau-ext4 & pids="$pids $!"; sleep 20; }
+on q2 && { tq q2 5559 1239 tau-xfs & pids="$pids $!"; sleep 20; }
+# ZFS takes a baseline's VM when it is done: four VMs at most
+{ on q3 && bq q3 5560 1240 "$(cells ext4) $(cells ext4-dioread-lock ap2k ap4k ap16k) $(cells ext4-nodelalloc ap2k ap4k ap16k)"
+  on q5 && zq q5 5562 1242 "$(cells zfs-16k-tp ap2k ap4k ap16k)"; } & pids="$pids $!"
+sleep 20
+{ on q4 && bq q4 5561 1241 "$(cells xfs) $(cells ext4-data)"
+  on q6 && zq q6 5563 1243 "$(cells zfs-16k-tp ow4k ow16k prealloc hole)"; } & pids="$pids $!"
 wait $pids
 echo "===== merge $(date '+%F %T')"
+if [ -n "${MERGE:-}" ]; then
+	printf '%s\n' $MERGE > "$OUT/merged.txt"
+	echo "with $(wc -l < "$OUT/merged.txt") captures of an earlier run (merged.txt)"
+fi
 # from the captures themselves (cell.json says which cell), with this tree's
 # cell_csv.py -- not the guests' copies
-python3 $TC/cell_csv.py --header "$OUT"/*/cap-* > "$OUT/table.csv"
+python3 $TC/cell_csv.py --header "$OUT"/*/cap-* ${MERGE:-} > "$OUT/table.csv"
 {
 	python3 $TC/paper_table.py "$OUT/table.csv"
 	echo; echo "controls (a switch restores a fixed bug: each must fail)"
