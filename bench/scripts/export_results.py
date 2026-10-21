@@ -149,14 +149,29 @@ def summary_md(raw, runs, tpcc=None):
              "`bench/workspace/results/%s/{sysbench,benchbase}/<db>/<run>/` (outside git, on %s);"
              % (HOST, HOST),
              "notes on the runs in `README.md`.", ""]
-    newest = max(((db, n) for db, ns in runs.items() for n in ns),
-                 key=lambda x: x[1], default=None)
+    # the machine as the baselines saw it: the newest run without τ file
+    # systems (those run on the τ kernel; noted below)
+    def has_tau(db, n):
+        with open(raw / "sysbench" / db / n / "summary.csv") as f:
+            return any(r["fs"].endswith("-tau") for r in csv.DictReader(f))
+    order = sorted(((db, n) for db, ns in runs.items() for n in ns),
+                   key=lambda x: x[1], reverse=True)
+    newest = next((x for x in order if not has_tau(*x)), order[0] if order else None)
     if newest:
         env = raw / "sysbench" / newest[0] / newest[1] / "env.txt"
         if env.exists():
             lines += ["Machine (`env.txt` of %s/%s; full snapshot in"
                       " `bench/machines/%s.txt`):" % (newest[0], newest[1], HOST),
                       ""] + machine_lines(env) + [""]
+    tau_kernels = set()
+    for db, n in order:
+        env = raw / "sysbench" / db / n / "env.txt"
+        if has_tau(db, n) and env.exists():
+            tau_kernels |= {l.split(":", 1)[1].strip() for l in env.read_text().splitlines()
+                            if l.strip().startswith("kernel:")}
+    if tau_kernels:
+        lines += ["The τ rows (ext4-tau, xfs-tau) ran on the τ kernel (%s)." %
+                  ", ".join(sorted(tau_kernels)), ""]
     lines += ["Throughput in transactions/s (mean of the runs at a point);"
               " protection on = PostgreSQL",
               "full_page_writes / InnoDB doublewrite; KB/trx = device writes per"
