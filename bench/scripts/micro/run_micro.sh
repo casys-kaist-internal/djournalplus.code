@@ -20,6 +20,11 @@
 #   XFS_Raw    xfs defaults
 #   ZFS        one dataset, ashift=12, recordsize=16K, compression=off,
 #              atime=off, ZIL on the same device (ARC as the host sets it)
+# and on the tau kernel (6.8.0tjournal+), as the database tau runs (common.sh):
+#   tau-EXT4   tau mke2fs from codes/, mount tjournal,tjournal_size=$TAU_JOURNAL_GB
+#   tau-XFS    tau mkfs.xfs -l tjmaxsize=1G, mount tjournal (journal up to 32 GiB)
+# where atomicw opens the files with O_TAU_UNTORN (--tau; it refuses to run
+# when the kernel accepts O_DIRECT with that flag, i.e. tau is not active).
 #
 # Usage: [CONFIGS="EXT4_Raw EXT4_Data ZFS XFS_Raw"] [PATTERNS="overwrite prealloc hole append"]
 #        [THREADS_LIST="1 2 4 8 16 32 64"] [FILES_LIST=64] [REPS=3] [WARMUP=10] [DURATION=60]
@@ -40,6 +45,10 @@ TOTAL=${TOTAL:-128G}
 SETTLE=${SETTLE:-300}
 TRIM_BETWEEN_RUNS=${TRIM_BETWEEN_RUNS:-0}
 FRESH_PER_THREADS=${FRESH_PER_THREADS-ZFS}
+TAU_JOURNAL_GB=${TAU_JOURNAL_GB:-32}
+if [[ " $CONFIGS " == *" tau-"* && "$(uname -r)" != *tjournal* ]]; then
+  echo "❌ tau configurations need the tau kernel, not $(uname -r)"; exit 1
+fi
 
 if [[ "${HOST_CHECK:-1}" != 0 ]]; then
   bash "$TAUFS_BENCH/scripts/host_setup.sh" check || { echo "❌ run bench/scripts/host_setup.sh apply"; exit 1; }
@@ -61,7 +70,7 @@ log_env "$RESULT_DIR/env.txt"
   sysctl vm.dirty_ratio vm.dirty_background_ratio vm.dirty_bytes vm.dirty_background_bytes \
     vm.dirty_expire_centisecs vm.dirty_writeback_centisecs
   echo "zfs_arc_max: $(cat /sys/module/zfs/parameters/zfs_arc_max 2>/dev/null)"
-  echo "CONFIGS=$CONFIGS PATTERNS=$PATTERNS THREADS_LIST=$THREADS_LIST FILES_LIST=$FILES_LIST REPS=$REPS WARMUP=$WARMUP DURATION=$DURATION TOTAL=$TOTAL SETTLE=$SETTLE TRIM_BETWEEN_RUNS=$TRIM_BETWEEN_RUNS FRESH_PER_THREADS=$FRESH_PER_THREADS"
+  echo "CONFIGS=$CONFIGS PATTERNS=$PATTERNS THREADS_LIST=$THREADS_LIST FILES_LIST=$FILES_LIST REPS=$REPS WARMUP=$WARMUP DURATION=$DURATION TOTAL=$TOTAL SETTLE=$SETTLE TRIM_BETWEEN_RUNS=$TRIM_BETWEEN_RUNS FRESH_PER_THREADS=$FRESH_PER_THREADS TAU_JOURNAL_GB=$TAU_JOURNAL_GB"
 } >> "$RESULT_DIR/env.txt"
 echo "=== micro: $RESULT_DIR ($CONFIGS | $PATTERNS | threads $THREADS_LIST | files $FILES_LIST | x$REPS) $(date -u --rfc-3339=seconds)"
 
@@ -74,6 +83,8 @@ fs_make() {
     EXT4_Raw)  stock_mke2fs -q -t ext4 -E lazy_itable_init=0,lazy_journal_init=0 -F "$DEVICE" ;;
     EXT4_Data) stock_mke2fs -q -t ext4 -J size=40000 -E lazy_itable_init=0,lazy_journal_init=0 -F "$DEVICE" ;;
     XFS_Raw)   stock_mkfs_xfs -q -f "$DEVICE" ;;
+    tau-EXT4)  sudo "$TAUFS_E2FSPROGS/misc/mke2fs" -q -t ext4 -E lazy_itable_init=0,lazy_journal_init=0 -F "$DEVICE" ;;
+    tau-XFS)   sudo "$TAUFS_XFSPROGS/mkfs/mkfs.xfs" -q -f -l tjmaxsize=1G "$DEVICE" ;;
     ZFS)
       sudo wipefs -a "$DEVICE" >/dev/null
       sudo zpool create -f -o ashift=12 -O recordsize=16K -O compression=off -O atime=off \
@@ -91,6 +102,8 @@ fs_mount() {
     EXT4_Raw)  sudo mount -t ext4 -o data=ordered "$DEVICE" "$MOUNT_DIR" ;;
     EXT4_Data) sudo mount -t ext4 -o data=journal "$DEVICE" "$MOUNT_DIR" ;;
     XFS_Raw)   sudo mount -t xfs "$DEVICE" "$MOUNT_DIR" ;;
+    tau-EXT4)  sudo mount -t ext4 -o tjournal,tjournal_size="$TAU_JOURNAL_GB" "$DEVICE" "$MOUNT_DIR" ;;
+    tau-XFS)   sudo mount -t xfs -o tjournal "$DEVICE" "$MOUNT_DIR" ;;
     # a whole-disk vdev lives on partition 1 (zpool create partitions the disk)
     ZFS)       zpool list zfspool >/dev/null 2>&1 || sudo zpool import -d "${DEVICE}p1" zfspool ;;
   esac
@@ -118,6 +131,8 @@ fs_note() {
       sudo zpool get -H ashift,autotrim zfspool
       sudo zfs get -H recordsize,compression,atime,logbias,sync,primarycache zfspool
     fi
+    # the mount line shows tjournal but not tjournal_size; the kernel logs it
+    [[ $1 != tau-EXT4 ]] || sudo dmesg | grep 'TAU journal: resizing' | tail -1
   } >> "$RESULT_DIR/fs.txt"
 }
 
@@ -142,6 +157,8 @@ fresh_fs() {  # <config> <pattern> <file counts...>
 
 for CONFIG in $CONFIGS; do
   per_t=0
+  tau=()
+  [[ $CONFIG == tau-* ]] && tau=(--tau)
   [[ " $FRESH_PER_THREADS " == *" $CONFIG "* ]] && per_t=1
   for PATTERN in $PATTERNS; do
     (( per_t )) || fresh_fs "$CONFIG" "$PATTERN" $FILES_LIST
@@ -161,7 +178,7 @@ for CONFIG in $CONFIGS; do
           drop_caches > /dev/null
           fs_mount "$CONFIG"
           line=$("$AW" --dir "$DIR" --pattern "$PATTERN" --threads "$T" --files "$F" --total "$TOTAL" \
-                   --warmup "$WARMUP" --duration "$DURATION" --seed "$rep" --dev "$STATDEV" \
+                   --warmup "$WARMUP" --duration "$DURATION" --seed "$rep" --dev "$STATDEV" "${tau[@]}" \
                    --label "$LABEL" --hist "$RESULT_DIR/hist/$LABEL.txt" \
                    --timeline "$RESULT_DIR/timeline/$LABEL.txt")
           echo "$line" | awk -F, -v c="$CONFIG" -v r="$rep" \

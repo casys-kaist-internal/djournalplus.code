@@ -189,6 +189,10 @@ run_block() {
   iostat_start "$RESULT_DIR/${LABEL}.iostat" 86400
   sampler_start "$RESULT_DIR/${LABEL}.progress"
   waits_start "$RESULT_DIR/${LABEL}.waits"
+  # tau: the data files the loading backends hold with O_TAU_UNTORN (common.sh)
+  if [[ $FS == *-tau ]]; then
+    ( sleep 120; log_tau_fds "$RESULT_DIR/${LABEL}.spec" ) &
+  fi
   local t0=$(date +%s.%N) rc=0
   local conn_args=()
   if (( LOAD_CONN > 1 )); then

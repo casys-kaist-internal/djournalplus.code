@@ -8,12 +8,13 @@
 # just those, in order. The extra steps run only when named: fullfill (SSD
 # sensitivity), the profiling steps, workloads (the evaluation's other
 # sysbench workloads with the same protocol, EVAL_PLAN DB1), uniform (the
-# row-id distribution sensitivity), btrfs (DB1's four workloads on BTRFS), and
-# tau (the same four on tau-EXT4 and tau-XFS, on the tau kernel).
+# row-id distribution sensitivity), btrfs (DB1's four workloads on BTRFS),
+# tau (the same four on tau-EXT4 and tau-XFS, on the tau kernel), and
+# tau_uniform (uniform's write_only on tau-EXT4, on the tau kernel).
 # Usage: run_motivation.sh <log file> [step ...]
 LOG="$1"
 STEPS=(host zfs_images pg mysql)
-EXTRA_STEPS=(fullfill profile_smoke profile profile_seq offcpu workloads uniform btrfs tau)
+EXTRA_STEPS=(fullfill profile_smoke profile profile_seq offcpu workloads uniform btrfs tau tau_uniform)
 [ -n "$LOG" ] || { echo "Usage: $0 <log file> [${STEPS[*]} ${EXTRA_STEPS[*]}]"; exit 1; }
 for s in "${@:2}"; do
   [[ " ${STEPS[*]} ${EXTRA_STEPS[*]} " == *" $s "* ]] || { echo "Unknown step: $s"; exit 1; }
@@ -144,6 +145,14 @@ step() {
         oltp_update_non_index oltp_insert
       run mysql env IOSTAT=0 FS_GROUPS="ext4-tau xfs-tau" FS_FPWON="" FS_FPWOFF="ext4-tau xfs-tau" \
         $R mysql oltp_write_only oltp_update_index oltp_update_non_index oltp_insert
+      ;;
+    tau_uniform)
+      # the uniform step's write_only on tau-EXT4 (tau kernel, the tau step's
+      # settings), against uniform's EXT4 Raw/App
+      run postgres env IOSTAT=0 VARIANT=uniform PG_PRE_CHECKPOINT=0 FS_GROUPS="ext4-tau" FS_FPWON="" \
+        FS_FPWOFF="ext4-tau" $R postgres oltp_write_only
+      run mysql env IOSTAT=0 VARIANT=uniform FS_GROUPS="ext4-tau" FS_FPWON="" FS_FPWOFF="ext4-tau" \
+        $R mysql oltp_write_only
       ;;
     offcpu)
       # MySQL's mean latency rises 0.50 ms with doublewrite, 0.07 ms of it in
