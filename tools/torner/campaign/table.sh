@@ -10,13 +10,15 @@
 #          ones run side by side; DEADLINE_MIN [600]; MEM [16G]
 #          ZFS_KIT: build_zfs.sh's kit (spl/zfs modules for the basevm kernel,
 #          the noble userland they match), for the zfs-* configs
+#          BASE: a copy of tautest's qemu-image.qcow2 to put the overlay on
 #
 # Kernels: the tau columns boot the kernel tree's test-config build (dm-log-
 # writes a module, loaded from the tree; the control switches need its
 # TAU_PROBE_TORN); the baseline columns boot build_basevm.sh's build, where
 # dm-log-writes is built in.  The VM's root is a fresh overlay on tautest's
-# qemu-image.qcow2 (it cannot boot while a tautest VM runs), its scratch disk a
-# sparse file on the PM1753, deleted at the end like the overlay.
+# qemu-image.qcow2 (it cannot boot while a tautest VM runs) or on BASE, a copy
+# of it taken while no VM ran (a tautest VM may then run beside); its scratch
+# disk a sparse file on the PM1753, deleted at the end like the overlay.
 # The guest gets the host's Torner tree (built there) and the current tau forks;
 # the source disk run_vm_torner.sh attaches (vdb) is not used.
 set -u
@@ -41,16 +43,22 @@ if grep -q '^CONFIG_DM_LOG_WRITES=m' "$KD/.config"; then
 	[ -f "$KO" ] || die "$KO missing"
 fi
 pgrep -f "hostfwd=tcp::$PORT-:22" >/dev/null && die "a VM already listens on ssh $PORT"
-# a tautest VM writes the base image the overlay sits on
-pgrep -af qemu-system | grep -qE 'file=[^,]*qemu-image\.qcow2,' && die "a tautest VM is running"
+# a tautest VM writes the base image the overlay sits on, unless BASE is a copy
+BASE=${BASE:-qemu-image.qcow2}
+if [ "$BASE" = qemu-image.qcow2 ]; then
+	pgrep -af qemu-system | grep -qE 'file=[^,]*qemu-image\.qcow2,' && die "a tautest VM is running"
+else
+	[ -f "$BASE" ] || die "no base image $BASE"
+fi
 mkdir -p "$OUT" "$SCR" || exit 1
 exec > >(tee -a "$OUT/table.log") 2>&1
 OV=$V/$NAME-overlay.qcow2; SD=$SCR/$NAME-scratch.raw
 rm -f "$OV" "$SD"
-(cd $V && qemu-img create -q -f qcow2 -b qemu-image.qcow2 -F qcow2 "$OV") || exit 1
+(cd $V && qemu-img create -q -f qcow2 -b "$BASE" -F qcow2 "$OV") || exit 1
 
 echo "===== boot $(date '+%F %T')  $KV"
 echo "cells: $CELLS"
+echo "base: $BASE"
 INITRD=$V/initrd.img-6.8.0tjournal+ ROOTFS=$OV SCRATCH=$SD SCRATCH_SIZE=24G \
 	SSH_PORT=$PORT GDB_PORT=$GDB_PORT TAUFS_KERNEL=$KD MEM=${MEM:-16G} \
 	sg kvm -c "bash $R/tools/qemu/run_vm_torner.sh" > "$OUT/console.log" 2>&1 < /dev/null &
