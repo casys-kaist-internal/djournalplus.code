@@ -21,7 +21,7 @@ Machine (`env.txt` of mysql/20261019_061714; full snapshot in `bench/machines/li
     mysql:                   8.4.5 for Linux on x86_64 (Source distribution)
     zfs:                     2.2.2-0ubuntu9.5 / userland 2.2.2-0ubuntu9.5 / arc_max 34359738368
 
-The τ rows (ext4-tau, xfs-tau) ran on the τ kernel (6.8.0tjournal+).
+The τ rows (ext4-tau, xfs-tau and their variants) ran on the τ kernel (6.8.0tjournal+).
 
 Throughput in transactions/s (mean of the runs at a point); protection on = PostgreSQL
 full_page_writes / InnoDB doublewrite; KB/trx = device writes per transaction at the most threads.
@@ -67,6 +67,7 @@ full_page_writes / InnoDB doublewrite; KB/trx = device writes per transaction at
 | write_only | ext4-fullfill | off | 2388 | 16662 | 27414 | 38897 | 45597 | 25.7 | `20261009_212738_fullfill` |
 | write_only | ext4-fullfill | on | 2047 | 13091 | 19840 | 26331 | 33192 | 47.5 | `20261009_212738_fullfill` |
 | write_only | ext4-tau | off | 2343 | 15626 | 26191 | 36383 | 43164 | 36.2 | `20261020_204243` |
+| write_only | ext4-tau-uniform | off | 1246 | 7638 | 11718 | 15930 | 17200 | 124.8 | `20261022_031357_uniform` |
 | write_only | ext4-uniform | off | 1262 | 8509 | 14273 | 20446 | 22831 | 72.8 | `20261017_202936_uniform` |
 | write_only | ext4-uniform | on | 1105 | 6568 | 9851 | 12495 | 13063 | 138.8 | `20261017_202936_uniform` |
 | write_only | xfs | off | 2293 | 15660 | 26190 | 36156 | 44017 | 24.7 | `20261009_081451` |
@@ -121,6 +122,7 @@ full_page_writes / InnoDB doublewrite; KB/trx = device writes per transaction at
 | write_only | ext4-fullfill | off | 2977 | 20278 | 35029 | 49947 | 61332 | 17.4 | `20261010_023220_fullfill` |
 | write_only | ext4-fullfill | on | 2724 | 15715 | 23145 | 28174 | 28737 | 50.2 | `20261010_023220_fullfill` |
 | write_only | ext4-tau | off | 2946 | 19512 | 31269 | 42540 | 50690 | 32.3 | `20261020_122600` |
+| write_only | ext4-tau-uniform | off | 1506 | 9406 | 14405 | 20210 | 24386 | 89.8 | `20261022_021029_uniform` |
 | write_only | ext4-uniform | off | 1531 | 10319 | 18003 | 27581 | 37352 | 47.8 | `20261017_171541_uniform` |
 | write_only | ext4-uniform | on | 1364 | 7855 | 12131 | 14378 | 14761 | 104.6 | `20261017_171541_uniform` |
 | write_only | xfs | off | 2981 | 20070 | 33662 | 48098 | 58655 | 17.3 | `20261009_151712` |

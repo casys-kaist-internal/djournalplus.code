@@ -153,7 +153,7 @@ def summary_md(raw, runs, tpcc=None):
     # systems (those run on the τ kernel; noted below)
     def has_tau(db, n):
         with open(raw / "sysbench" / db / n / "summary.csv") as f:
-            return any(r["fs"].endswith("-tau") for r in csv.DictReader(f))
+            return any(re.search(r"-tau(-|$)", r["fs"]) for r in csv.DictReader(f))
     order = sorted(((db, n) for db, ns in runs.items() for n in ns),
                    key=lambda x: x[1], reverse=True)
     newest = next((x for x in order if not has_tau(*x)), order[0] if order else None)
@@ -170,7 +170,7 @@ def summary_md(raw, runs, tpcc=None):
             tau_kernels |= {l.split(":", 1)[1].strip() for l in env.read_text().splitlines()
                             if l.strip().startswith("kernel:")}
     if tau_kernels:
-        lines += ["The τ rows (ext4-tau, xfs-tau) ran on the τ kernel (%s)." %
+        lines += ["The τ rows (ext4-tau, xfs-tau and their variants) ran on the τ kernel (%s)." %
                   ", ".join(sorted(tau_kernels)), ""]
     lines += ["Throughput in transactions/s (mean of the runs at a point);"
               " protection on = PostgreSQL",
