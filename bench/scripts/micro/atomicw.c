@@ -1,33 +1,46 @@
 /*
- * atomicw: the §6.3 microbenchmark. Every thread repeats one 16 KiB aligned
- * pwrite() followed by fdatasync() (fsync() with --fsync) on files it alone
- * writes, so the queue depth equals the thread count. Buffered I/O only.
+ * atomicw: the §6.3 microbenchmark, one tool for every configuration.
+ * Buffered I/O only; 16 KiB pages (--unit); every thread writes its own
+ * region and commits it in batches of --batch N pages:
  *
- * Files: <dir>/f000 ... (--files F, --total bytes split evenly). With F >= T
- * thread t owns files t, t+T, t+2T, ...; with F < T (T a multiple of F), T/F
- * threads share a file and each owns a disjoint range of it.
+ *   --mode raw  N pwrites, then fdatasync of the data file(s)
+ *   --mode tau  the same with the files opened O_TAU_UNTORN
+ *   --mode app  doublewrite as InnoDB does it, per thread: the N pages go
+ *               to the thread's own doublewrite file (dw.<thread>, N pages,
+ *               filled at setup) in one sequential write, fdatasync, then
+ *               the same pages in place, fdatasync of the data file(s)
+ *
+ * Files: <dir>/<--file-fmt, default f%03d> (--files F, --total split
+ * evenly). With F >= T thread t owns files t, t+T, ...; with F < T (T a
+ * multiple of F) T/F threads share a file, each a disjoint range of it.
  *
  * Patterns:
- *   overwrite  files prepared once (--prepare: sequential fill); random
- *              aligned offsets in the thread's own region, with replacement
- *   prealloc   files recreated and fallocate(0, size)d; every offset written
+ *   overwrite  files prepared beforehand (--prepare, or another tool with
+ *              the same names); random aligned pages in the thread's region,
+ *              uniform or --dist zoned (75% of the writes on the first 1%
+ *              of the region, the rest on the other 99%, fio's zoned:75/1:25/99)
+ *   prealloc   files recreated and fallocate(0, size)d; every page written
  *              once, in a random permutation
  *   hole       files recreated and ftruncate(size)d (sparse); same order
- *   append     files recreated empty; sequential 16 KiB appends, round-robin
- *              over the thread's files
- * prealloc/hole/append stop when the first thread runs out of offsets; the
- * measured window then ends there (reported as exhausted).
+ *   append     files recreated empty; sequential appends, round-robin over
+ *              the thread's files
+ * overwrite is time based: --warmup s not counted, --duration s measured.
+ * The others are size based (every page of the files written once, the
+ * window is the whole run until the last thread ends); --time-based measures
+ * them for --duration s instead (stopping early if a thread runs out).
  *
- * A run: set up, sync(), --warmup seconds not counted, --duration seconds
- * measured. An op counts if its fdatasync returns inside the window.
- * Output: one CSV line (--csv-header prints the header). Latencies are of
- * fdatasync unless named otherwise; percentiles come from a log-linear
- * histogram (<1.6% bucket width). Device bytes are the change of sectors
- * written (field 7 of /sys/block/<dev>/stat) over the window.
+ * A batch counts when its commit ends inside the window, with its pages.
+ * IOPS = data pages per second (doublewrite writes not counted). Latencies:
+ * commit = the time that makes the batch durable and atomic (raw/tau: the
+ * fdatasync; app: doublewrite write + fdatasync + in-place writes +
+ * fdatasync); sync = the data-file fdatasync; write = one in-place page
+ * pwrite. Percentiles from a log-linear histogram (<1.6% bucket width).
+ * Device bytes: change of sectors written (field 7 of /sys/block/<dev>/stat)
+ * over the window. Output: one CSV line (--csv-header prints the header);
+ * --timeline writes pages per second.
  *
- * --tau opens the files with O_TAU_UNTORN; unless --no-tau-check, the run is
- * refused if the kernel accepts O_DIRECT|O_TAU_UNTORN (tau rejects it with
- * EINVAL, so acceptance means tau is not active).
+ * --mode tau (or --tau) refuses to run, unless --no-tau-check, if the kernel
+ * accepts O_DIRECT|O_TAU_UNTORN (tau rejects it with EINVAL).
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -52,6 +65,8 @@
 
 enum pattern { P_OVERWRITE, P_PREALLOC, P_HOLE, P_APPEND };
 static const char *pattern_names[] = { "overwrite", "prealloc", "hole", "append" };
+enum wmode { M_RAW, M_TAU, M_APP };
+static const char *mode_names[] = { "raw", "tau", "app" };
 
 /* log-linear histogram of nanoseconds: values < 128 exact, then 64 buckets
  * per power of two */
@@ -80,6 +95,11 @@ struct seg {
 	uint64_t cursor;	/* append: units written */
 };
 
+struct lat {			/* one latency kind, counted in the window */
+	uint64_t n, sum, max;
+	uint64_t *hist;
+};
+
 struct thr {
 	int id;
 	struct seg *segs;
@@ -87,25 +107,30 @@ struct thr {
 	uint64_t seg_units;	/* units per segment (all equal) */
 	uint64_t nunits;	/* nsegs * seg_units */
 	uint32_t *perm;		/* prealloc/hole */
-	uint64_t next;		/* prealloc/hole/append: ops issued */
+	uint64_t next;		/* prealloc/hole/append: pages issued */
 	uint64_t rng;
-	char *buf;
-	/* counted in the window */
-	uint64_t ops, sum_sync, sum_write, sum_op, max_sync;
-	uint64_t *hist_sync;
-	uint64_t *tl;		/* ops per second since start, whole run */
+	char *buf;		/* --batch pages: the doublewrite image, page i in slot i */
+	int dwfd;
+	int *bfd;		/* targets of the batch */
+	uint64_t *boff, *bwlat;
+	int *dirty;		/* segments written in the batch */
+	uint64_t pages, batches;
+	struct lat commit, sync, write;
+	uint64_t *tl;		/* pages per second since start, whole run */
+	uint64_t finish;	/* size based: when the thread ran out */
 	pthread_t tid;
 	char pad[64];
 };
 
 static struct {
-	const char *dir, *dev, *hist_path, *tl_path, *label;
+	const char *dir, *dev, *hist_path, *tl_path, *label, *fmt;
 	enum pattern pattern;
-	int threads, files, warmup, duration, tau, tau_check, use_fsync, prepare;
+	enum wmode mode;
+	int threads, files, warmup, duration, tau_check, use_fsync, prepare, zoned, time_based, batch;
 	uint64_t total, unit, file_size, file_units, seed;
 } o = {
-	.threads = 1, .files = 64, .warmup = 10, .duration = 60, .tau_check = 1,
-	.total = 128ULL << 30, .unit = 16384, .seed = 1, .label = "",
+	.threads = 1, .files = 64, .warmup = 10, .duration = 180, .tau_check = 1, .batch = 64,
+	.total = 128ULL << 30, .unit = 16384, .seed = 1, .label = "", .fmt = "f%03d",
 };
 
 static _Atomic uint64_t m_start = UINT64_MAX, m_end = UINT64_MAX, exhaust_ns = UINT64_MAX;
@@ -172,12 +197,14 @@ static uint64_t parse_size(const char *s)
 
 static void file_path(char *p, size_t n, int f)
 {
-	snprintf(p, n, "%s/f%03d", o.dir, f);
+	char name[256];
+	snprintf(name, sizeof(name), o.fmt, f);
+	snprintf(p, n, "%s/%s", o.dir, name);
 }
 
 static int open_flags(void)
 {
-	return O_RDWR | (o.tau ? O_TAU_UNTORN : 0);
+	return O_RDWR | (o.mode == M_TAU ? O_TAU_UNTORN : 0);
 }
 
 /* device stat fields (1-based): 5 writes, 7 sectors written, 16 flushes */
@@ -207,6 +234,20 @@ static void fill_random(char *b, size_t n, uint64_t seed)
 	}
 }
 
+static void write_all(int fd, const char *b, size_t n, uint64_t off, const char *what)
+{
+	size_t done = 0;
+	while (done < n) {
+		ssize_t r = pwrite(fd, b + done, n - done, (off_t)(off + done));
+		if (r < 0) {
+			if (errno == EINTR)
+				continue;
+			die("%s pwrite: %s", what, strerror(errno));
+		}
+		done += (size_t)r;
+	}
+}
+
 /* --prepare: create and fill every file sequentially (1 MiB writes, then
  * fsync), up to 16 files at a time */
 struct prep_arg { int first, step; };
@@ -227,8 +268,7 @@ static void *prep_worker(void *a)
 			die("open %s: %s", p, strerror(errno));
 		for (uint64_t off = 0; off < o.file_size; off += bs) {
 			size_t n = (o.file_size - off < bs) ? (size_t)(o.file_size - off) : bs;
-			if (pwrite(fd, buf, n, (off_t)off) != (ssize_t)n)
-				die("prepare write %s: %s", p, strerror(errno));
+			write_all(fd, buf, n, off, "prepare");
 		}
 		if (fsync(fd))
 			die("fsync %s: %s", p, strerror(errno));
@@ -266,7 +306,7 @@ static void recreate_files(void)
 	}
 	for (int f = 0; f < o.files; f++) {
 		file_path(p, sizeof(p), f);
-		int fd = open(p, O_RDWR | O_CREAT | O_TRUNC | (o.tau ? O_TAU_UNTORN : 0), 0644);
+		int fd = open(p, O_RDWR | O_CREAT | O_TRUNC | (o.mode == M_TAU ? O_TAU_UNTORN : 0), 0644);
 		if (fd < 0)
 			die("create %s: %s", p, strerror(errno));
 		if (o.pattern == P_PREALLOC && fallocate(fd, 0, 0, (off_t)o.file_size))
@@ -283,8 +323,8 @@ static void check_files(void)
 	struct stat st;
 	for (int f = 0; f < o.files; f++) {
 		file_path(p, sizeof(p), f);
-		if (stat(p, &st) || (uint64_t)st.st_size != o.file_size)
-			die("%s missing or not %" PRIu64 " bytes: run --prepare first", p, o.file_size);
+		if (stat(p, &st) || (uint64_t)st.st_size < o.file_size)
+			die("%s missing or under %" PRIu64 " bytes: prepare it first", p, o.file_size);
 	}
 }
 
@@ -347,20 +387,43 @@ static void setup_thread(struct thr *t)
 			t->perm[j] = x;
 		}
 	}
-	if (posix_memalign((void **)&t->buf, 4096, o.unit))
+	size_t bb = (size_t)o.batch * o.unit;
+	if (posix_memalign((void **)&t->buf, 4096, bb))
 		die("posix_memalign");
-	fill_random(t->buf, o.unit, o.seed + 101 + (uint64_t)t->id);
-	t->hist_sync = calloc(HBUCKETS, sizeof(uint64_t));
-	t->tl = calloc((size_t)(o.warmup + o.duration + 30), sizeof(uint64_t));
+	fill_random(t->buf, bb, o.seed + 101 + (uint64_t)t->id);
+	t->bfd = calloc((size_t)o.batch, sizeof(int));
+	t->boff = calloc((size_t)o.batch, sizeof(uint64_t));
+	t->bwlat = calloc((size_t)o.batch, sizeof(uint64_t));
+	t->dirty = calloc((size_t)t->nsegs, sizeof(int));
+	t->dwfd = -1;
+	if (o.mode == M_APP) {	/* the doublewrite file: written over in place every batch */
+		snprintf(p, sizeof(p), "%s/dw.%d", o.dir, t->id);
+		t->dwfd = open(p, O_RDWR | O_CREAT | O_TRUNC, 0644);
+		if (t->dwfd < 0)
+			die("open %s: %s", p, strerror(errno));
+		write_all(t->dwfd, t->buf, bb, 0, "doublewrite setup");
+		if (fsync(t->dwfd))
+			die("fsync %s: %s", p, strerror(errno));
+	}
+	t->commit.hist = calloc(HBUCKETS, sizeof(uint64_t));
+	t->sync.hist = calloc(HBUCKETS, sizeof(uint64_t));
+	t->write.hist = calloc(HBUCKETS, sizeof(uint64_t));
+	t->tl = calloc((size_t)(o.warmup + o.duration + 30) + 20000, sizeof(uint64_t));
 }
 
-/* next target, or -1 when the thread has written all its offsets */
-static int next_target(struct thr *t, int *fd, uint64_t *off)
+/* next target, or -1 when the thread has written all its pages */
+static int next_target(struct thr *t, int *seg, uint64_t *off)
 {
 	uint64_t u = 0;
 	switch (o.pattern) {
 	case P_OVERWRITE:
-		u = below(&t->rng, t->nunits);
+		if (o.zoned) {	/* fio zoned:75/1:25/99 */
+			uint64_t hot = t->nunits / 100 ? t->nunits / 100 : 1;
+			u = below(&t->rng, 100) < 75 ? below(&t->rng, hot)
+						    : hot + below(&t->rng, t->nunits - hot);
+		} else {
+			u = below(&t->rng, t->nunits);
+		}
 		break;
 	case P_PREALLOC:
 	case P_HOLE:
@@ -371,15 +434,16 @@ static int next_target(struct thr *t, int *fd, uint64_t *off)
 	case P_APPEND: {
 		if (t->next >= t->nunits)
 			return -1;
-		struct seg *s = &t->segs[t->next++ % (uint64_t)t->nsegs];
-		*fd = s->fd;
+		int k = (int)(t->next++ % (uint64_t)t->nsegs);
+		struct seg *s = &t->segs[k];
+		*seg = k;
 		*off = (s->first + s->cursor++) * o.unit;
 		return 0;
 	}
 	}
-	struct seg *s = &t->segs[u / t->seg_units];
-	*fd = s->fd;
-	*off = (s->first + u % t->seg_units) * o.unit;
+	int k = (int)(u / t->seg_units);
+	*seg = k;
+	*off = (t->segs[k].first + u % t->seg_units) * o.unit;
 	return 0;
 }
 
@@ -390,53 +454,82 @@ static void lower_end(uint64_t v)
 		;
 }
 
+static void lat_add(struct lat *l, uint64_t v)
+{
+	l->n++;
+	l->sum += v;
+	if (v > l->max)
+		l->max = v;
+	l->hist[hidx(v)]++;
+}
+
+static void do_sync(int fd)
+{
+	if ((o.use_fsync ? fsync(fd) : fdatasync(fd)) != 0)
+		die("%s: %s", o.use_fsync ? "fsync" : "fdatasync", strerror(errno));
+}
+
 static void *worker(void *arg)
 {
 	struct thr *t = arg;
 	uint64_t seq = 0;
-	size_t tl_len = (size_t)(o.warmup + o.duration + 30);
+	size_t tl_len = (size_t)(o.warmup + o.duration + 30) + 20000;
+	int size_based = o.pattern != P_OVERWRITE && !o.time_based;
 	pthread_barrier_wait(&barrier);
 	while (!atomic_load_explicit(&stop_flag, memory_order_relaxed)) {
-		int fd;
+		int k = 0, seg;
 		uint64_t off;
-		if (next_target(t, &fd, &off) < 0) {
+		while (k < o.batch && next_target(t, &seg, &off) == 0) {
+			t->bfd[k] = seg;
+			t->boff[k] = off;
+			k++;
+		}
+		if (k == 0) {
 			uint64_t e = now_ns(), cur = UINT64_MAX;
-			atomic_compare_exchange_strong(&exhaust_ns, &cur, e);
-			lower_end(e);
+			t->finish = e;
+			if (!size_based) {
+				atomic_compare_exchange_strong(&exhaust_ns, &cur, e);
+				lower_end(e);
+			}
 			break;
 		}
-		seq++;
-		memcpy(t->buf, &seq, sizeof(seq));
-		uint64_t a = now_ns();
-		size_t done = 0;
-		while (done < o.unit) {
-			ssize_t n = pwrite(fd, t->buf + done, o.unit - done, (off_t)(off + done));
-			if (n < 0) {
-				if (errno == EINTR)
-					continue;
-				die("pwrite: %s", strerror(errno));
-			}
-			done += (size_t)n;
+		for (int i = 0; i < k; i++) {	/* stamp the pages */
+			seq++;
+			memcpy(t->buf + (size_t)i * o.unit, &seq, sizeof(seq));
 		}
-		uint64_t b = now_ns();
-		if ((o.use_fsync ? fsync(fd) : fdatasync(fd)) != 0)
-			die("%s: %s", o.use_fsync ? "fsync" : "fdatasync", strerror(errno));
+		uint64_t a = now_ns();
+		if (o.mode == M_APP) {
+			write_all(t->dwfd, t->buf, (size_t)k * o.unit, 0, "doublewrite");
+			do_sync(t->dwfd);
+		}
+		for (int i = 0; i < k; i++) {
+			uint64_t w0 = now_ns();
+			write_all(t->segs[t->bfd[i]].fd, t->buf + (size_t)i * o.unit, o.unit, t->boff[i], "page");
+			t->bwlat[i] = now_ns() - w0;
+			t->dirty[t->bfd[i]] = 1;
+		}
+		uint64_t s0 = now_ns();
+		for (int j = 0; j < t->nsegs; j++)
+			if (t->dirty[j]) {
+				do_sync(t->segs[j].fd);
+				t->dirty[j] = 0;
+			}
 		uint64_t c = now_ns();
 		size_t sec = (size_t)((c - t_start) / 1000000000ULL);
 		if (sec < tl_len)
-			t->tl[sec]++;
+			t->tl[sec] += (uint64_t)k;
 		if (c >= atomic_load_explicit(&m_start, memory_order_relaxed) &&
 		    c < atomic_load_explicit(&m_end, memory_order_relaxed)) {
-			uint64_t s = c - b;
-			t->ops++;
-			t->sum_sync += s;
-			t->sum_write += b - a;
-			t->sum_op += c - a;
-			if (s > t->max_sync)
-				t->max_sync = s;
-			t->hist_sync[hidx(s)]++;
+			t->pages += (uint64_t)k;
+			t->batches++;
+			lat_add(&t->commit, o.mode == M_APP ? c - a : c - s0);
+			lat_add(&t->sync, c - s0);
+			for (int i = 0; i < k; i++)
+				lat_add(&t->write, t->bwlat[i]);
 		}
 	}
+	if (!t->finish)
+		t->finish = now_ns();
 	return NULL;
 }
 
@@ -457,17 +550,39 @@ static void sleep_until(uint64_t target)
 static void usage(void)
 {
 	fprintf(stderr,
-		"usage: atomicw --dir DIR --pattern overwrite|prealloc|hole|append [--threads T]\n"
-		"  [--files 64] [--total 128G] [--unit 16384] [--warmup 10] [--duration 60]\n"
-		"  [--seed 1] [--dev nvme0c0n1] [--fsync] [--tau] [--no-tau-check]\n"
+		"usage: atomicw --dir DIR --pattern overwrite|prealloc|hole|append [--mode raw|tau|app]\n"
+		"  [--threads T] [--files F] [--file-fmt f%%03d] [--total 128G] [--unit 16384]\n"
+		"  [--batch 64] [--dist uniform|zoned] [--warmup 10] [--duration 180] [--time-based]\n"
+		"  [--seed 1] [--dev nvme0c0n1] [--fsync] [--no-tau-check]\n"
 		"  [--hist FILE] [--timeline FILE] [--label TEXT] [--prepare] [--csv-header]\n");
 	exit(2);
 }
 
 static const char *csv_header =
-	"pattern,threads,files,unit,ops,duration_s,iops,lat_mean_us,lat_p50_us,lat_p99_us,"
-	"lat_p999_us,lat_max_us,write_mean_us,op_mean_us,dev_bytes_per_op,dev_writes_per_op,"
-	"dev_flushes_per_op,exhausted,notes";
+	"wmode,pattern,threads,files,batch,unit,dist,run,pages,batches,duration_s,iops,"
+	"commit_mean_us,commit_p99_us,commit_p999_us,commit_max_us,sync_mean_us,sync_p99_us,"
+	"write_p999_us,write_max_us,dev_bytes_per_page,dev_flushes_per_batch,exhausted,notes";
+
+static double pctl(uint64_t *hist, uint64_t n, double q)
+{
+	uint64_t want = (uint64_t)(q * (double)n), acc = 0;
+	for (int b = 0; b < HBUCKETS; b++) {
+		acc += hist[b];
+		if (acc > want)
+			return hmid(b);
+	}
+	return 0;
+}
+
+static void lat_merge(struct lat *dst, const struct lat *src)
+{
+	dst->n += src->n;
+	dst->sum += src->sum;
+	if (src->max > dst->max)
+		dst->max = src->max;
+	for (int b = 0; b < HBUCKETS; b++)
+		dst->hist[b] += src->hist[b];
+}
 
 int main(int argc, char **argv)
 {
@@ -478,6 +593,8 @@ int main(int argc, char **argv)
 		{ "dev", 1, 0, 'v' }, { "fsync", 0, 0, 'F' }, { "tau", 0, 0, 'T' },
 		{ "no-tau-check", 0, 0, 'N' }, { "hist", 1, 0, 'H' }, { "timeline", 1, 0, 'L' },
 		{ "label", 1, 0, 'l' }, { "prepare", 0, 0, 'P' }, { "csv-header", 0, 0, 'C' },
+		{ "mode", 1, 0, 'm' }, { "batch", 1, 0, 'b' }, { "dist", 1, 0, 'z' },
+		{ "time-based", 0, 0, 'B' }, { "file-fmt", 1, 0, 'n' },
 		{ 0, 0, 0, 0 }
 	};
 	const char *pat = NULL;
@@ -495,19 +612,32 @@ int main(int argc, char **argv)
 		case 's': o.seed = strtoull(optarg, NULL, 0); break;
 		case 'v': o.dev = optarg; break;
 		case 'F': o.use_fsync = 1; break;
-		case 'T': o.tau = 1; break;
+		case 'T': o.mode = M_TAU; break;
 		case 'N': o.tau_check = 0; break;
 		case 'H': o.hist_path = optarg; break;
 		case 'L': o.tl_path = optarg; break;
 		case 'l': o.label = optarg; break;
 		case 'P': o.prepare = 1; break;
 		case 'C': puts(csv_header); return 0;
+		case 'm':
+			if (!strcmp(optarg, "raw")) o.mode = M_RAW;
+			else if (!strcmp(optarg, "tau")) o.mode = M_TAU;
+			else if (!strcmp(optarg, "app")) o.mode = M_APP;
+			else usage();
+			break;
+		case 'b': o.batch = atoi(optarg); break;
+		case 'z':
+			if (!strcmp(optarg, "zoned")) o.zoned = 1;
+			else if (strcmp(optarg, "uniform")) usage();
+			break;
+		case 'B': o.time_based = 1; break;
+		case 'n': o.fmt = optarg; break;
 		default: usage();
 		}
 	}
 	if (!o.dir)
 		usage();
-	if (o.files < 1 || o.files > 4096 || o.threads < 1 || o.unit % 4096 || o.unit == 0)
+	if (o.files < 1 || o.files > 4096 || o.threads < 1 || o.unit % 4096 || o.unit == 0 || o.batch < 1)
 		usage();
 	o.file_size = o.total / (uint64_t)o.files / o.unit * o.unit;
 	o.file_units = o.file_size / o.unit;
@@ -527,108 +657,126 @@ int main(int argc, char **argv)
 		usage();
 	if (o.files < o.threads && (o.threads % o.files || o.pattern == P_APPEND))
 		die("with fewer files than threads, threads must be a multiple of files (not append)");
-	if (o.tau && o.tau_check)
+	if (o.mode == M_TAU && o.tau_check)
 		tau_check();
+	int size_based = o.pattern != P_OVERWRITE && !o.time_based;
 
 	if (o.pattern == P_OVERWRITE)
 		check_files();
 	else
 		recreate_files();
-	sync();
 
 	struct thr *th = calloc((size_t)o.threads, sizeof(*th));
 	for (int i = 0; i < o.threads; i++) {
 		th[i].id = i;
 		setup_thread(&th[i]);
 	}
+	sync();
 	pthread_barrier_init(&barrier, NULL, (unsigned)o.threads + 1);
 	for (int i = 0; i < o.threads; i++)
 		pthread_create(&th[i].tid, NULL, worker, &th[i]);
 
 	uint64_t d0[17], d1[17];
+	int have_dev, warm_exhausted = 0;
 	t_start = now_ns();
-	atomic_store(&m_start, t_start + (uint64_t)o.warmup * 1000000000ULL);
-	atomic_store(&m_end, t_start + (uint64_t)(o.warmup + o.duration) * 1000000000ULL);
-	pthread_barrier_wait(&barrier);
-	uint64_t ms = atomic_load(&m_start);
-	sleep_until(ms);
-	int warm_exhausted = atomic_load(&exhaust_ns) <= ms;
-	int have_dev = read_devstat(d0) == 0;
-	sleep_until(atomic_load(&m_end));
-	read_devstat(d1);
-	atomic_store(&stop_flag, 1);
-	for (int i = 0; i < o.threads; i++)
-		pthread_join(th[i].tid, NULL);
+	if (size_based) {
+		atomic_store(&m_start, t_start);
+		have_dev = read_devstat(d0) == 0;
+		pthread_barrier_wait(&barrier);
+		for (int i = 0; i < o.threads; i++)
+			pthread_join(th[i].tid, NULL);
+		read_devstat(d1);
+		uint64_t last = t_start;
+		for (int i = 0; i < o.threads; i++)
+			if (th[i].finish > last)
+				last = th[i].finish;
+		atomic_store(&m_end, last);
+	} else {
+		atomic_store(&m_start, t_start + (uint64_t)o.warmup * 1000000000ULL);
+		atomic_store(&m_end, t_start + (uint64_t)(o.warmup + o.duration) * 1000000000ULL);
+		pthread_barrier_wait(&barrier);
+		uint64_t ms = atomic_load(&m_start);
+		sleep_until(ms);
+		warm_exhausted = atomic_load(&exhaust_ns) <= ms;
+		have_dev = read_devstat(d0) == 0;
+		sleep_until(atomic_load(&m_end));
+		read_devstat(d1);
+		atomic_store(&stop_flag, 1);
+		for (int i = 0; i < o.threads; i++)
+			pthread_join(th[i].tid, NULL);
+	}
 
-	uint64_t me = atomic_load(&m_end), ex = atomic_load(&exhaust_ns);
+	uint64_t ms = atomic_load(&m_start), me = atomic_load(&m_end), ex = atomic_load(&exhaust_ns);
 	double dur = me > ms ? (me - ms) / 1e9 : 0;
-	uint64_t ops = 0, sum_sync = 0, sum_write = 0, sum_op = 0, max_sync = 0;
-	uint64_t *hist = calloc(HBUCKETS, sizeof(uint64_t));
-	size_t tl_len = (size_t)(o.warmup + o.duration + 30);
+	uint64_t pages = 0, batches = 0;
+	struct lat lc = { 0 }, ls = { 0 }, lw = { 0 };
+	lc.hist = calloc(HBUCKETS, sizeof(uint64_t));
+	ls.hist = calloc(HBUCKETS, sizeof(uint64_t));
+	lw.hist = calloc(HBUCKETS, sizeof(uint64_t));
+	size_t tl_len = (size_t)(o.warmup + o.duration + 30) + 20000;
 	uint64_t *tl = calloc(tl_len, sizeof(uint64_t));
 	for (int i = 0; i < o.threads; i++) {
-		ops += th[i].ops;
-		sum_sync += th[i].sum_sync;
-		sum_write += th[i].sum_write;
-		sum_op += th[i].sum_op;
-		if (th[i].max_sync > max_sync)
-			max_sync = th[i].max_sync;
-		for (int b = 0; b < HBUCKETS; b++)
-			hist[b] += th[i].hist_sync[b];
+		pages += th[i].pages;
+		batches += th[i].batches;
+		lat_merge(&lc, &th[i].commit);
+		lat_merge(&ls, &th[i].sync);
+		lat_merge(&lw, &th[i].write);
 		for (size_t s = 0; s < tl_len; s++)
 			tl[s] += th[i].tl[s];
 	}
-	double pct[3] = { 0.50, 0.99, 0.999 }, pv[3] = { 0, 0, 0 };
-	for (int k = 0; k < 3; k++) {
-		uint64_t want = (uint64_t)(pct[k] * (double)ops), acc = 0;
-		for (int b = 0; b < HBUCKETS; b++) {
-			acc += hist[b];
-			if (acc > want) {
-				pv[k] = hmid(b);
-				break;
-			}
-		}
-	}
-	double dev_bytes = 0, dev_writes = 0, dev_flush = 0;
-	if (have_dev && ops) {
-		dev_bytes = (double)(d1[6] - d0[6]) * 512.0 / (double)ops;
-		dev_writes = (double)(d1[4] - d0[4]) / (double)ops;
-		dev_flush = (double)(d1[15] - d0[15]) / (double)ops;
+	double dev_bytes = 0, dev_flush = 0;
+	if (have_dev && pages) {
+		dev_bytes = (double)(d1[6] - d0[6]) * 512.0 / (double)pages;
+		dev_flush = batches ? (double)(d1[15] - d0[15]) / (double)batches : 0;
 	}
 	char notes[256] = "";
 	if (warm_exhausted)
 		snprintf(notes, sizeof(notes), "exhausted in warm-up");
 	else if (ex != UINT64_MAX)
 		snprintf(notes, sizeof(notes), "exhausted at %.1f s of the window", (ex - ms) / 1e9);
+	if (size_based) {
+		uint64_t want = 0;
+		for (int i = 0; i < o.threads; i++)
+			want += th[i].nunits;
+		if (pages != want)
+			snprintf(notes + strlen(notes), sizeof(notes) - strlen(notes),
+				 "%spages %" PRIu64 " of %" PRIu64, notes[0] ? "; " : "", pages, want);
+	}
 	if (o.use_fsync)
 		strncat(notes, notes[0] ? "; fsync" : "fsync", sizeof(notes) - strlen(notes) - 1);
-	if (o.tau)
-		strncat(notes, notes[0] ? "; tau" : "tau", sizeof(notes) - strlen(notes) - 1);
 	if (!have_dev)
 		strncat(notes, notes[0] ? "; no devstat" : "no devstat", sizeof(notes) - strlen(notes) - 1);
-	double n = ops ? (double)ops : 1;
-	printf("%s,%d,%d,%" PRIu64 ",%" PRIu64 ",%.3f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,"
-	       "%.0f,%.3f,%.4f,%d,%s\n",
-	       pattern_names[o.pattern], o.threads, o.files, o.unit, ops, dur,
-	       dur > 0 ? ops / dur : 0, sum_sync / n / 1e3, pv[0] / 1e3, pv[1] / 1e3, pv[2] / 1e3,
-	       max_sync / 1e3, sum_write / n / 1e3, sum_op / n / 1e3, dev_bytes, dev_writes,
-	       dev_flush, ex != UINT64_MAX, notes);
+	double nb = lc.n ? (double)lc.n : 1;
+	printf("%s,%s,%d,%d,%d,%" PRIu64 ",%s,%s,%" PRIu64 ",%" PRIu64 ",%.3f,%.1f,"
+	       "%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.0f,%.3f,%d,%s\n",
+	       mode_names[o.mode], pattern_names[o.pattern], o.threads, o.files, o.batch, o.unit,
+	       o.zoned ? "zoned:75/1:25/99" : "uniform", size_based ? "size" : "time",
+	       pages, batches, dur, dur > 0 ? pages / dur : 0,
+	       lc.sum / nb / 1e3, pctl(lc.hist, lc.n, 0.99) / 1e3, pctl(lc.hist, lc.n, 0.999) / 1e3,
+	       lc.max / 1e3, ls.sum / nb / 1e3, pctl(ls.hist, ls.n, 0.99) / 1e3,
+	       pctl(lw.hist, lw.n, 0.999) / 1e3, lw.max / 1e3, dev_bytes, dev_flush,
+	       ex != UINT64_MAX, notes);
 	if (o.hist_path) {
 		FILE *f = fopen(o.hist_path, "w");
 		if (f) {
-			fprintf(f, "# fdatasync latency histogram (ns bucket midpoint, count)%s%s\n",
+			fprintf(f, "# latency histograms (kind, ns bucket midpoint, count)%s%s\n",
 				o.label[0] ? ": " : "", o.label);
-			for (int b = 0; b < HBUCKETS; b++)
-				if (hist[b])
-					fprintf(f, "%.0f %" PRIu64 "\n", hmid(b), hist[b]);
+			struct lat *all[3] = { &lc, &ls, &lw };
+			const char *nm[3] = { "commit", "sync", "write" };
+			for (int k = 0; k < 3; k++)
+				for (int b = 0; b < HBUCKETS; b++)
+					if (all[k]->hist[b])
+						fprintf(f, "%s %.0f %" PRIu64 "\n", nm[k], hmid(b), all[k]->hist[b]);
 			fclose(f);
 		}
 	}
 	if (o.tl_path) {
 		FILE *f = fopen(o.tl_path, "w");
 		if (f) {
-			fprintf(f, "# second ops (warm-up %d s, window %d s)\n", o.warmup, o.duration);
-			for (size_t s = 0; s < tl_len && s * 1000000000ULL < me - t_start + 1000000000ULL; s++)
+			fprintf(f, "# second pages (warm-up %d s, window %s)\n", size_based ? 0 : o.warmup,
+				size_based ? "whole run" : "duration");
+			uint64_t endt = me - t_start;
+			for (size_t s = 0; s < tl_len && s * 1000000000ULL < endt + 200000000ULL; s++)
 				fprintf(f, "%zu %" PRIu64 "\n", s, tl[s]);
 			fclose(f);
 		}

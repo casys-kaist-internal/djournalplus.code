@@ -1,7 +1,10 @@
 #!/bin/bash
-# §6.3 microbenchmarks with fio (spec v2 of 2026-10-22): 16 KiB buffered
-# pwrite (psync) with an fdatasync after every FSYNC_N writes of a job, one
-# file per job. The baselines run on the base kernel (6.8.0-base+, stock mkfs,
+# §6.3 microbenchmarks (spec v2 of 2026-10-22; tool of the later note of the
+# same day): 16 KiB buffered page writes committed in batches of FSYNC_N, one
+# file per thread, measured with atomicw (TOOL=atomicw, the default: one tool
+# for all eight configurations, App's doublewrite included) or fio (TOOL=fio,
+# the cross-check; no App). The experiments are written as fio job files;
+# for atomicw run_fio translates each job into the same atomicw run. The baselines run on the base kernel (6.8.0-base+, stock mkfs,
 # as the database baselines), tau on the tau kernel; a run refuses the other
 # kind (exception: EXPS=kcheck, EXT4_Raw on the tau kernel). Per run: the fio
 # job file, its JSON, stderr and 1-s bandwidth logs, the device counters from
@@ -9,9 +12,11 @@
 # and, for tau, the open files carrying O_TAU_UNTORN; one CSV line per run in
 # results.csv (fio_report.py row).
 #
-# Configurations:
-#   EXT4_Raw   stock mke2fs, default mount (ordered, delalloc)       base kernel
-#   XFS_Raw    stock mkfs.xfs, default mount                          base kernel
+# Configurations (atomicw mode in brackets):
+#   EXT4_Raw   stock mke2fs, default mount (ordered, delalloc) [raw]  base kernel
+#   XFS_Raw    stock mkfs.xfs, default mount [raw]                    base kernel
+#   EXT4_App   EXT4_Raw's file system, per-thread doublewrite file [app]   base kernel
+#   XFS_App    XFS_Raw's file system, per-thread doublewrite file [app]    base kernel
 #   EXT4_Data  stock mke2fs -J size=40000 (40,000 MB), data=journal   base kernel
 #   ZFS        ashift=12, recordsize=16K, compression=off, atime=off  base kernel
 #   tau-EXT4   tau mke2fs from codes/, mount tjournal,tjournal_size=$TAU_JOURNAL_GB;
@@ -62,9 +67,11 @@ TAU_KERNEL=0
 if (( TAU_KERNEL )); then
   CONFIGS=${CONFIGS:-tau-EXT4 tau-XFS}
 else
-  CONFIGS=${CONFIGS:-EXT4_Raw XFS_Raw EXT4_Data ZFS}
+  CONFIGS=${CONFIGS:-EXT4_Raw XFS_Raw EXT4_Data ZFS EXT4_App XFS_App}
 fi
 EXPS=${EXPS:-e1 e2 sync1 zoned bytes}
+TOOL=${TOOL:-atomicw}
+[[ $TOOL == atomicw || $TOOL == fio ]] || { echo "❌ TOOL is atomicw or fio"; exit 1; }
 OPS=${OPS:-overwrite prealloc hole append}
 THREADS_LIST=${THREADS_LIST:-1 8 16 32 64}
 FILES_LIST=${FILES_LIST:-1 4 16}
@@ -99,11 +106,16 @@ fi
 if has "$EXPS" kcheck && [[ $EXPS != kcheck || $CONFIGS != EXT4_Raw ]]; then
   echo "❌ kcheck runs alone, for EXT4_Raw"; exit 1
 fi
+if [[ $TOOL == fio ]] && { has "$CONFIGS" EXT4_App || has "$CONFIGS" XFS_App; }; then
+  echo "❌ App runs with atomicw only"; exit 1
+fi
 [[ "${CHECK_ONLY:-0}" == 0 ]] || { echo "checks passed: $CONFIGS | $EXPS | $KERNEL"; exit 0; }
 if [[ "${HOST_CHECK:-1}" != 0 ]]; then
   bash "$TAUFS_BENCH/scripts/host_setup.sh" check || { echo "❌ run bench/scripts/host_setup.sh apply"; exit 1; }
 fi
-command -v fio >/dev/null || { echo "❌ no fio"; exit 1; }
+command -v fio >/dev/null || { echo "❌ no fio"; exit 1; }   # layouts use fio either way
+AW=$TAUFS_BENCH_WS/micro/atomicw
+gcc -O2 -Wall -pthread -o "$AW" "$HERE/atomicw.c"
 PRE=$TAUFS_BENCH_WS/micro/tau_preload.so
 mkdir -p "$(dirname "$PRE")"
 gcc -O2 -Wall -shared -fPIC -o "$PRE" "$HERE/tau_preload.c" -ldl
@@ -111,7 +123,7 @@ STATDEV=$(tau_stat_devs)
 
 RESULT_DIR=$TAU_RESULTS/micro/$(date +%Y%m%d_%H%M%S)_fio_$TAG
 mkdir -p "$RESULT_DIR/runs"
-cp "$0" "$HERE/tau_preload.c" "$HERE/fio_report.py" "$RESULT_DIR/"
+cp "$0" "$HERE/tau_preload.c" "$HERE/atomicw.c" "$HERE/fio_report.py" "$RESULT_DIR/"
 CSV=$RESULT_DIR/results.csv
 python3 "$HERE/fio_report.py" header > "$CSV"
 log_env "$RESULT_DIR/env.txt"
@@ -123,7 +135,7 @@ log_env "$RESULT_DIR/env.txt"
   sysctl vm.dirty_ratio vm.dirty_background_ratio vm.dirty_bytes vm.dirty_background_bytes \
     vm.dirty_expire_centisecs vm.dirty_writeback_centisecs
   echo "zfs_arc_max: $(cat /sys/module/zfs/parameters/zfs_arc_max 2>/dev/null)"
-  echo "CONFIGS=$CONFIGS EXPS=$EXPS OPS=$OPS THREADS_LIST=$THREADS_LIST FILES_LIST=$FILES_LIST REPS=$REPS REPS_TOP=$REPS_TOP RAMP=$RAMP RUNTIME=$RUNTIME TOTAL_GB=$TOTAL_GB SETTLE=$SETTLE FSYNC_N=$FSYNC_N FIRST_MODE=$FIRST_MODE FRESH_PER=$FRESH_PER TAU_JOURNAL_GB=$TAU_JOURNAL_GB BW_LOG=$BW_LOG TOP_T=$TOP_T ZONED_CONFIGS=$ZONED_CONFIGS ZONED_DIST=$ZONED_DIST"
+  echo "TOOL=$TOOL CONFIGS=$CONFIGS EXPS=$EXPS OPS=$OPS THREADS_LIST=$THREADS_LIST FILES_LIST=$FILES_LIST REPS=$REPS REPS_TOP=$REPS_TOP RAMP=$RAMP RUNTIME=$RUNTIME TOTAL_GB=$TOTAL_GB SETTLE=$SETTLE FSYNC_N=$FSYNC_N FIRST_MODE=$FIRST_MODE FRESH_PER=$FRESH_PER TAU_JOURNAL_GB=$TAU_JOURNAL_GB BW_LOG=$BW_LOG TOP_T=$TOP_T ZONED_CONFIGS=$ZONED_CONFIGS ZONED_DIST=$ZONED_DIST"
 } >> "$RESULT_DIR/env.txt"
 echo "=== fio: $RESULT_DIR ($CONFIGS | $EXPS | $OPS | threads $THREADS_LIST | files $FILES_LIST | $KERNEL) $(date -u --rfc-3339=seconds)"
 
@@ -133,9 +145,9 @@ fs_make() {
   echo "[+] Trimming $DEVICE (blkdiscard)"
   sudo blkdiscard -f "$DEVICE"
   case $1 in
-    EXT4_Raw)  stock_mke2fs -q -t ext4 -E lazy_itable_init=0,lazy_journal_init=0 -F "$DEVICE" ;;
+    EXT4_Raw|EXT4_App) stock_mke2fs -q -t ext4 -E lazy_itable_init=0,lazy_journal_init=0 -F "$DEVICE" ;;
     EXT4_Data) stock_mke2fs -q -t ext4 -J size=40000 -E lazy_itable_init=0,lazy_journal_init=0 -F "$DEVICE" ;;
-    XFS_Raw)   stock_mkfs_xfs -q -f "$DEVICE" ;;
+    XFS_Raw|XFS_App) stock_mkfs_xfs -q -f "$DEVICE" ;;
     tau-EXT4)
       sudo "$TAUFS_E2FSPROGS/misc/mke2fs" -q -t ext4 -E lazy_itable_init=0,lazy_journal_init=0 -F "$DEVICE" ;;
     tau-XFS)
@@ -159,10 +171,10 @@ fs_mount() {  # idempotent
   esac
   ! mountpoint -q "$MOUNT_DIR" || return 0
   case $1 in
-    EXT4_Raw)  sudo mount -t ext4 "$DEVICE" "$MOUNT_DIR" ;;
+    EXT4_Raw|EXT4_App) sudo mount -t ext4 "$DEVICE" "$MOUNT_DIR" ;;
     EXT4_Data) sudo mount -t ext4 -o data=journal "$DEVICE" "$MOUNT_DIR" ;;
     tau-EXT4)  sudo mount -t ext4 -o tjournal,tjournal_size="$TAU_JOURNAL_GB" "$DEVICE" "$MOUNT_DIR" ;;
-    XFS_Raw)   sudo mount -t xfs "$DEVICE" "$MOUNT_DIR" ;;
+    XFS_Raw|XFS_App) sudo mount -t xfs "$DEVICE" "$MOUNT_DIR" ;;
     tau-XFS)   sudo mount -t xfs -o tjournal,tjournal_size="$TAU_JOURNAL_GB" "$DEVICE" "$MOUNT_DIR" ;;
   esac
 }
@@ -286,7 +298,40 @@ fresh_fs() {  # <config> <what> <layouts...>
   sleep "$SETTLE"
 }
 
-# one fio run: remount, fio, syncfs, umount, counters; LABEL and JOB set by
+# the atomicw run of a fio job (AWARGS): same directory, files, sizes, batch,
+# ramp, run time, distribution
+aw_args() {  # <config> <job text> <out prefix> <mode time|size>
+  local job=$2 op dir files t total fsize fmt n ramp=0 run
+  op=$(grep -m1 -oE '^\[(overwrite|prealloc|hole|append)\]' <<< "$job" | tr -d '[]')
+  n=$(grep -m1 '^fdatasync=' <<< "$job" | cut -d= -f2)
+  if [[ -n $op ]]; then                                        # e1: one file per job
+    dir=$(grep -m1 '^directory=' <<< "$job" | cut -d= -f2)
+    t=$(grep -m1 '^numjobs=' <<< "$job" | cut -d= -f2); files=$t
+    fsize=$(grep -m1 '^filesize=' <<< "$job" | cut -d= -f2 | tr -d g)
+    fmt='e1.%d'
+  else                                                         # e2: F files, disjoint ranges
+    op=overwrite
+    files=$(grep -c '^filename=' <<< "$job")
+    dir=$(dirname "$(grep -m1 '^filename=' <<< "$job" | cut -d= -f2)")
+    t=$(( $(grep -m1 '^numjobs=' <<< "$job" | cut -d= -f2) * files ))
+    fsize=$(grep -m1 '^filesize=' <<< "$job" | cut -d= -f2 | tr -d g)
+    fmt='e2.%d'
+  fi
+  total=$(( fsize * files ))
+  grep -q '^ramp_time=' <<< "$job" && ramp=$(grep -m1 '^ramp_time=' <<< "$job" | cut -d= -f2)
+  run=$(grep -m1 '^runtime=' <<< "$job" | cut -d= -f2)
+  local mode=raw
+  case $1 in tau-*) mode=tau ;; *_App) mode=app ;; esac
+  AWARGS=(--dir "$dir" --pattern "$op" --mode "$mode" --threads "$t" --files "$files" --total "${total}g"
+          --file-fmt "$fmt" --batch "$n" --warmup "$ramp" --dev "$STATDEV"
+          --timeline "$3.tl" --hist "$3.hist" --label "${3##*/}")
+  [[ -z $run ]] || AWARGS+=(--duration "$run")
+  [[ $op == overwrite || $4 == size ]] || AWARGS+=(--time-based)
+  grep -q '^random_distribution=zoned' <<< "$job" && AWARGS+=(--dist zoned)
+  return 0
+}
+
+# one run: remount, the tool, syncfs, umount, counters; LABEL and JOB set by
 # the caller. The device counters are read at the start, after the ramp and
 # after the umount.
 run_fio() {  # <config> <exp> <op> <threads> <files> <fdatasync n> <dist> <rep> <mode> <dir>
@@ -301,7 +346,12 @@ run_fio() {  # <config> <exp> <op> <threads> <files> <fdatasync n> <dist> <rep> 
   kmark "$mark"
   rm -f "$out.dramp" "$out.fds"
   d0=$(devstat); t0=$(date +%s.%N)
-  if [[ $cfg == tau-* ]]; then
+  if [[ $TOOL == atomicw ]]; then
+    aw_args "$cfg" "$JOB" "$out" "$9"
+    echo "$AW ${AWARGS[*]}" > "$out.cmd"
+    "$AW" --csv-header > "$out.aw.csv"
+    "$AW" "${AWARGS[@]}" >> "$out.aw.csv" 2> "$out.err" &
+  elif [[ $cfg == tau-* ]]; then
     env LD_PRELOAD="$PRE" TAU_PREFIX="$MOUNT_DIR" TAU_PRELOAD_DEBUG=summary \
       fio --output-format=json --output="$out.json" "$out.fio" 2> "$out.err" &
   else

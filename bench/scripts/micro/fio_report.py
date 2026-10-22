@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Results of run_fio.sh (spec v2).
+"""Results of run_fio.sh (spec v2), from fio (<prefix>.json) or atomicw (<prefix>.aw.csv).
 
   fio_report.py header                     the CSV header of results.csv
   fio_report.py row <run prefix>           one CSV line from <prefix>.json/.info/.err/.tau
@@ -10,7 +10,8 @@
   fio_report.py tables <result dir> [...] [-o tables.md]
 
 A run prefix is <result dir>/runs/<label>. results.csv: the spec's columns
-(exp ... notes), then sync_n (fdatasyncs counted by fio), elapsed_s (fio),
+(exp ... notes, then wmode = atomicw's raw/tau/app, batch_n, commit_mean_us,
+commit_p99_us: the batch commit, see atomicw.c), then tool, commit_p999_us, sync_n (fdatasyncs counted by fio), elapsed_s (fio),
 elapsed_total_s (to after syncfs + umount), dev_write_bytes (start to after
 umount), io_bytes, tau_fds (fio's open files under the mount with
 O_TAU_UNTORN, mid-run), tau_used_max_mb and tau_running_max (the kernel's
@@ -34,9 +35,10 @@ from pathlib import Path
 COLS = ["exp", "config", "op", "threads", "files", "fdatasync_n", "dist", "rep", "mode", "runtime_s",
         "write_iops", "write_bw_mib_s", "sync_mean_us", "sync_p99_us", "write_p999_us", "write_max_us",
         "dev_write_gb_s", "dev_bytes_per_16k", "kernel", "notes",
+        "wmode", "batch_n", "commit_mean_us", "commit_p99_us", "tool", "commit_p999_us",
         "sync_n", "elapsed_s", "elapsed_total_s", "dev_write_bytes", "io_bytes", "tau_fds",
         "tau_used_max_mb", "tau_running_max"]
-ORDER = ["EXT4_Raw", "XFS_Raw", "EXT4_Data", "ZFS", "tau-EXT4", "tau-XFS"]
+ORDER = ["EXT4_Raw", "XFS_Raw", "EXT4_App", "XFS_App", "EXT4_Data", "ZFS", "tau-EXT4", "tau-XFS"]
 EXPS = ["e1", "e2", "sync1", "zoned", "bytes", "gate", "kcheck"]
 OPS = ["overwrite", "prealloc", "hole", "append"]
 TAU_LINE = re.compile(r"^\[ *([\d.]+)\] Tau_Daemon: Used journal (\d+)MB / \(Total\) (\d+)MB, running tau: (\d+)")
@@ -75,12 +77,48 @@ def tau_lines(prefix):
     return out
 
 
+def aw_row(prefix, r):
+    """atomicw's CSV line into the columns; returns (io_bytes, notes, error)"""
+    lines = Path(prefix + ".aw.csv").read_text().splitlines()
+    a = dict(zip(lines[0].split(","), lines[1].split(","))) if len(lines) > 1 else {}
+    if not a:
+        return 0, [], "no atomicw output"
+    unit = int(a["unit"])
+    r["tool"] = "atomicw"
+    r["wmode"], r["batch_n"] = a["wmode"], a["batch"]
+    r["runtime_s"] = "%.1f" % float(a["duration_s"])
+    r["write_iops"] = "%.0f" % float(a["iops"])
+    r["write_bw_mib_s"] = "%.1f" % (float(a["iops"]) * unit / 2**20)
+    r["commit_mean_us"], r["commit_p99_us"], r["commit_p999_us"] = a["commit_mean_us"], a["commit_p99_us"], a["commit_p999_us"]
+    r["sync_mean_us"], r["sync_p99_us"] = a["sync_mean_us"], a["sync_p99_us"]
+    r["write_p999_us"], r["write_max_us"] = a["write_p999_us"], a["write_max_us"]
+    r["sync_n"] = a["batches"]
+    return int(a["pages"]) * unit, [a["notes"]] if a.get("notes") else [], None
+
+
 def row(prefix):
     inf = info(prefix)
-    j = json.load(open(prefix + ".json"))["jobs"][0]
-    w, s = j["write"], j.get("sync", {}).get("lat_ns", {})
     r = {k: inf.get(k, "") for k in COLS[:9]}
     r["kernel"] = inf.get("kernel", "")
+    if Path(prefix + ".aw.csv").exists():
+        io, notes, err = aw_row(prefix, r)
+        r["io_bytes"] = str(io)
+        r["elapsed_s"] = inf.get("elapsed_s", "")
+        r["elapsed_total_s"] = inf.get("elapsed_total_s", "")
+        dev_cols(r, inf, io)
+        tau_cols(r, prefix)
+        e = Path(prefix + ".err").read_text(errors="replace").strip() if Path(prefix + ".err").exists() else ""
+        if e:
+            notes.append("stderr: " + e.splitlines()[0][:80].replace(",", ";"))
+        if err:
+            notes.append(err)
+        r["notes"] = "; ".join(notes)
+        return r
+    j = json.load(open(prefix + ".json"))["jobs"][0]
+    w, s = j["write"], j.get("sync", {}).get("lat_ns", {})
+    r["tool"] = "fio"
+    r["wmode"] = "tau" if r["config"].startswith("tau-") else "raw"
+    r["batch_n"] = r["fdatasync_n"]
     r["runtime_s"] = "%.1f" % (w["runtime"] / 1000)
     r["write_iops"] = "%.0f" % w["iops"]
     r["write_bw_mib_s"] = "%.1f" % (w["bw_bytes"] / 2**20)
@@ -96,20 +134,8 @@ def row(prefix):
     r["sync_n"] = str(s.get("N", 0))
     r["elapsed_s"] = inf.get("elapsed_s", "")
     r["elapsed_total_s"] = inf.get("elapsed_total_s", "")
-    d0, dr, d2 = sectors(inf, "dev_start"), sectors(inf, "dev_ramp"), sectors(inf, "dev_end")
-    if d0 is not None and d2 is not None:
-        dev = (d2 - d0) * 512
-        r["dev_write_bytes"] = str(dev)
-        if inf.get("elapsed_total_s"):
-            r["dev_write_gb_s"] = "%.2f" % (dev / float(inf["elapsed_total_s"]) / 1e9)
-        base = dr if dr is not None else d0
-        if w["io_bytes"]:
-            r["dev_bytes_per_16k"] = "%.1f" % ((d2 - base) * 512 / w["io_bytes"] * 16)
-    r["tau_fds"] = inf.get("tau_fds", "")
-    tl = tau_lines(prefix)
-    if tl:
-        r["tau_used_max_mb"] = str(max(x[1] for x in tl))
-        r["tau_running_max"] = str(max(x[3] for x in tl))
+    dev_cols(r, inf, w["io_bytes"])
+    tau_cols(r, prefix)
     notes = []
     err = Path(prefix + ".err").read_text(errors="replace") if Path(prefix + ".err").exists() else ""
     m = re.search(r"tau_preload: (\d+) of (\d+) write opens", err)
@@ -129,6 +155,26 @@ def row(prefix):
     return r
 
 
+def dev_cols(r, inf, io_bytes):
+    d0, dr, d2 = sectors(inf, "dev_start"), sectors(inf, "dev_ramp"), sectors(inf, "dev_end")
+    if d0 is not None and d2 is not None:
+        dev = (d2 - d0) * 512
+        r["dev_write_bytes"] = str(dev)
+        if inf.get("elapsed_total_s"):
+            r["dev_write_gb_s"] = "%.2f" % (dev / float(inf["elapsed_total_s"]) / 1e9)
+        base = dr if dr is not None else d0
+        if io_bytes:
+            r["dev_bytes_per_16k"] = "%.1f" % ((d2 - base) * 512 / io_bytes * 16)
+
+
+def tau_cols(r, prefix):
+    r["tau_fds"] = info(prefix).get("tau_fds", "")
+    tl = tau_lines(prefix)
+    if tl:
+        r["tau_used_max_mb"] = str(max(x[1] for x in tl))
+        r["tau_running_max"] = str(max(x[3] for x in tl))
+
+
 def header():
     print(",".join(COLS))
 
@@ -140,8 +186,10 @@ def print_row(prefix):
 
 def brief(prefix):
     r = row(prefix)
-    s = "%s IOPS, %s MiB/s, fdatasync %s us (p99 %s), pwrite p99.9 %s us max %.0f ms, device %s GB/s, %s KiB per 16 KiB" % (
-        r["write_iops"], r["write_bw_mib_s"], r.get("sync_mean_us") or "-", r.get("sync_p99_us") or "-",
+    s = "%s IOPS, %s MiB/s, %sfdatasync %s us (p99 %s), pwrite p99.9 %s us max %.0f ms, device %s GB/s, %s KiB per 16 KiB" % (
+        r["write_iops"], r["write_bw_mib_s"],
+        "commit %s us (p99 %s), " % (r["commit_mean_us"], r["commit_p99_us"]) if r.get("commit_mean_us") else "",
+        r.get("sync_mean_us") or "-", r.get("sync_p99_us") or "-",
         r.get("write_p999_us") or "-", float(r["write_max_us"] or 0) / 1000, r.get("dev_write_gb_s") or "-",
         r.get("dev_bytes_per_16k") or "-")
     if r["mode"] == "size":
@@ -154,6 +202,30 @@ def brief(prefix):
 
 
 def bw_series(prefix):
+    if Path(prefix + ".tl").exists():
+        return aw_series(prefix)
+    return fio_series(prefix)
+
+
+def aw_series(prefix):
+    """KiB/s per second from atomicw's timeline (pages per second since the
+    start), the warm-up left out like fio's logs"""
+    lines = Path(prefix + ".tl").read_text().splitlines()
+    m = re.search(r"warm-up (\d+) s", lines[0]) if lines else None
+    warm = int(m.group(1)) if m else 0
+    unit = 16
+    a = Path(prefix + ".aw.csv")
+    if a.exists():
+        ls = a.read_text().splitlines()
+        if len(ls) > 1:
+            unit = int(dict(zip(ls[0].split(","), ls[1].split(",")))["unit"]) // 1024
+    v = [int(x.split()[1]) * unit for x in lines[1:] if len(x.split()) == 2 and int(x.split()[0]) >= warm]
+    while v and v[-1] == 0:
+        v.pop()
+    return [float(x) for x in v]
+
+
+def fio_series(prefix):
     """KiB/s per second over the job logs of a run (fio logs after the ramp).
     With log_avg_msec=1000 an entry holds the bytes of the second before it
     (the entries add up to fio's io_bytes; a job blocked in a call logs
@@ -240,7 +312,8 @@ def tables(dirs, out):
         rs = groups[key]
         xs = sorted({int(r[axis]) for r in rs})
         title = "%s %s, %s, fdatasync every %s write%s" % (exp, op, dist, n, "" if n == "1" else "s")
-        metrics = [("write_iops", "IOPS"), ("sync_p99_us", "fdatasync p99 (µs)"),
+        metrics = [("write_iops", "IOPS"), ("commit_mean_us", "batch commit mean (µs)"),
+                   ("commit_p99_us", "batch commit p99 (µs)"), ("sync_p99_us", "fdatasync p99 (µs)"),
                    ("write_p999_us", "pwrite p99.9 (µs)"), ("write_max_us", "pwrite max (ms)"),
                    ("dev_write_gb_s", "device write GB/s (to umount)"),
                    ("dev_bytes_per_16k", "device KiB per 16 KiB")]
