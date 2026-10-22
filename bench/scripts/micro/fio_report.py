@@ -122,14 +122,34 @@ def brief(prefix):
 
 
 def bw_series(prefix):
-    """aggregate KiB/s per second over the job logs of a run (BW_LOG=1)"""
+    """KiB/s per second over the job logs of a run (BW_LOG=1). With
+    log_avg_msec=1000 an entry holds the bytes of the second before it (the
+    entries add up to fio's io_bytes; a job blocked in fdatasync logs nothing
+    until it completes again): each entry's bytes are spread over (t - 1 s, t]
+    in 1-s bins, then summed over the jobs."""
     per = defaultdict(float)
     for f in glob.glob(prefix + "_bw.*.log"):
         for line in open(f):
             p = line.split(",")
-            if len(p) >= 2:
-                per[int(p[0]) // 1000] += float(p[1])
+            if len(p) < 2:
+                continue
+            t, kib = int(p[0]), float(p[1])
+            s = t - 1000
+            while s < t:
+                e = min(t, (s // 1000 + 1) * 1000)
+                per[s // 1000] += kib * (e - s) / 1000
+                s = e
     return [per[k] for k in sorted(per)]
+
+
+def job_gaps(prefix):
+    """longest time without a bandwidth entry per job (ms): a job blocked"""
+    out = []
+    for f in glob.glob(prefix + "_bw.*.log"):
+        ts = [int(l.split(",")[0]) for l in open(f) if "," in l]
+        if len(ts) > 1:
+            out.append(max(b - a for a, b in zip(ts, ts[1:])))
+    return out
 
 
 def mean_sd(v):
@@ -196,8 +216,8 @@ def tables(dirs, out):
     for r in rows:
         label = "%s_%s_%s_t%s_f%s_r%s" % (r["exp"], r["config"], r["op"], r["threads"], r["files"], r["rep"])
         v = bw_series(str(Path(r["_dir"]) / "runs" / label))
-        if len(v) >= 6:
-            v = v[1:-1]           # partial first and last seconds
+        if len(v) >= 8:
+            v = v[1:-2]           # partial seconds at both ends
             h = len(v) // 2
             med = statistics.median(v)
             flat.append((label, statistics.mean(v[h:]) / statistics.mean(v[:h]), min(v) / med if med else 0,

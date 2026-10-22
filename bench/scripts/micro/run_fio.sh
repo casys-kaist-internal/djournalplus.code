@@ -1,20 +1,23 @@
 #!/bin/bash
 # §6.3 microbenchmarks with fio (spec of 2026-10-22): 16 KiB buffered pwrite
 # (psync) with an fdatasync after every FSYNC_N writes of a job, one file per
-# job, on six configurations on the same tau kernel. Per run: the fio job
+# job, on six configurations: the baselines on the base kernel (6.8.0-base+,
+# stock mkfs, as the database baselines) and tau on the tau kernel, each only
+# on its own kernel (a run with the other kind refuses to start). Per run: the fio job
 # file, its JSON and stderr, the device counters, the tau journal lines of the
 # kernel log and, for tau, the open files carrying O_TAU_UNTORN; one CSV line
 # per run in results.csv (fio_report.py row).
 #
-# Configurations (EXT4 and XFS made with the tau mkfs from codes/):
-#   EXT4_Raw   ext4, default mount (ordered, delalloc)
-#   EXT4_Data  ext4 with a 40,000 MB journal (-J size=40000), data=journal
-#   ZFS        ashift=12, recordsize=16K, compression=off, atime=off
-#   tau-EXT4   EXT4_Raw's file system, mount tjournal,tjournal_size=$TAU_JOURNAL_GB;
+# Configurations:
+#   EXT4_Raw   stock mke2fs, default mount (ordered, delalloc)       base kernel
+#   EXT4_Data  stock mke2fs -J size=40000 (40,000 MB), data=journal   base kernel
+#   ZFS        ashift=12, recordsize=16K, compression=off, atime=off  base kernel
+#   XFS_Raw    stock mkfs.xfs, default mount                          base kernel
+#   tau-EXT4   tau mke2fs from codes/, mount tjournal,tjournal_size=$TAU_JOURNAL_GB;
 #              fio opens its files with O_TAU_UNTORN through tau_preload.so
-#   XFS_Raw    xfs with -l tjmaxsize=${TAU_JOURNAL_GB}G (the tau journal map
-#              block holds 32 GiB: the default 1G stops tau-XFS at 32 GiB)
-#   tau-XFS    XFS_Raw's file system, mount tjournal,tjournal_size=$TAU_JOURNAL_GB
+#   tau-XFS    tau mkfs.xfs -l tjmaxsize=${TAU_JOURNAL_GB}G (one tau journal
+#              map block holds 32 GiB: the default 1G stops tau-XFS at 32 GiB),
+#              mount tjournal,tjournal_size=$TAU_JOURNAL_GB
 #
 # Experiments (EXPS, in this order per configuration):
 #   e1     OPS x THREADS_LIST, one file of TOTAL_GB/T per job. overwrite is time
@@ -63,7 +66,14 @@ TAU_JOURNAL_GB=${TAU_JOURNAL_GB:-40}
 BW_LOG=${BW_LOG:-0}
 TOP_T=${TOP_T:-64}           # jobs of e2, sync1, bytes
 
-[[ "$(uname -r)" == *tjournal* ]] || { echo "❌ the fio microbenchmarks run on the tau kernel, not $(uname -r)"; exit 1; }
+# tau only on the tau kernel, the baselines only on the base kernel
+for c in $CONFIGS; do
+  if [[ $c == tau-* ]]; then
+    [[ "$(uname -r)" == *tjournal* ]] || { echo "❌ $c runs on the tau kernel, not $(uname -r)"; exit 1; }
+  else
+    [[ "$(uname -r)" == 6.8.0-base+ ]] || { echo "❌ $c runs on the base kernel 6.8.0-base+, not $(uname -r)"; exit 1; }
+  fi
+done
 if [[ "${HOST_CHECK:-1}" != 0 ]]; then
   bash "$TAUFS_BENCH/scripts/host_setup.sh" check || { echo "❌ run bench/scripts/host_setup.sh apply"; exit 1; }
 fi
@@ -83,7 +93,7 @@ log_env "$RESULT_DIR/env.txt"
   echo "test device: $DEVICE (stats from /sys/block/$STATDEV/stat), write_cache $(cat /sys/block/$TAU_DEVICE_NAME/queue/write_cache)"
   echo "kernel: $(uname -r) $(uname -v); source $(readlink -f /lib/modules/$(uname -r)/build)"
   echo "fio: $(fio --version)"
-  echo "mkfs: $TAUFS_E2FSPROGS/misc/mke2fs ($(git -C "$TAUFS_E2FSPROGS" log -1 --format=%h 2>/dev/null)), $TAUFS_XFSPROGS/mkfs/mkfs.xfs ($(git -C "$TAUFS_XFSPROGS" log -1 --format=%h 2>/dev/null))"
+  echo "mkfs: baselines $STOCK_DIR (stock); tau $TAUFS_E2FSPROGS/misc/mke2fs ($(git -C "$TAUFS_E2FSPROGS" log -1 --format=%h 2>/dev/null)), $TAUFS_XFSPROGS/mkfs/mkfs.xfs ($(git -C "$TAUFS_XFSPROGS" log -1 --format=%h 2>/dev/null))"
   sysctl vm.dirty_ratio vm.dirty_background_ratio vm.dirty_bytes vm.dirty_background_bytes \
     vm.dirty_expire_centisecs vm.dirty_writeback_centisecs
   echo "zfs_arc_max: $(cat /sys/module/zfs/parameters/zfs_arc_max 2>/dev/null)"
@@ -99,11 +109,12 @@ fs_make() {
   echo "[+] Trimming $DEVICE (blkdiscard)"
   sudo blkdiscard -f "$DEVICE"
   case $1 in
-    EXT4_Raw|tau-EXT4)
+    EXT4_Raw)  stock_mke2fs -q -t ext4 -E lazy_itable_init=0,lazy_journal_init=0 -F "$DEVICE" ;;
+    EXT4_Data) stock_mke2fs -q -t ext4 -J size=40000 -E lazy_itable_init=0,lazy_journal_init=0 -F "$DEVICE" ;;
+    XFS_Raw)   stock_mkfs_xfs -q -f "$DEVICE" ;;
+    tau-EXT4)
       sudo "$TAUFS_E2FSPROGS/misc/mke2fs" -q -t ext4 -E lazy_itable_init=0,lazy_journal_init=0 -F "$DEVICE" ;;
-    EXT4_Data)
-      sudo "$TAUFS_E2FSPROGS/misc/mke2fs" -q -t ext4 -J size=40000 -E lazy_itable_init=0,lazy_journal_init=0 -F "$DEVICE" ;;
-    XFS_Raw|tau-XFS)
+    tau-XFS)
       sudo "$TAUFS_XFSPROGS/mkfs/mkfs.xfs" -q -f -l tjmaxsize=${TAU_JOURNAL_GB}G "$DEVICE" ;;
     ZFS)
       sudo wipefs -a "$DEVICE" >/dev/null
