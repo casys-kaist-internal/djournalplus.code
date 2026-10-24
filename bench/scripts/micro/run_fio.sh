@@ -87,6 +87,7 @@ FRESH_PER=${FRESH_PER-ZFS}
 TAU_JOURNAL_GB=${TAU_JOURNAL_GB:-40}
 BW_LOG=${BW_LOG:-1}
 TOP_T=${TOP_T:-64}
+NO_DISCARD=${NO_DISCARD:-0}  # 1: no blkdiscard and no mkfs discard (a preconditioned consumer SSD)
 ZONED_CONFIGS=${ZONED_CONFIGS:-EXT4_Raw EXT4_Data tau-EXT4}
 ZONED_DIST=${ZONED_DIST:-zoned:75/1:25/99}
 
@@ -128,7 +129,7 @@ CSV=$RESULT_DIR/results.csv
 python3 "$HERE/fio_report.py" header > "$CSV"
 log_env "$RESULT_DIR/env.txt"
 {
-  echo "test device: $DEVICE (stats from /sys/block/$STATDEV/stat), write_cache $(cat /sys/block/$TAU_DEVICE_NAME/queue/write_cache)"
+  echo "test device: $DEVICE $(cat /sys/block/$TAU_DEVICE_NAME/device/model 2>/dev/null) (stats from /sys/block/$STATDEV/stat), write_cache $(cat /sys/block/$TAU_DEVICE_NAME/queue/write_cache), NO_DISCARD=$NO_DISCARD"
   echo "kernel: $KERNEL $(uname -v); source $(readlink -f /lib/modules/$KERNEL/build)"
   echo "fio: $(fio --version)"
   echo "mkfs: baselines $STOCK_DIR (stock); tau $TAUFS_E2FSPROGS/misc/mke2fs ($(git -C "$TAUFS_E2FSPROGS" log -1 --format=%h 2>/dev/null)), $TAUFS_XFSPROGS/mkfs/mkfs.xfs ($(git -C "$TAUFS_XFSPROGS" log -1 --format=%h 2>/dev/null))"
@@ -142,16 +143,21 @@ echo "=== fio: $RESULT_DIR ($CONFIGS | $EXPS | $OPS | threads $THREADS_LIST | fi
 fs_make() {
   sudo zpool destroy -f zfspool 2>/dev/null || true
   mountpoint -q "$MOUNT_DIR" && sudo umount "$MOUNT_DIR"
-  echo "[+] Trimming $DEVICE (blkdiscard)"
-  sudo blkdiscard -f "$DEVICE"
+  local ext=lazy_itable_init=0,lazy_journal_init=0 xk=()
+  if (( NO_DISCARD )); then
+    ext+=,nodiscard; xk=(-K)
+  else
+    echo "[+] Trimming $DEVICE (blkdiscard)"
+    sudo blkdiscard -f "$DEVICE"
+  fi
   case $1 in
-    EXT4_Raw|EXT4_App) stock_mke2fs -q -t ext4 -E lazy_itable_init=0,lazy_journal_init=0 -F "$DEVICE" ;;
-    EXT4_Data) stock_mke2fs -q -t ext4 -J size=40000 -E lazy_itable_init=0,lazy_journal_init=0 -F "$DEVICE" ;;
-    XFS_Raw|XFS_App) stock_mkfs_xfs -q -f "$DEVICE" ;;
+    EXT4_Raw|EXT4_App) stock_mke2fs -q -t ext4 -E "$ext" -F "$DEVICE" ;;
+    EXT4_Data) stock_mke2fs -q -t ext4 -J size=40000 -E "$ext" -F "$DEVICE" ;;
+    XFS_Raw|XFS_App) stock_mkfs_xfs -q -f "${xk[@]}" "$DEVICE" ;;
     tau-EXT4)
-      sudo "$TAUFS_E2FSPROGS/misc/mke2fs" -q -t ext4 -E lazy_itable_init=0,lazy_journal_init=0 -F "$DEVICE" ;;
+      sudo "$TAUFS_E2FSPROGS/misc/mke2fs" -q -t ext4 -E "$ext" -F "$DEVICE" ;;
     tau-XFS)
-      sudo "$TAUFS_XFSPROGS/mkfs/mkfs.xfs" -q -f -l tjmaxsize=${TAU_JOURNAL_GB}G "$DEVICE" ;;
+      sudo "$TAUFS_XFSPROGS/mkfs/mkfs.xfs" -q -f "${xk[@]}" -l tjmaxsize=${TAU_JOURNAL_GB}G "$DEVICE" ;;
     ZFS)
       sudo wipefs -a "$DEVICE" >/dev/null
       sudo zpool create -f -o ashift=12 -O recordsize=16K -O compression=off -O atime=off \
