@@ -150,13 +150,15 @@ def summary_md(raw, runs, tpcc=None):
              % (HOST, HOST),
              "notes on the runs in `README.md`.", ""]
     # the machine as the baselines saw it: the newest run without τ file
-    # systems (those run on the τ kernel; noted below)
+    # systems (those run on the τ kernel; noted below) and without a variant
+    # suffix (<run>_ssd990 runs on another test device)
     def has_tau(db, n):
         with open(raw / "sysbench" / db / n / "summary.csv") as f:
             return any(re.search(r"-tau(-|$)", r["fs"]) for r in csv.DictReader(f))
     order = sorted(((db, n) for db, ns in runs.items() for n in ns),
                    key=lambda x: x[1], reverse=True)
-    newest = next((x for x in order if not has_tau(*x)), order[0] if order else None)
+    newest = next((x for x in order if not has_tau(*x) and "_" not in x[1][len("20261024_114745"):]),
+                  order[0] if order else None)
     if newest:
         env = raw / "sysbench" / newest[0] / newest[1] / "env.txt"
         if env.exists():
@@ -172,6 +174,10 @@ def summary_md(raw, runs, tpcc=None):
     if tau_kernels:
         lines += ["The τ rows (ext4-tau, xfs-tau and their variants) ran on the τ kernel (%s)." %
                   ", ".join(sorted(tau_kernels)), ""]
+    if any(k[2].endswith("-ssd990") for k in points):
+        lines += ["The ssd990 rows ran on a Samsung 990 PRO 4TB (no PLP, volatile write cache)"
+                  " in its steady state (written once over its capacity, no trim before the"
+                  " restore), base kernel.", ""]
     lines += ["Throughput in transactions/s (mean of the runs at a point);"
               " protection on = PostgreSQL",
               "full_page_writes / InnoDB doublewrite; KB/trx = device writes per"

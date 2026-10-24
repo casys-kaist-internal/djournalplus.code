@@ -23,6 +23,8 @@ Machine (`env.txt` of mysql/20261019_061714; full snapshot in `bench/machines/li
 
 The τ rows (ext4-tau, xfs-tau and their variants) ran on the τ kernel (6.8.0tjournal+).
 
+The ssd990 rows ran on a Samsung 990 PRO 4TB (no PLP, volatile write cache) in its steady state (written once over its capacity, no trim before the restore), base kernel.
+
 Throughput in transactions/s (mean of the runs at a point); protection on = PostgreSQL
 full_page_writes / InnoDB doublewrite; KB/trx = device writes per transaction at the most threads.
 
@@ -66,6 +68,8 @@ full_page_writes / InnoDB doublewrite; KB/trx = device writes per transaction at
 | write_only | ext4-dj40-uniform | off | 1109 | 5202 | 6921 | 8164 | 9264 | 124.4 | `20261017_202936_uniform` |
 | write_only | ext4-fullfill | off | 2388 | 16662 | 27414 | 38897 | 45597 | 25.7 | `20261009_212738_fullfill` |
 | write_only | ext4-fullfill | on | 2047 | 13091 | 19840 | 26331 | 33192 | 47.5 | `20261009_212738_fullfill` |
+| write_only | ext4-ssd990 | off | 181 | 1120 | 2183 | 4189 | 8048 | 30.8 | `20261024_135351_ssd990` |
+| write_only | ext4-ssd990 | on | 84 | 369 | 677 | 1750 | 1172 | 47.6 | `20261024_135351_ssd990` |
 | write_only | ext4-tau | off | 2343 | 15626 | 26191 | 36383 | 43164 | 36.2 | `20261020_204243` |
 | write_only | ext4-tau-uniform | off | 1246 | 7638 | 11718 | 15930 | 17200 | 124.8 | `20261022_031357_uniform` |
 | write_only | ext4-uniform | off | 1262 | 8509 | 14273 | 20446 | 22831 | 72.8 | `20261017_202936_uniform` |
@@ -121,6 +125,8 @@ full_page_writes / InnoDB doublewrite; KB/trx = device writes per transaction at
 | write_only | ext4-dj40-uniform | off | 1285 | 6151 | 9047 | 11432 | 12170 | 89.4 | `20261017_171541_uniform` |
 | write_only | ext4-fullfill | off | 2977 | 20278 | 35029 | 49947 | 61332 | 17.4 | `20261010_023220_fullfill` |
 | write_only | ext4-fullfill | on | 2724 | 15715 | 23145 | 28174 | 28737 | 50.2 | `20261010_023220_fullfill` |
+| write_only | ext4-ssd990 | off | 300 | 1199 | 2359 | 4617 | 8880 | 11.7 | `20261024_114745_ssd990` |
+| write_only | ext4-ssd990 | on | 409 | 1133 | 2180 | 3978 | 6409 | 48.4 | `20261024_114745_ssd990` |
 | write_only | ext4-tau | off | 2946 | 19512 | 31269 | 42540 | 50690 | 32.3 | `20261020_122600` |
 | write_only | ext4-tau-uniform | off | 1506 | 9406 | 14405 | 20210 | 24386 | 89.8 | `20261022_021029_uniform` |
 | write_only | ext4-uniform | off | 1531 | 10319 | 18003 | 27581 | 37352 | 47.8 | `20261017_171541_uniform` |
