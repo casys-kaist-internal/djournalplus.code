@@ -116,6 +116,12 @@ case "$VARIANT" in
     MY_BINLOG=ON ;;
   fullfill)  # SSD sensitivity: the whole device written once after the trim (common.sh)
     TAU_FILL_BEFORE_RESTORE=1 ;;
+  ssd990)  # consumer SSD (no PLP, volatile cache): the test device is the 990 PRO 4TB
+            # (TAU_TARGET_DISK when set_env.sh ran), kept in its steady state: no trim
+            # before the restore
+    [[ "$(cat /sys/block/$TAU_DEVICE_NAME/device/model 2>/dev/null | xargs)" == "Samsung SSD 990 PRO 4TB" ]] \
+      || { echo "❌ VARIANT=ssd990: source set_env.sh with TAU_TARGET_DISK=\"Samsung SSD 990 PRO 4TB\""; exit 1; }
+    TAU_TRIM_BEFORE_RESTORE=0 ;;
   *) echo "❌ Unknown VARIANT: $VARIANT"; exit 1 ;;
 esac
 
