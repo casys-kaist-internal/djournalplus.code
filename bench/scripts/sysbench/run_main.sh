@@ -73,7 +73,7 @@ LAST_POINT_RUNS=${LAST_POINT_RUNS:-3}  # the last point (64) is measured 3 times
 RUNNING_TIME=${RUNNING_TIME:-300}  # 5 min per measurement, one PG checkpoint_timeout
 WARMUP_TIME=${WARMUP_TIME:-600}  # once, right after the restore
 WARMUP_THREADS=64
-POINT_WARMUP_TIME=60   # whenever the thread count changes
+POINT_WARMUP_TIME=${POINT_WARMUP_TIME:-60}   # whenever the thread count changes
 # sysbench row-id distribution. The default (special) sends 75% of the accesses to
 # the middle 1% of each table and 99% to the middle 34%; uniform is the sensitivity point.
 SB_RAND_TYPE=special
