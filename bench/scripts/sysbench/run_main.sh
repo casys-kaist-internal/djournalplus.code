@@ -69,7 +69,7 @@ fi
 # Protocol (EVAL_PLAN §1): restore once per FS x FPW x workload, warm up, then
 # sweep the thread points on the same running DB without restoring.
 THREADS_LIST=(${THREADS_LIST:-1 8 16 32 64})
-LAST_POINT_RUNS=3      # the last point (64) is measured 3 times
+LAST_POINT_RUNS=${LAST_POINT_RUNS:-3}  # the last point (64) is measured 3 times
 RUNNING_TIME=${RUNNING_TIME:-300}  # 5 min per measurement, one PG checkpoint_timeout
 WARMUP_TIME=${WARMUP_TIME:-600}  # once, right after the restore
 WARMUP_THREADS=64
