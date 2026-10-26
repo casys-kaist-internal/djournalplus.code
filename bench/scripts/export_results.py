@@ -127,7 +127,10 @@ def tpcc_md(points):
 
 def summary_md(raw, runs, tpcc=None):
     """runs: {db: [run dir names, oldest first]}; tpcc: tpcc_points()"""
-    points = {}         # (db, workload, fs, fpw) -> (run, {threads: (tps, kb)})
+    # (db, workload, fs, fpw) -> {threads: (tps, kb, run)}: each thread count
+    # from the newest run that measured it (a sweep and a separate long
+    # 64-thread run of the same configuration combine)
+    points = defaultdict(dict)
     for db, names in runs.items():
         for name in names:
             vals = defaultdict(lambda: ([], []))
@@ -139,11 +142,8 @@ def summary_md(raw, runs, tpcc=None):
                     if row.get("dev_write_kb_per_trx"):
                         kb.append(float(row["dev_write_kb_per_trx"]))
             for (db_, wl, fs, fpw, thr), (tps, kb) in vals.items():
-                k = (db_, wl, fs, fpw)
-                if k not in points or points[k][0] != name:
-                    points[k] = (name, {})          # a newer run replaces it
-                points[k][1][thr] = (statistics.mean(tps),
-                                     statistics.mean(kb) if kb else None)
+                points[(db_, wl, fs, fpw)][thr] = (statistics.mean(tps),
+                                                   statistics.mean(kb) if kb else None, name)
     lines = ["# %s: benchmark summary" % HOST, "",
              "Made by `bench/scripts/export_results.py` from the results in",
              "`bench/workspace/results/%s/{sysbench,benchbase}/<db>/<run>/` (outside git, on %s);"
@@ -184,18 +184,19 @@ def summary_md(raw, runs, tpcc=None):
               " transaction at the most threads.", ""]
     for db in sorted({k[0] for k in points}):
         keys = sorted(k for k in points if k[0] == db)
-        thrs = sorted({t for k in keys for t in points[k][1]})
+        thrs = sorted({t for k in keys for t in points[k]})
         lines += ["## sysbench %s" % db, "",
                   "| workload | fs | protection | " + " | ".join(
                       "%d thr" % t for t in thrs) + " | KB/trx | run |",
                   "|---|---|---|" + "---:|" * len(thrs) + "---:|---|"]
         for k in keys:
-            name, by = points[k]
+            by = points[k]
             top = by[max(by)]
+            names = sorted({v[2] for v in by.values()})
             cells = ["%.0f" % by[t][0] if t in by else "" for t in thrs]
-            lines.append("| %s | %s | %s | %s | %s | `%s` |" % (
+            lines.append("| %s | %s | %s | %s | %s | %s |" % (
                 k[1].replace("oltp_", ""), k[2], k[3], " | ".join(cells),
-                "%.1f" % top[1] if top[1] is not None else "", name))
+                "%.1f" % top[1] if top[1] is not None else "", ", ".join("`%s`" % n for n in names)))
         lines.append("")
     lines += tpcc_md(tpcc or {})
     out = REPO / "bench/results" / HOST

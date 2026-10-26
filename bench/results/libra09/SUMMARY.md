@@ -68,9 +68,11 @@ full_page_writes / InnoDB doublewrite; KB/trx = device writes per transaction at
 | write_only | ext4-dj40-uniform | off | 1109 | 5202 | 6921 | 8164 | 9264 | 124.4 | `20261017_202936_uniform` |
 | write_only | ext4-fullfill | off | 2388 | 16662 | 27414 | 38897 | 45597 | 25.7 | `20261009_212738_fullfill` |
 | write_only | ext4-fullfill | on | 2047 | 13091 | 19840 | 26331 | 33192 | 47.5 | `20261009_212738_fullfill` |
-| write_only | ext4-ssd990 | off | 181 | 1120 | 2183 | 4189 | 8048 | 30.8 | `20261024_135351_ssd990` |
-| write_only | ext4-ssd990 | on | 84 | 369 | 677 | 1750 | 1172 | 47.6 | `20261024_135351_ssd990` |
+| write_only | ext4-ssd990 | off | 180 | 1125 | 2205 | 4176 | 8060 | 30.7 | `20261025_114503_ssd990`, `20261025_135909_ssd990` |
+| write_only | ext4-ssd990 | on | 98 | 360 | 1315 | 1650 | 1014 | 52.0 | `20261025_114503_ssd990`, `20261025_135909_ssd990` |
+| write_only | ext4-ssd990-kcheck | off |  |  |  |  | 7914 | 31.1 | `20261026_064604_ssd990-kcheck` |
 | write_only | ext4-tau | off | 2343 | 15626 | 26191 | 36383 | 43164 | 36.2 | `20261020_204243` |
+| write_only | ext4-tau-ssd990 | off | 162 | 964 | 1864 | 3483 | 6707 | 45.9 | `20261026_033248_ssd990`, `20261026_043637_ssd990` |
 | write_only | ext4-tau-uniform | off | 1246 | 7638 | 11718 | 15930 | 17200 | 124.8 | `20261022_031357_uniform` |
 | write_only | ext4-uniform | off | 1262 | 8509 | 14273 | 20446 | 22831 | 72.8 | `20261017_202936_uniform` |
 | write_only | ext4-uniform | on | 1105 | 6568 | 9851 | 12495 | 13063 | 138.8 | `20261017_202936_uniform` |
@@ -125,9 +127,11 @@ full_page_writes / InnoDB doublewrite; KB/trx = device writes per transaction at
 | write_only | ext4-dj40-uniform | off | 1285 | 6151 | 9047 | 11432 | 12170 | 89.4 | `20261017_171541_uniform` |
 | write_only | ext4-fullfill | off | 2977 | 20278 | 35029 | 49947 | 61332 | 17.4 | `20261010_023220_fullfill` |
 | write_only | ext4-fullfill | on | 2724 | 15715 | 23145 | 28174 | 28737 | 50.2 | `20261010_023220_fullfill` |
-| write_only | ext4-ssd990 | off | 300 | 1199 | 2359 | 4617 | 8880 | 11.7 | `20261024_114745_ssd990` |
-| write_only | ext4-ssd990 | on | 409 | 1133 | 2180 | 3978 | 6409 | 48.4 | `20261024_114745_ssd990` |
+| write_only | ext4-ssd990 | off | 304 | 1197 | 2357 | 4562 | 8872 | 12.1 | `20261025_073136_ssd990`, `20261025_093855_ssd990` |
+| write_only | ext4-ssd990 | on | 291 | 1113 | 2195 | 3945 | 6313 | 48.2 | `20261025_073136_ssd990`, `20261025_093855_ssd990` |
+| write_only | ext4-ssd990-kcheck | off |  |  |  |  | 8867 | 12.0 | `20261026_054259_ssd990-kcheck` |
 | write_only | ext4-tau | off | 2946 | 19512 | 31269 | 42540 | 50690 | 32.3 | `20261020_122600` |
+| write_only | ext4-tau-ssd990 | off | 288 | 1096 | 2135 | 4052 | 7504 | 22.9 | `20261026_012613_ssd990`, `20261026_022929_ssd990` |
 | write_only | ext4-tau-uniform | off | 1506 | 9406 | 14405 | 20210 | 24386 | 89.8 | `20261022_021029_uniform` |
 | write_only | ext4-uniform | off | 1531 | 10319 | 18003 | 27581 | 37352 | 47.8 | `20261017_171541_uniform` |
 | write_only | ext4-uniform | on | 1364 | 7855 | 12131 | 14378 | 14761 | 104.6 | `20261017_171541_uniform` |
