@@ -174,10 +174,12 @@ def summary_md(raw, runs, tpcc=None):
     if tau_kernels:
         lines += ["The τ rows (ext4-tau, xfs-tau and their variants) ran on the τ kernel (%s)." %
                   ", ".join(sorted(tau_kernels)), ""]
-    if any(k[2].endswith("-ssd990") for k in points):
+    if any("-ssd990" in k[2] for k in points):
         lines += ["The ssd990 rows ran on a Samsung 990 PRO 4TB (no PLP, volatile write cache)"
                   " in its steady state (written once over its capacity, no trim before the"
-                  " restore), base kernel.", ""]
+                  " restore), the baselines on the base kernel; their 64-thread points are one"
+                  " 40-min run (TPC-C: 64 terminals for 40 min once). The -kcheck rows are"
+                  " baselines run on the τ kernel as a kernel cross-check.", ""]
     lines += ["Throughput in transactions/s (mean of the runs at a point);"
               " protection on = PostgreSQL",
               "full_page_writes / InnoDB doublewrite; KB/trx = device writes per"
