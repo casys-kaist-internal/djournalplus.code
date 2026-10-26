@@ -10,8 +10,11 @@
 # in run_main.sh. Results: $TAU_RESULTS/benchbase/<db>/<ts>/, one
 # <db>_tpcc_<fs>_fpw_<on|off>_w<WH>_c<terminals>_r<n> per measurement, and
 # summary.md (pilot_report.py).
+# VARIANT=ssd990: the test device is the Samsung 990 PRO 4TB (TAU_TARGET_DISK
+# when set_env.sh ran), kept in its steady state (no trim before the restore);
+# results <ts>_ssd990, configurations <fs>-ssd990 (as run_main.sh).
 # Usage: [THREADS_LIST="1 8 16 32 64"] [FS_GROUPS=ext4 FS_FPWON=ext4 FS_FPWOFF=ext4]
-#        run_tpcc.sh <postgres|mysql> [warehouses (1100)]
+#        [VARIANT=ssd990] [POINT_WARMUP_TIME=60] run_tpcc.sh <postgres|mysql> [warehouses (1100)]
 set -e
 MODE="$1"
 WH="${2:-1100}"
@@ -19,7 +22,7 @@ THREADS_LIST=(${THREADS_LIST:-1 8 16 32 64})
 LAST_POINT_RUNS=${LAST_POINT_RUNS:-1}
 WARMUP_TIME=${WARMUP_TIME:-600}
 WARMUP_TERMINALS=64
-POINT_WARMUP_TIME=60
+POINT_WARMUP_TIME=${POINT_WARMUP_TIME:-60}
 RUNNING_TIME=${RUNNING_TIME:-300}
 TERMINALS=$WARMUP_TERMINALS
 FS_GROUPS="${FS_GROUPS-ext4}"
@@ -28,12 +31,21 @@ FS_FPWOFF="${FS_FPWOFF-ext4}"
 [[ "$MODE" == "postgres" || "$MODE" == "mysql" ]] || { echo "Usage: $0 <postgres|mysql> [warehouses]"; exit 1; }
 source "$TAUFS_BENCH/scripts/common.sh"
 source "$TAUFS_BENCH/scripts/$MODE/api.sh"
+VARIANT="${VARIANT:-}"
+case "$VARIANT" in
+  "") ;;
+  ssd990)
+    [[ "$(cat /sys/block/$TAU_DEVICE_NAME/device/model 2>/dev/null | xargs)" == "Samsung SSD 990 PRO 4TB" ]] \
+      || { echo "❌ VARIANT=ssd990: source set_env.sh with TAU_TARGET_DISK=\"Samsung SSD 990 PRO 4TB\""; exit 1; }
+    TAU_TRIM_BEFORE_RESTORE=0 ;;
+  *) echo "❌ Unknown VARIANT: $VARIANT"; exit 1 ;;
+esac
 KEY="tpcc_w$WH"
 BACKUP_DIR="$TAU_BACKUP_ROOT/benchbase/$MODE"
 for FS in $FS_GROUPS; do
   [[ -e "$BACKUP_DIR/${FS}_${KEY}.img" ]] || { echo "❌ no image $BACKUP_DIR/${FS}_${KEY}.img (create_image.sh)"; exit 1; }
 done
-OUT="$TAU_RESULTS/benchbase/$MODE/$(date +%Y%m%d_%H%M%S)"
+OUT="$TAU_RESULTS/benchbase/$MODE/$(date +%Y%m%d_%H%M%S)${VARIANT:+_$VARIANT}"
 mkdir -p "$OUT"
 source "$TAUFS_BENCH/scripts/benchbase/tpcc_lib.sh"
 exec > >(tee -a "$OUT/run.log") 2>&1
@@ -47,7 +59,7 @@ for FS in $FS_GROUPS; do
     if [[ "$FPW" == off && " $FS_FPWOFF " != *" $FS "* ]] || [[ "$FPW" == on && " $FS_FPWON " != *" $FS "* ]]; then
       continue
     fi
-    BLOCK="${MODE}_tpcc_${FS}_fpw_${FPW}_w${WH}"
+    BLOCK="${MODE}_tpcc_${FS}${VARIANT:+-$VARIANT}_fpw_${FPW}_w${WH}"
     echo "=== $BLOCK: restoring ${FS}_${KEY} on $DEVICE $(date -u +%T)"
     restore_filesystem $FS "$KEY" "$BACKUP_DIR"
     mount_fs $FS "$MOUNT_DIR"
