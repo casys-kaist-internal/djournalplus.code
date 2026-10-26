@@ -61,7 +61,13 @@ FS_FPWOFF="${FS_FPWOFF-ext4 xfs}"
 
 # Every baseline configuration runs on one kernel build (TAU_BASE_KERNEL in
 # bench/machines/<host>.env); the τ configurations run on the τ kernel.
-if [[ -n "$TAU_BASE_KERNEL" && "$KERNEL_VERSION" != "$TAU_BASE_KERNEL" && " $FS_GROUPS " != *tau* ]]; then
+# KCHECK=1 is the one exception: a baseline configuration on the τ kernel as a
+# kernel cross-check, labeled -kcheck (VARIANT below), never paper baseline data.
+if [[ "${KCHECK:-0}" == 1 && ( -z "$TAU_BASE_KERNEL" || "$KERNEL_VERSION" == "$TAU_BASE_KERNEL" ) ]]; then
+  echo "❌ KCHECK=1 runs a baseline on the τ kernel, not on $KERNEL_VERSION"
+  exit 1
+fi
+if [[ -n "$TAU_BASE_KERNEL" && "$KERNEL_VERSION" != "$TAU_BASE_KERNEL" && " $FS_GROUPS " != *tau* && "${KCHECK:-0}" != 1 ]]; then
   echo "❌ Baseline runs need kernel $TAU_BASE_KERNEL (running $KERNEL_VERSION)"
   exit 1
 fi
@@ -124,6 +130,7 @@ case "$VARIANT" in
     TAU_TRIM_BEFORE_RESTORE=0 ;;
   *) echo "❌ Unknown VARIANT: $VARIANT"; exit 1 ;;
 esac
+[[ "${KCHECK:-0}" != 1 ]] || VARIANT="${VARIANT:+$VARIANT-}kcheck"   # names: <run>_..-kcheck, <fs>-..-kcheck
 
 # PG checkpoints follow their own schedule (checkpoint_timeout = one 5-min
 # measurement, or max_wal_size). PG_PRE_CHECKPOINT=1 restores the old protocol,
