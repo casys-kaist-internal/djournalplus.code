@@ -1,5 +1,5 @@
 #!/bin/bash
-# Start a database on xfs-tau with a growing table, then hold the next
+# Start a database on $DB_FS (xfs-tau or ext4-tau) with a growing table, then hold the next
 # allocating tau commit right after its record (before the conversion) and
 # force the host log, so a power cut leaves exactly the window recovery rolls
 # back (bug.md #44).  The host cuts the power when this prints READY.
@@ -11,7 +11,7 @@
 cd "$(dirname "$0")" || exit 1
 . ./common.sh
 
-FS=xfs-tau
+FS=${DB_FS:-xfs-tau}
 WHICH=${1:-postgres}
 SCALE=${2:-20}
 BENCH=${BENCH:-$TAU_SRCTREE/bench}

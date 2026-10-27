@@ -89,13 +89,14 @@ verify_postgres() {
 }
 
 verify_mysql() {
-	local data="$MNT/mysql" fail=0 total want
+	local data="$MNT/mysql" fail=0 total want pid
 
 	echo "[+] restarting mysqld (InnoDB redo recovery)"
 	setsid nohup "$MYSQL_BUILD/bin/mysqld" --no-defaults \
 		--basedir="$MYSQL_BUILD" --datadir="$data" --user="$(whoami)" \
 		--socket="$SOCK" --port=3307 --innodb-doublewrite=0 \
 		>/tmp/mysql-recovery.log 2>&1 < /dev/null &
+	pid=$!
 
 	mysql_wait_ready || { echo "FAIL: mysqld did not come back"; tail -40 /tmp/mysql-recovery.log; return 1; }
 
@@ -130,6 +131,7 @@ verify_mysql() {
 		{ echo "FAIL: CHECK TABLE reported a problem"; fail=1; }
 
 	"$MYSQL_BUILD/bin/mysqladmin" --socket="$SOCK" -u root shutdown >/dev/null 2>&1
+	mysql_wait_exit $pid || { echo "FAIL: mysqld did not exit after shutdown"; fail=1; }
 	return $fail
 }
 

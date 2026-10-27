@@ -23,7 +23,8 @@ tools/tautest/
 │   ├── tauoverwrite.c      rewrite existing blocks (setup phase excluded)
 │   ├── tausync.c           write + a chosen durability barrier (fsync/sync/...)
 │   ├── taushort.c          a write whose source buffer faults partway (short copy)
-│   └── tauabort.c          writers until the journal aborts; acks; post-recovery check
+│   ├── tauabort.c          writers until the journal aborts; acks; post-recovery check
+│   └── tauthp.c            large folios around an activation; random ops against a reference
 ├── Makefile                builds the three binaries, installs to ~/tautest
 ├── guest/                  run inside the VM
 │   ├── common.sh           device/mount/mkfs helpers, md5 expectations
@@ -53,6 +54,8 @@ tools/tautest/
 │   ├── shortcopy.sh        a short copy into a block the page cache had not read (#24)
 │   ├── odirect.sh          O_DIRECT on a tjournal mount: plain file, tau file, refused open (#40)
 │   ├── seg-adopt.sh        journal segments a crash left mapped past a hole (#37)
+│   ├── mountinit.sh        journald before the mount backs a segment (#66); a mount that cannot (#67)
+│   ├── migrate-*.sh        page migration: churn, busy (A), crash write / verify (B), kretprobe counters
 │   ├── abort.sh            inject a fault, check fail-stop, umount + mount, verify (#22, #7)
 │   ├── trunc-race.sh       truncate / punch hole racing writes and fsync
 │   ├── umount-stress.sh    mount/write/umount churn (->sync_fs vs teardown)
@@ -61,6 +64,8 @@ tools/tautest/
 │   ├── fsync-anatomy.sh    one fsync request by request: phases, flushes, FUA (ftrace)
 │   ├── db-bench.sh         sysbench update + insert on a tau fs: TPS, p95, flush/s, tau commits/s
 │   ├── flushorder.sh       dm-log-writes: every crash state a device cache allows
+│   ├── thp-write.sh        large folios around an activation, then left for the power cut
+│   ├── thp-verify.sh       after it: every file against what was fsynced
 │   ├── xfs-hold-probe.sh   measure whether the XFS ordering bracket is reached
 │   └── xfs-hold-stress.sh  repeat the workload that wedges that bracket
 └── host/                   run on the host, drives the VM over ssh
@@ -82,6 +87,9 @@ tools/tautest/
     ├── shortcopy-test.sh   a faulting write leaves the rest of its block alone (#24)
     ├── odirect-test.sh     O_DIRECT through tau for tau files, real for the rest (#40)
     ├── seg-adopt-test.sh   segments a crash left mapped come back to a full FS (#37)
+    ├── mountinit-test.sh   journald waits for the mount's segments; a mount that cannot back one fails cleanly
+    ├── migrate-test.sh     page migration of an XFS tau file's folios, idle and busy
+    ├── thp-test.sh         XFS with THP on: a tau block lives on an order-0 folio, the rest may be large
     ├── abort-test.sh       a journal abort stops cleanly and recovers, per fault site (#22, #7)
     ├── trunc-race-test.sh  truncate / punch racing writes and fsync (bugs #28-#30)
     ├── db-crash-test.sh    crash a running database and check it recovers
@@ -143,10 +151,10 @@ syscalls only, and a power cut where the guarantee is about crashes. Three kinds
 
 - **scenario** -- deterministic; one pass means the path is right: crash, sync,
   revoke, seg-*, split, trunc-reuse, range, shortcopy, odirect, unlink, abort,
-  falloc, repair.
+  falloc, repair, migrate (churn).
 - **race hunt** -- probabilistic; a clean pass is weak evidence, which is what
   the soak's repetition is for: stress, trunc-race, sync-race, cp-race,
-  xfs-hold, torn.
+  xfs-hold, torn, migrate (busy).
 - **workload** -- a real database end to end: db-crash (PostgreSQL, MySQL),
   pg-torn.
 
@@ -655,6 +663,14 @@ carries 4 MiB of filler in every tx that has to stay.
 | `extend` | blocks 0-1 TauRedo, block 2 a hole | 12 KiB 0x44 | 0x41 0x41 hole, or 0x44 x3 |
 | `split-ctl` | as `split` | 8 KiB 0x43 + fsync | 0x43 0x43 |
 | `inplace` | blocks 0-1 TauRedo | 8 KiB 0x43 (all in place) | 0x41 0x41, or 0x43 0x43 |
+| `twowrite` | blocks 0-1 TauRedo, blocks 2-3 a hole | two writes: 8 KiB 0x43 over 0-1 (in place), then 8 KiB 0x45 over 2-3 (journaled) | 0-1: 0x41 0x41 or 0x43 0x43; 2-3: 0x45 0x45 |
+
+`twowrite` is not about one write: it shows what a background commit does to two.
+It commits the later write (journaled) and leaves the earlier one's revoke tag
+pending, so after the power cut the later write is there and the earlier one is
+rolled back to its journal copy -- whole, and never older than what the last
+fsync promised. tau keeps each write untorn; it does not keep unsynced writes
+in order (`taudocs/architecture.md` §8.7).
 
 ```sh
 tools/tautest/host/split-test.sh both        # ~2 minutes per case
@@ -833,6 +849,75 @@ tools/tautest/host/odirect-test.sh both
 Until #314, InnoDB's startup probe failed on XFS-tau, so MySQL there ran
 `innodb_flush_method=fsync` while ext4-tau ran `O_DIRECT`.
 
+### Page migration of a tau file's folios
+
+`migrate-test.sh` (XFS; `taudocs/plan.md` §6.7): on the io backend a tau block is
+a slot hung off the folio's iomap state, and compaction moves folios. A folio
+whose slot is idle moves with it; one whose slot a transaction or the checkpoint
+is using must be refused.
+
+- `churn [rounds]`: each round remounts, reads a 256 MiB tau file through an
+  `O_TAU_UNTORN` fd, runs `compact_memory` three times, rewrites every block with
+  the round's byte and fsyncs, remounts and compares the md5.
+- `busy [secs]`: the torn workload (8 files x 1 GiB, 8 KiB rewrites, an fsync
+  every 16, a 1 GB journal, an 8 GB guest) with `compact_memory` in a loop for
+  the whole run. kretprobes on `xfs_tau_migrate_folio()`,
+  `filemap_migrate_folio()` and `tau_slot_try_free()` count moved and refused
+  folios (no kernel change). A: clean unmount, every page holds its last
+  generation. B: power cut right after the last fsync, recovery, the same check
+  against the manifests. INCONCLUSIVE when no busy folio was refused.
+
+```sh
+tools/tautest/host/migrate-test.sh churn 5
+tools/tautest/host/migrate-test.sh busy 180
+```
+
+| kernel | `churn` | `busy` |
+|---|---|---|
+| #353 (bh ring still in iomap, generic folio migration) | BUG within 18 s | -- |
+| #355 (tau-blk 79cf04cd) | PASS, ~21,000 pages moved | PASS: A 1.95M moved / 4.13M calls refused, B 1.27M / 3.67M |
+
+There is no negative control: no switch turns the refusal off.
+
+### XFS with THP on: a tau block lives on an order-0 folio
+
+`thp-test.sh` (XFS; `taudocs/plan.md` §6.9): with `CONFIG_TRANSPARENT_HUGEPAGE`
+on, XFS gives every file large folios, while the io backend journals one 4 KiB
+block per folio. A tau file's writes therefore take one-page folios, and a tau
+write that lands on a large folio left by a read splits it (probe
+`wr_large_split`; `wr_large_drop` when it would not split and was dropped from
+the cache instead). The activation writes the file's dirty folios back first, so
+that large folio is always clean. Other files, and a tau file's read-only
+ranges, keep large folios. Folios added are counted with the
+`mm_filemap_add_to_page_cache` tracepoint (a hist on inode and order); a
+`WARNING` in the guest's dmesg fails the run.
+
+1. A plain XFS mount: `tauthp ops`, random writes (up to 4 MiB, aligned or not),
+   truncates and hole punches applied to the file and to a reference copy on the
+   guest's own disk, with the page cache dropped now and then; compared as it
+   goes, at the end, and after a remount. The patched iomap meets large folios
+   here for the first time.
+2. The tjournal mount, files that are not tau: a plain file written in 1 MiB
+   writes (the control: large folios really appear) and the same random
+   operations.
+3. A file with large folios cached, clean (readahead) and dirty (rewritten, no
+   fsync), opened with `O_TAU_UNTORN` and every other 8 KiB page rewritten and
+   fsynced: its tau writes split the large folios.
+4. 16 files faulted through a read-only mapping with `MADV_HUGEPAGE` (2 MiB
+   folios, some mapped) while they are activated and rewritten.
+
+Then a power cut, and every file is checked against what was fsynced: each 4 KiB
+block carries (file, block, generation). INCONCLUSIVE when a case saw no large
+folio or no tau write met one.
+
+```sh
+tools/tautest/host/thp-test.sh
+```
+
+The first version (#357) took the activated file out of large folios instead;
+case 4 hit mm's `filemap_nr_thps_dec()` WARNING when a 2 MiB folio cached before
+that left the page cache afterwards.
+
 ### Journal segments a crash left mapped past a hole
 
 `seg-adopt-test.sh` (bug.md #37, XFS only -- the journal file is reachable
@@ -854,6 +939,30 @@ tools/tautest/host/seg-adopt-test.sh xfs
 |---|---|---|
 | #313 (HEAD acc3da59) | 1025 MiB | 1025 MiB -- 82 segments (10 GiB) dead: FAIL |
 | #314 | 1025 MiB | 4097 MiB (`took 82 journal segments`; journald gives back down to the 4 GiB margin): PASS |
+
+### Mount-time journal setup: journald before the segments, a mount without them
+
+`mountinit-test.sh` (bug.md #66, #67; both filesystems, one boot per case,
+needs a `CONFIG_TAU_PROBE_TORN` kernel). Each case starts from a fresh FS
+holding one fsync'd 4 MiB tau file.
+
+- `race`: journald's first look at its gate comes once the mount has allocated
+  the segment map (`TAU_DELAY_JOURNALD` waits for it), and the mount then holds
+  5 s before backing a segment (`TAU_DELAY_INIT_BLOCKS`). journald must start
+  only after the segments: the guest checks the order of the two lines in
+  dmesg, no kernel fault, the data, a tau write and an unmount within 30 s.
+- `initfail`: `TAU_FAULT_INIT_BLOCKS` fails the first segment's backing. The
+  tjournal mount must fail with no kernel fault, and the FS then mount plain
+  and with tjournal, data intact.
+
+```sh
+tools/tautest/host/mountinit-test.sh both              # race,initfail
+```
+
+| kernel | xfs race | ext4 race | xfs initfail | ext4 initfail |
+|---|---|---|---|---|
+| #361 (control: the sites, no fix) | journald `divide error`, then the mount oopses in `set_task_ioprio()` | `divide error` 11 ms after the gate, as on #358 under Torner | PASS (the dummy inode leak is not visible here) | the mount "succeeds" with the sbi freed: FAIL |
+| #362 | PASS | PASS | PASS | PASS |
 
 ### A journal abort: fail-stop and recovery
 

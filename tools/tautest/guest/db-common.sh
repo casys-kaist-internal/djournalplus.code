@@ -48,3 +48,13 @@ mysql_wait_ready() {
 	done
 	return 1
 }
+
+# mysqladmin shutdown returns once the pid file is gone, before mysqld has exited
+mysql_wait_exit() {
+	local waited=0
+	while [ $waited -lt 120 ]; do
+		kill -0 "$1" 2>/dev/null || return 0
+		sleep 1; waited=$((waited + 1))
+	done
+	return 1
+}

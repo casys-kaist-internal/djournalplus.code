@@ -4,8 +4,9 @@
 # check that recovery rolled it back and the database still recovers whole.
 #
 #   usage: db-rollback-test.sh [postgres|mysql|both] [rounds] [scale]
+#   ROLLBACK_FS: the filesystems, default "xfs ext4" (ext4 rolls back from #364)
 #
-# XFS only -- ext4 never rolls back.  WARNING: runs mkfs on $TAU_DEV.
+# WARNING: runs mkfs on $TAU_DEV.
 
 set -u
 cd "$(dirname "$0")" || exit 1
@@ -15,19 +16,21 @@ DBLIST=${1:-both}
 ROUNDS=${2:-1}
 SCALE=${3:-20}
 case "$DBLIST" in both) DBLIST="postgres mysql" ;; postgres|mysql) ;; *) echo "bad db" >&2; exit 2 ;; esac
+FSLIST=${ROLLBACK_FS:-xfs ext4}
 
 rc=0
 summary=""
 
 for round in $(seq 1 "$ROUNDS"); do
+	for fs in $FSLIST; do
 	for db in $DBLIST; do
-		tag="$db round $round/$ROUNDS"
+		tag="$fs $db round $round/$ROUNDS"
 		echo
 		echo "############ $tag ############"
-		vm_boot_tested || { rc=1; break 2; }
-		vm_sync_tests || { rc=1; break 2; }
+		vm_boot_tested || { rc=1; break 3; }
+		vm_sync_tests || { rc=1; break 3; }
 
-		out=$(vm_ssh "~/tautest/guest/db-rollback-prepare.sh $db $SCALE" 2>&1)
+		out=$(vm_ssh "DB_FS=$fs-tau ~/tautest/guest/db-rollback-prepare.sh $db $SCALE" 2>&1)
 		echo "$out"
 		case "$out" in
 		*READY-FOR-CRASH*) ;;
@@ -41,15 +44,16 @@ for round in $(seq 1 "$ROUNDS"); do
 			continue ;;
 		esac
 
-		vm_crash || { rc=1; break 2; }
+		vm_crash || { rc=1; break 3; }
 		vm_boot || { echo "RESULT[$tag]: FAIL (VM did not come back)"; summary+="$tag: FAIL\n"; rc=1; continue; }
 
-		vm_ssh "~/tautest/guest/db-rollback-verify.sh $db $SCALE"
+		vm_ssh "DB_FS=$fs-tau ~/tautest/guest/db-rollback-verify.sh $db $SCALE"
 		case $? in
 		0) echo "RESULT[$tag]: PASS"; summary+="$tag: PASS\n" ;;
 		2) echo "RESULT[$tag]: INCONCLUSIVE"; summary+="$tag: INCONCLUSIVE\n" ;;
 		*) echo "RESULT[$tag]: FAIL"; summary+="$tag: FAIL\n"; vm_console_faults; rc=1 ;;
 		esac
+	done
 	done
 done
 

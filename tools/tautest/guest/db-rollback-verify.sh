@@ -10,7 +10,7 @@
 cd "$(dirname "$0")" || exit 1
 . ./common.sh
 
-FS=xfs-tau
+FS=${DB_FS:-xfs-tau}
 WHICH=${1:-postgres}
 SCALE=${2:-20}
 BENCH=${BENCH:-$TAU_SRCTREE/bench}
@@ -61,12 +61,13 @@ verify_postgres() {
 }
 
 verify_mysql() {
-	local data="$MNT/mysql" total bad n
+	local data="$MNT/mysql" total bad n pid
 
 	setsid nohup "$MYSQL_BUILD/bin/mysqld" --no-defaults \
 		--basedir="$MYSQL_BUILD" --datadir="$data" --user="$(whoami)" \
 		--socket="$SOCK" --port=3307 --innodb-doublewrite=0 \
 		>/tmp/mysql-recovery.log 2>&1 < /dev/null &
+	pid=$!
 	mysql_wait_ready || { echo "FAIL: mysqld did not come back"; tail -40 /tmp/mysql-recovery.log; return 1; }
 	if grep -qiE '\[ERROR\]|corrupt|assertion|signal 11' /tmp/mysql-recovery.log; then
 		echo "FAIL: mysqld logged errors during recovery"
@@ -91,6 +92,7 @@ verify_mysql() {
 	m "CHECK TABLE tautest.acct, tautest.hist" | grep -qi error &&
 		{ echo "FAIL: CHECK TABLE reported a problem"; return 1; }
 	"$MYSQL_BUILD/bin/mysqladmin" --socket="$SOCK" -u root shutdown >/dev/null 2>&1
+	mysql_wait_exit $pid || { echo "FAIL: mysqld did not exit after shutdown"; return 1; }
 	return 0
 }
 

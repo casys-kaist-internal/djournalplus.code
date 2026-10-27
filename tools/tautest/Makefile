@@ -8,7 +8,7 @@ CC      ?= gcc
 CFLAGS  ?= -O2 -Wall
 PREFIX  ?= $(HOME)/tautest
 
-BINS := tauwrite tauwrite_nofsync taurace tauappend tauoverwrite tausync taucprace tautorn pgscan taushort tauabort
+BINS := tauwrite tauwrite_nofsync taurace tauappend tauoverwrite tausync taucprace tautorn pgscan taushort tauabort tauthp
 
 all: $(BINS)
 
@@ -44,6 +44,9 @@ taushort: src/taushort.c
 
 tauabort: src/tauabort.c
 	$(CC) $(CFLAGS) -pthread -o $@ $<
+
+tauthp: src/tauthp.c
+	$(CC) $(CFLAGS) -o $@ $<
 
 # PREFIX may be the build directory itself (that is what the host sync does),
 # so skip anything that would copy a file onto itself.

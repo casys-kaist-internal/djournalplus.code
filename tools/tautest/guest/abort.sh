@@ -57,7 +57,7 @@ sudo dmesg | grep -E "Tau-Journal .*aborting|EXT4-fs error|Remounting filesystem
 [ $wrc -eq 0 ] || { echo "  some writer did not stop on EIO (rc $wrc)"; rc=1; }
 echo "  fault fired ${fired}s after arming"
 
-# ext4 stops its own journal when the abort caught an allocation in flight
+# up to #363 ext4 stopped its own journal when the abort caught an allocation in flight
 hostro=0
 sudo dmesg | grep -q "tau journal aborted with a block allocation in flight" && hostro=1
 

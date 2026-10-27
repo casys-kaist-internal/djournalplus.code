@@ -1,6 +1,6 @@
 #!/bin/bash
 # Set up one split case (README) and arm; writes ARMED or INCONCLUSIVE.
-#   usage: split-write.sh <xfs|ext4> <split|split-ctl|extend|inplace> [hold-s]
+#   usage: split-write.sh <xfs|ext4> <split|split-ctl|extend|inplace|twowrite> [hold-s]
 
 cd "$(dirname "$0")" || exit 1
 . ./common.sh
@@ -13,8 +13,8 @@ P=/sys/module/tau_journal/parameters
 F=$TAU_MNT/split
 
 case "$CASE" in
-split|split-ctl|extend|inplace) ;;
-*) die "usage: $0 <xfs|ext4> <split|split-ctl|extend|inplace> [hold-seconds]" ;;
+split|split-ctl|extend|inplace|twowrite) ;;
+*) die "usage: $0 <xfs|ext4> <split|split-ctl|extend|inplace|twowrite> [hold-seconds]" ;;
 esac
 [ -n "$FS" ] || die "usage: $0 <xfs|ext4> <case> [hold-seconds]"
 [ -r "$P/tau_probe_commits" ] ||
@@ -123,6 +123,13 @@ extend)
 	echo "== 12 KiB of 0x44, no fsync: blocks 0-1 TauRedo, block 2 a hole =="
 	sudo "$TAUWRITE_NOFSYNC" "$F" 12288 $((0x44)) >/dev/null || die "write failed"
 	;;
+twowrite)
+	echo "== W1: 8 KiB of 0x43 over blocks 0-1 (TauRedo: in place), no fsync =="
+	sudo "$TAUWRITE_NOFSYNC" "$F" 8192 $((0x43)) >/dev/null || die "write failed"
+	show W1
+	echo "== W2: 8 KiB of 0x45 over blocks 2-3 (a hole: journaled), no fsync =="
+	sudo "$TAUWRITE_NOFSYNC" "$F" 8192 $((0x45)) 8192 >/dev/null || die "write failed"
+	;;
 *)
 	echo "== 8 KiB of 0x43, no fsync =="
 	sudo "$TAUWRITE_NOFSYNC" "$F" 8192 $((0x43)) >/dev/null || die "write failed"
@@ -140,6 +147,11 @@ extend)
 inplace)
 	[ "$(delta revoke_taken)" -ge 2 ] ||
 		inconclusive "the write did not go in place (revoke_taken+$(delta revoke_taken))" ;;
+twowrite)
+	[ "$(delta revoke_taken)" -ge 2 ] ||
+		inconclusive "W1 did not go in place (revoke_taken+$(delta revoke_taken))"
+	[ "$(delta atoz_mixed)" -eq 0 ] ||
+		inconclusive "a write mixed journaled and in-place blocks" ;;
 esac
 
 snap

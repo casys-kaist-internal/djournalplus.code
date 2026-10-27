@@ -4,7 +4,7 @@
 #   usage: epoch-test.sh [xfs|ext4|both] [case|all, or a comma list] [rounds]
 # cases: convert split gate publish partial append append-umount append-torn isize
 #        undo-bg undo-wb undo-sparse
-# all = every case but partial, which is XFS only (#44 rollback).
+# all = every case but partial (#44 rollback; ext4 from #364).
 # WARNING: runs mkfs on $TAU_DEV inside the guest.
 
 set -u

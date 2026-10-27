@@ -1,6 +1,6 @@
 #!/bin/bash
 # Mount after the crash: the last write came back whole or not at all.
-#   usage: split-verify.sh <xfs|ext4> <split|split-ctl|extend|inplace>
+#   usage: split-verify.sh <xfs|ext4> <split|split-ctl|extend|inplace|twowrite>
 
 cd "$(dirname "$0")" || exit 1
 . ./common.sh
@@ -15,7 +15,9 @@ split)     OK="40,42 43,43" ;;
 split-ctl) OK="43,43" ;;
 extend)    OK="41,41,00 44,44,44"; NBLK=3 ;;
 inplace)   OK="41,41 43,43" ;;
-*) die "usage: $0 <xfs|ext4> <split|split-ctl|extend|inplace>" ;;
+# W2 was committed in the background; W1 has no tag yet, so it is whole either way
+twowrite)  OK="41,41,45,45 43,43,45,45"; NBLK=4 ;;
+*) die "usage: $0 <xfs|ext4> <split|split-ctl|extend|inplace|twowrite>" ;;
 esac
 [ -n "$FS" ] || die "usage: $0 <xfs|ext4> <case>"
 

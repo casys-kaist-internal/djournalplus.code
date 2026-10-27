@@ -100,6 +100,8 @@ vm_boot() {
 		sleep 3
 		waited=$((waited + 3))
 		if vm_is_up; then
+			# the guest's sysctl keeps WARNING (level 4) off the console
+			vm_ssh 'sudo dmesg -n 5' >/dev/null 2>&1
 			echo "VM up ($(vm_ssh 'uname -r; uname -a | grep -o "#[0-9]*"' | tr '\n' ' '))"
 			return 0
 		fi

@@ -2,11 +2,12 @@
 # Arm one host-ordering case (README) and power-cut inside the commit.
 #   usage: epoch-write.sh <xfs|ext4> <case> [hold-s]
 #
-# The host metadata an allocating commit depends on must not reach the disk
-# before the tau record (ext4: the jbd2 tx is held in its finish hook), and one
-# commit's allocations must land in one host transaction (#49, #50):
+# The host metadata that makes an allocating commit's blocks readable must not
+# reach the disk before the tau record: pass 1 backs them unwritten, pass 2
+# converts them after the record (ext4 from #364, as XFS), and one commit's
+# allocations land in one host transaction (#49, #50):
 #
-#   convert  write into a fallocate'd extent (pass 1 converts it on ext4).  A
+#   convert  write into a fallocate'd extent (pass 2 converts it).  A
 #            delay after pass 1, a host log force from another file during it,
 #            then the power cut.  The conversion must not be durable without
 #            the record: the extent reads as zero, never as the salt.
@@ -20,9 +21,9 @@
 #            j_commit_sequence one past the last committed tid).  On XFS this
 #            is #44 until recovery re-publishes the conversion.
 #   publish  gate, with another file's fsync during the delay: the allocation
-#            is durable, the conversion is not (XFS #44: recovery rolls the tx
-#            back; ext4: the jbd2 tx commits whole).
-#   partial  XFS: holes at blocks 4 and 8 of a 64 KiB file, one tx writing
+#            is durable, the conversion is not (#44: recovery rolls the tx
+#            back).
+#   partial  holes at blocks 4 and 8 of a 64 KiB file, one tx writing
 #            blocks 3-4 and 8; the cut comes between the two conversions of
 #            pass 2, after another file's fsync made the first durable.  The tx
 #            is rolled back and the block converted without its data is zeroed.
@@ -132,9 +133,6 @@ os.write(fd, b"x")
 os.fsync(fd)
 os.close(fd)' "$TAU_MNT/logforce-$1"
 }
-
-[ "$CASE" = partial ] && [ "$FS" != xfs ] &&
-	{ status "INCONCLUSIVE ext4 has no pass 2"; exit 0; }
 
 # 4 GB, and salted to ENOSPC: whatever the allocator hands out holds 0xEE
 export TAU_FS_SIZE=${TAU_FS_SIZE:-4g}
