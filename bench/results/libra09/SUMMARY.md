@@ -82,6 +82,7 @@ full_page_writes / InnoDB doublewrite; KB/trx = device writes per transaction at
 | write_only | xfs-tau | off | 2295 | 15735 | 24532 | 34136 | 40826 | 36.1 | `20261020_204243` |
 | write_only | zfs-16k | off | 1520 | 9268 | 15983 | 22813 | 27355 | 53.3 | `20261009_081451` |
 | write_only | zfs-16k-fullfill | off | 1504 | 9250 | 15844 | 22614 | 25721 | 53.8 | `20261009_212738_fullfill` |
+| write_only | zfs-16k-ssd990 | off | 133 | 850 | 1281 | 1850 | 2625 | 84.3 | `20261027_024812_ssd990`, `20261027_034306_ssd990` |
 | write_only | zfs-16k-uniform | off |  |  |  |  | 5287 | 297.7 | `20261002_083534_uniform` |
 
 ## sysbench postgres
@@ -142,6 +143,7 @@ full_page_writes / InnoDB doublewrite; KB/trx = device writes per transaction at
 | write_only | xfs-tau | off | 3044 | 19798 | 30987 | 42185 | 49313 | 32.4 | `20261020_122600` |
 | write_only | zfs-8k | off | 2210 | 12508 | 18593 | 23539 | 24160 | 70.8 | `20261009_151712` |
 | write_only | zfs-8k-fullfill | off | 2205 | 12484 | 18577 | 23463 | 23939 | 60.2 | `20261010_023220_fullfill` |
+| write_only | zfs-8k-ssd990 | off | 276 | 1114 | 2071 | 3727 | 5508 | 38.4 | `20261027_010132_ssd990`, `20261027_015443_ssd990` |
 | write_only | zfs-8k-uniform | off |  |  |  |  | 8958 | 206.0 | `20261002_080556_uniform` |
 
 TPC-C (BenchBase, warehouses chosen at random per transaction, no think time): tpmC = new orders per minute counted by the database over each 5-min measurement (mean of the runs at a point); p99 and device KB per new order (KB/NO) at the most terminals.
@@ -162,6 +164,7 @@ TPC-C (BenchBase, warehouses chosen at random per transaction, no think time): t
 | xfs | on | 1100 | 7048 | 48814 | 81260 | 102005 | 109515 | 112.3 | 591 | `20261015_100648` |
 | xfs-tau | off | 1100 | 7210 | 51871 | 89521 | 113018 | 110830 | 134.7 | 522 | `20261021_071529` |
 | zfs-16k | off | 1100 | 6265 | 40717 | 65520 | 87640 | 95343 | 71.3 | 1138 | `20261015_100648` |
+| zfs-16k-ssd990 | off | 1100 |  |  |  |  | 19775 | 432.0 | 828 | `20261027_053338_ssd990` |
 
 ## TPC-C postgres
 
@@ -179,3 +182,4 @@ TPC-C (BenchBase, warehouses chosen at random per transaction, no think time): t
 | xfs | on | 1100 | 16660 | 117860 | 201309 | 264036 | 260176 | 27.2 | 269 | `20261015_045502` |
 | xfs-tau | off | 1100 | 19092 | 138795 | 244945 | 341183 | 404835 | 14.8 | 177 | `20261021_050528` |
 | zfs-8k | off | 1100 | 14900 | 92533 | 141657 | 185792 | 210977 | 40.1 | 485 | `20261015_045502` |
+| zfs-8k-ssd990 | off | 1100 |  |  |  |  | 35542 | 179.2 | 430 | `20261027_043815_ssd990` |
