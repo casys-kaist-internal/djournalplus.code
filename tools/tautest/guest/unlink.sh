@@ -1,12 +1,14 @@
 #!/bin/bash
-# An unlinked tau file is let go once nothing holds it -- its tau_t freed and
-# its blocks back to the FS -- instead of at unmount (#24).
-# Layout: README.  usage: unlink.sh <xfs|ext4> live|write|verify
+# An unlinked tau file is let go by whoever holds it last -- its tau_t freed
+# and its blocks back to the FS at once, nothing written home -- while its
+# journal segments wait for the host to have the unlink (#24, plan.md §12.3).
+# Layout: README.
+# usage: unlink.sh <xfs|ext4> live|write|verify|gate-write|gate-verify|reuse-write|reuse-verify
 cd ~/tautest/guest || exit 1
 . ./common.sh
 FS=$1; MODE=$2
 P=/sys/module/tau_journal/parameters
-A=$TAU_MNT/a; B=$TAU_MNT/b; FILL=$TAU_MNT/filler
+A=$TAU_MNT/a; B=$TAU_MNT/b; FILL=$TAU_MNT/filler; H=$TAU_MNT/h
 MAP=$HOME/unlink-freed.txt
 O_TAU=0o40000000
 
@@ -24,6 +26,51 @@ fd = os.open(sys.argv[1], os.O_CREAT | os.O_WRONLY, 0o644)
 os.write(fd, b"x")
 os.fsync(fd)
 os.close(fd)' "$TAU_MNT/logforce" || die "log force"
+}
+
+# the host commits only when asked: ext4 every 600 s, XFS's log worker likewise
+slow_host() {
+	case "$FS" in
+	ext4) TAU_MOUNT_OPTS="${TAU_MOUNT_OPTS:-tjournal},commit=600" ;;
+	xfs) echo 60000 | sudo tee /proc/sys/fs/xfs/xfssyncd_centisecs >/dev/null ;;
+	esac
+}
+
+# plain <path> <MiB> <byte>: not a tau file, fsync'd -- again after the close,
+# which on XFS logs the trim of the blocks past EOF: a later datasync of the
+# file would otherwise force the host log for it
+plain() {
+	sudo python3 - "$1" "$2" "$3" <<-'EOF' || die "plain $1"
+		import os, sys
+		fd = os.open(sys.argv[1], os.O_CREAT | os.O_WRONLY, 0o644)
+		buf = bytes([int(sys.argv[3])]) * (1 << 20)
+		for i in range(int(sys.argv[2])):
+		    os.write(fd, buf)
+		os.fsync(fd)
+		os.close(fd)
+		fd = os.open(sys.argv[1], os.O_WRONLY)
+		os.fsync(fd)
+		os.close(fd)
+	EOF
+}
+
+# check <path> <MiB> <byte>: the file is exactly that
+check() {
+	sudo python3 - "$1" "$2" "$3" <<-'EOF'
+		import os, sys, collections
+		path, mb, b = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+		d = open(path, 'rb').read()
+		if len(d) != mb << 20:
+		    print("  %s: %d bytes, want %d" % (path, len(d), mb << 20))
+		    sys.exit(1)
+		wrong = collections.Counter(d[i] for i in range(0, len(d), 4096)
+		                            if d[i:i + 4096] != bytes([b]) * 4096)
+		if wrong:
+		    print("  %s: %d of %d blocks not %#04x (%s)" % (path, sum(wrong.values()),
+		          len(d) // 4096, b, " ".join("%#04x:%d" % kv for kv in sorted(wrong.items()))))
+		    sys.exit(1)
+		print("  %s: all %d blocks %#04x" % (path, len(d) // 4096, b))
+	EOF
 }
 
 # wait_held <n>: up to 30 s for held() to come down to <n>; prints the seconds
@@ -62,7 +109,7 @@ case "$MODE" in
 live)
 	mkfs_mount "$FS"
 	sudo dmesg -C
-	h0=$(held); r0=$(probe dead_released); y0=$(probe dead_retry)
+	h0=$(held); r0=$(probe dead_released)
 
 	echo "== closed: 256 MiB tau file, 64 MiB rewritten, unlink =="
 	fill "$A" 256 $((0xA1))
@@ -71,6 +118,7 @@ live)
 	logforce; a0=$(avail)
 	sudo rm "$A"
 	if t=$(wait_held "$h0"); then
+		[ "$t" = 0 ] || fail "let go ${t}s after the unlink, not by it"
 		# XFS frees the blocks in the background (inodegc)
 		for i in $(seq 1 10); do
 			logforce
@@ -117,6 +165,7 @@ live)
 	sudo rm -f "$HOME/unlink-go" "$HOME/unlink-go.ready"
 	if t=$(wait_held "$h1"); then
 		echo "  let go ${t}s after the close"
+		[ "$t" = 0 ] || fail "not let go by the close"
 	else
 		fail "still held 30 s after the close"
 	fi
@@ -147,13 +196,12 @@ live)
 	sudo mv "$TAU_MNT/c" "$TAU_MNT/a2"
 	if t=$(wait_held "$h3"); then
 		echo "  let go ${t}s after the rename"
+		[ "$t" = 0 ] || fail "not let go by the rename"
 	else
 		fail "still held 30 s after the rename replaced it"
 	fi
 
-	y=$(( $(probe dead_retry) - y0 ))
-	echo "== released $(( $(probe dead_released) - r0 )), put back $y =="
-	[ "$y" = 0 ] || fail "a release stalled"
+	echo "== released $(( $(probe dead_released) - r0 )), reaped $(probe dead_reaped) =="
 	sudo umount "$TAU_MNT" || fail "umount"
 	mount_tau "$FS"
 	sudo umount "$TAU_MNT" || fail "second umount"
@@ -229,7 +277,79 @@ verify)
 	[ $rc -eq 0 ] && echo "RESULT: PASS" || echo "RESULT: FAIL"
 	exit $rc
 	;;
+gate-write)
+	# F's copies are only in the journal, and the host still has F
+	echo 120 | sudo tee $P/tau_max_transaction_age >/dev/null
+	echo 0 | sudo tee $P/tau_cp_small_tx >/dev/null
+	echo "${NOGATE:-0}" | sudo tee $P/tau_dead_nogate >/dev/null
+	slow_host
+	mkfs_mount "$FS"
+	echo "== H: 64 MiB of 0xC1, not tau; A: 64 MiB of 0xA1, tau; both fsync'd =="
+	plain "$H" 64 $((0xC1))
+	fill "$A" 64 $((0xA1))
+	logforce
+	d0=$(probe dead_held)
+	sudo rm "$A"
+	d=$(( $(probe dead_held) - d0 ))
+	echo "== A unlinked, the host not told to commit; segments held: $d =="
+	[ "$d" = $(( 1 - ${NOGATE:-0} )) ] || fail "held $d"
+	echo "== H rewritten through tau with 0xC2, fsync: a new segment, no host commit =="
+	fill "$H" 64 $((0xC2))
+	[ $rc -eq 0 ] || exit $rc
+	echo WRITTEN
+	;;
+gate-verify)
+	mount_tau "$FS"
+	if [ ! -e "$A" ]; then
+		echo "INCONCLUSIVE: A is gone -- the host had the unlink before the power cut"
+		sudo umount "$TAU_MNT"
+		exit 3
+	fi
+	echo "== A is back, the unlink lost: its last fsync must be too =="
+	check "$A" 64 $((0xA1)) || rc=1
+	check "$H" 64 $((0xC2)) || rc=1
+	[ "$(kernel_faults)" = "0" ] || { show_kernel_faults; rc=1; }
+	sudo umount "$TAU_MNT" || rc=1
+	[ $rc -eq 0 ] && echo "RESULT: PASS" || echo "RESULT: FAIL"
+	exit $rc
+	;;
+reuse-write)
+	# a new tau file under the dead one's ino: recovery tells files by ino
+	echo 120 | sudo tee $P/tau_max_transaction_age >/dev/null
+	echo 0 | sudo tee $P/tau_cp_small_tx >/dev/null
+	slow_host
+	mkfs_mount "$FS"
+	echo "== A: 64 MiB of 0xA1, tau, fsync =="
+	fill "$A" 64 $((0xA1))
+	logforce
+	ino=$(stat -c %i "$A")
+	d0=$(probe dead_held); f0=$(probe dead_forced)
+	sudo rm "$A"
+	[ $(( $(probe dead_held) - d0 )) = 1 ] || fail "A's segments not held"
+	sleep 1	# XFS frees the inode in the background (inodegc)
+	echo "== B: 64 MiB of 0xB1, tau, fsync =="
+	fill "$B" 64 $((0xB1))
+	bino=$(stat -c %i "$B")
+	f=$(( $(probe dead_forced) - f0 ))
+	echo "  A was ino $ino, B is ino $bino; host commits forced for A: $f"
+	if [ "$bino" != "$ino" ]; then
+		echo "INCONCLUSIVE: B did not get A's inode"
+		exit 3
+	fi
+	[ "$f" -ge 1 ] || fail "B was made tau with A's segments still held"
+	[ $rc -eq 0 ] || exit $rc
+	echo WRITTEN
+	;;
+reuse-verify)
+	mount_tau "$FS"
+	[ -e "$A" ] && fail "A is back"
+	check "$B" 64 $((0xB1)) || rc=1
+	[ "$(kernel_faults)" = "0" ] || { show_kernel_faults; rc=1; }
+	sudo umount "$TAU_MNT" || rc=1
+	[ $rc -eq 0 ] && echo "RESULT: PASS" || echo "RESULT: FAIL"
+	exit $rc
+	;;
 *)
-	die "usage: $0 <xfs|ext4> live|write|verify"
+	die "usage: $0 <xfs|ext4> live|write|verify|gate-write|gate-verify|reuse-write|reuse-verify"
 	;;
 esac

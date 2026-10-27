@@ -44,7 +44,7 @@ TESTS=(
 	"range		2400	./range-test.sh both all"
 	"shortcopy	900	./shortcopy-test.sh both"
 	"odirect	900	./odirect-test.sh both"
-	"unlink		2400	./unlink-test.sh both all"
+	"unlink		3600	./unlink-test.sh both all"
 	"writeend	1200	./writeend-test.sh both"
 	"mtime		1800	./mtime-test.sh both all"
 	"falloc		1800	./falloc-test.sh both"
@@ -61,7 +61,7 @@ TESTS=(
 	"db-crash-pg	2400	./db-crash-test.sh both postgres 20"
 	"db-crash-mysql	2400	./db-crash-test.sh both mysql 20"
 	"db-rollback	2400	./db-rollback-test.sh both 1"
-	"flushorder	1800	./flushorder-test.sh both append,falloc,subappend,overwrite,reuse 24"
+	"flushorder	2700	./flushorder-test.sh both append,falloc,subappend,overwrite,reuse,unlink 24"
 	"pg-torn-ext4	5400	env FS=ext4 ./pg-torn-test.sh 1 300"
 	"pg-torn-xfs	5400	env FS=xfs ./pg-torn-test.sh 1 300"
 )

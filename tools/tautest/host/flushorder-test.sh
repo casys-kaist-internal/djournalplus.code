@@ -2,10 +2,11 @@
 # Flush order (taudocs/plan.md §10): every crash state a volatile write cache
 # can leave, rebuilt from a dm-log-writes log and recovered (guest/flushorder.sh).
 #   usage: flushorder-test.sh [xfs|ext4|both] [cases, comma list] [fsyncs]
-# cases: append falloc subappend overwrite reuse (default: all).  CONTROL=0 skips
-# the control runs (records FUA without PREFLUSH, and the segment map FUA without
-# PREFLUSH: overwrite must FAIL in both; a freed segment reused while the disk
-# map still names it: reuse must FAIL).
+# cases: append falloc subappend overwrite reuse unlink (default: all).  CONTROL=0
+# skips the control runs (records FUA without PREFLUSH, and the segment map FUA
+# without PREFLUSH: overwrite must FAIL in both; a freed segment reused while the
+# disk map still names it: reuse must FAIL; an unlinked file's segments given back
+# before the host has the unlink: unlink must FAIL).
 # Loop devices on the guest's /dev/shm: no real disk is written.
 
 set -u
@@ -13,7 +14,7 @@ cd "$(dirname "$0")" || exit 1
 . ./vm.sh
 
 FSLIST=${1:-both}
-CASES=${2:-append,falloc,subappend,overwrite,reuse}
+CASES=${2:-append,falloc,subappend,overwrite,reuse,unlink}
 N=${3:-24}
 [ "$FSLIST" = both ] && FSLIST="xfs ext4"
 CASES=${CASES//,/ }
@@ -60,6 +61,13 @@ if [ "${CONTROL:-1}" = 1 ]; then
 		case "$out" in
 		*"RESULT: FAIL"*) summary+="$fs control (reuse without the map write): FAIL, as it must\n" ;;
 		*) summary+="$fs reuse control: did not fail -- the reuse case does not see it\n"; rc=1 ;;
+		esac
+		echo; echo "############ $fs control: dead file's segments back before the host has the unlink ############"
+		out=$(vm_ssh "DEAD_NOGATE=1 ~/tautest/guest/flushorder.sh $fs unlink $N" 2>&1)
+		echo "$out"
+		case "$out" in
+		*"RESULT: FAIL"*) summary+="$fs control (dead segments back at once, unlink): FAIL, as it must\n" ;;
+		*) summary+="$fs unlink control: did not fail -- the unlink case does not see the gate\n"; rc=1 ;;
 		esac
 	done
 fi

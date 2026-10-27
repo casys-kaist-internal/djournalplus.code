@@ -1003,22 +1003,36 @@ fsck or mkfs.
 
 ### An unlinked file is let go without an unmount
 
-`unlink-test.sh [xfs|ext4|both] [live|crash|all]` (bug.md #24). tau used to hold
-every tau file's inode until unmount, so an unlinked one kept its blocks and its
-`tau_t`; now tau_journald lets go of a file once it is unlinked and nothing else
-holds it. Needs `CONFIG_TAU_PROBE_TORN`: `tau_alloced - tau_freed` is the number
-of files tau still holds.
+`unlink-test.sh [xfs|ext4|both] [live|crash|gate|nogate|reuse|all]` (bug.md
+#24, kernel `taudocs/plan.md` §12.3). tau used to hold every tau file's inode
+until unmount, so an unlinked one kept its blocks and its `tau_t`; #319 let
+tau_journald commit, drain and release it in the background. From #369 the last
+name drops tau's pin and whoever holds the inode last evicts it: the running tx
+goes uncommitted and nothing is written home, while the file's journal segments
+wait until the host has the unlink on disk. Needs `CONFIG_TAU_PROBE_TORN`:
+`tau_alloced - tau_freed` is the number of files tau still holds.
 
-- `live`: a 256 MiB file (64 MiB rewritten) unlinked -- held count back and
-  the space back within 30 s; a file unlinked while open and written on -- held
-  until the close, reads back its latest data; 200 files, half truncated to 0
-  first as PostgreSQL drops a relation; a hard link keeps the file, a rename over
-  the last name lets it go. `dead_retry` must stay 0, then a clean umount and
-  mount.
+- `live`: a 256 MiB file (64 MiB rewritten) unlinked -- held count back at the
+  unlink itself (0 s) and the space back; a file unlinked while open and
+  written on -- held until the close, let go by it, reads back its latest data;
+  200 files, half truncated to 0 first as PostgreSQL drops a relation; a hard
+  link keeps the file, a rename over the last name lets it go at once; then a
+  clean umount and mount.
 - `crash`: A 128 MiB (32 MiB rewritten) on a nearly full 8 GiB filesystem,
   unlinked and let go; B fills the space until ENOSPC and must reuse A's blocks
   (INCONCLUSIVE otherwise); power cut. After recovery B must be all 0xBB -- none
   of A's journal copies replayed over it -- and A must not come back.
+- `gate`: the host told to commit late (ext4 `commit=600`, XFS
+  `xfssyncd_centisecs`); A (64 MiB, tau, fsync'd, never checkpointed) unlinked
+  with its segments held (`dead_held`); H, written without tau, rewritten through
+  tau -- a new segment and a map write, no host commit; power cut. A must come
+  back with its last fsync (INCONCLUSIVE if the host had the unlink after all).
+- `nogate`: the same with `tau_dead_nogate=1` (segments given back at the
+  eviction) -- the control, which must fail: A back with its home never written.
+- `reuse`: A unlinked with its segments held, then B created and made tau under
+  A's inode number (INCONCLUSIVE if it got another): `alloc_tau()` must force the
+  host commit (`dead_forced`) and give A's segments back before B publishes;
+  after a power cut B must be intact and A gone.
 
 | kernel | XFS | ext4 |
 |---|---|---|
@@ -1172,7 +1186,10 @@ may lose any of them; `FO_DROP=0` skips these). Cases: `append`
 `overwrite` (no host log force), `reuse` (2 MiB segments: file 1 fills its first
 segment and goes idle, its txs age out, file 2 is given that segment; file 1
 must keep its twenty 128 KiB writes -- taudocs/bug.md #57; INCONCLUSIVE unless a
-freed segment was really reused). The control (`RECORD_FUA_ONLY=1`, kernel knob
+freed segment was really reused), `unlink` (file 1's twenty 128 KiB writes, never
+checkpointed, then unlinked; file 2, written before without tau, is rewritten
+through tau and publishes a segment while the host has not logged the unlink:
+wherever file 1 comes back it must hold all twenty -- kernel plan.md §12.3). The control (`RECORD_FUA_ONLY=1`, kernel knob
 `tau_record_fua_only`) sends every record FUA without PREFLUSH -- durable
 before its data -- and `overwrite` must FAIL. A second control
 (`SEGMAP_FUA_ONLY=1`, `tau_segmap_fua_only`) writes the segment map FUA without
@@ -1181,7 +1198,9 @@ reach the disk before the home writes, and `overwrite` must FAIL during the
 unmount. A third (`REUSE_FLUSH_ONLY=1`, `tau_reuse_flush_only`) reuses a freed
 segment after a bare flush, the map not written, as before #349, and `reuse`
 must FAIL in single-drop states (#348's `TAIL_UNFLUSHED` control went with
-#345's record without a flush). `FO_KEEP=1` keeps the log in the guest's
+#345's record without a flush). A fourth (`DEAD_NOGATE=1`, `tau_dead_nogate`)
+gives an unlinked file's segments back at its eviction, and `unlink` must FAIL.
+`FO_KEEP=1` keeps the log in the guest's
 `/dev/shm` for a look at the entries a failure names. Needs `drivers/md/dm-log-writes.ko`
 from the kernel tree (`make drivers/md/dm-log-writes.ko`); the host script
 copies it in.
@@ -1198,6 +1217,8 @@ copies it in.
 | #348, reuse (1 MiB segments then) | FAIL: single-drop, file 1 holds file 2's data; and a no-flush record's lost descriptor made an orphan floor drop file 1's fsync'd writes | FAIL, both alike |
 | #349 (#345 reverted, map before reuse), all five cases | PASS: prefix 718, single-drop 2251 (reuse 1718) | PASS: prefix 736, single-drop 2620 (reuse 1901) |
 | #349, control: reuse without the map write | FAIL: file 1's first write holds file 2's data | FAIL, the same |
+| #369, unlink (24 rewrites) | PASS: 173 states, 1082 single-drop | PASS: 178 states, 1186 single-drop |
+| #369, control: dead segments back at the eviction | FAIL 79 of 173, single-drop 408 of 1082: file 1 back, all twenty writes wrong | FAIL 79 of 176, single-drop 426 of 1182 |
 
 ### One fsync, request by request
 
