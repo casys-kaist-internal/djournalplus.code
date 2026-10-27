@@ -66,9 +66,10 @@ def num(x):
 
 
 def tpcc_points(raw):
-    """(db, fs, fpw, warehouses) -> (run, {terminals: [(tpmC, p99 ms, device
-    KB per new order), ...]}) from the newest run_tpcc.sh run that measured
-    it; and the runs without measurements in that naming."""
+    """(db, fs, fpw, warehouses) -> {terminals: ([(tpmC, p99 ms, device KB per
+    new order), ...], run)}, each terminal count from the newest run_tpcc.sh
+    run that measured it (a sweep and a separate long run of the same
+    configuration merge); and the runs without measurements in that naming."""
     sys.path.insert(0, str(HERE / "benchbase"))
     import pilot_report
     points, skipped = {}, []
@@ -89,10 +90,8 @@ def tpcc_points(raw):
             if not vals:
                 skipped.append("%s/%s" % (db, run.name))
             for (db_, fs, fpw, wh, terminals), v in vals.items():
-                k = (db_, fs, fpw, wh)
-                if k not in points or points[k][0] != run.name:
-                    points[k] = (run.name, {})      # a newer run replaces it
-                points[k][1][terminals] = v
+                # a newer run replaces a terminal count
+                points.setdefault((db_, fs, fpw, wh), {})[terminals] = (v, run.name)
     return points, skipped
 
 
@@ -105,22 +104,23 @@ def tpcc_md(points):
              " device KB per new order (KB/NO) at the most terminals.", ""]
     for db in sorted({k[0] for k in points}):
         keys = sorted(k for k in points if k[0] == db)
-        terms = sorted({t for k in keys for t in points[k][1]})
+        terms = sorted({t for k in keys for t in points[k]})
         lines += ["## TPC-C %s" % db, "",
                   "| fs | protection | WH | " + " | ".join(
                       "%d term" % t for t in terms) + " | p99 ms | KB/NO | run |",
                   "|---|---|---:|" + "---:|" * len(terms) + "---:|---:|---|"]
         for k in keys:
-            name, by = points[k]
-            top = by[max(by)]
-            cells = ["%.0f" % statistics.mean(v[0] for v in by[t]) if t in by else ""
+            by = points[k]
+            top = by[max(by)][0]
+            names = sorted({r for _, r in by.values()})
+            cells = ["%.0f" % statistics.mean(v[0] for v in by[t][0]) if t in by else ""
                      for t in terms]
             p99 = [v[1] for v in top if v[1] is not None]
             kb = [v[2] for v in top if v[2] is not None]
-            lines.append("| %s | %s | %d | %s | %s | %s | `%s` |" % (
+            lines.append("| %s | %s | %d | %s | %s | %s | %s |" % (
                 k[1], k[2], k[3], " | ".join(cells),
                 "%.1f" % statistics.mean(p99) if p99 else "",
-                "%.0f" % statistics.mean(kb) if kb else "", name))
+                "%.0f" % statistics.mean(kb) if kb else "", ", ".join("`%s`" % n for n in names)))
         lines.append("")
     return lines
 
@@ -230,7 +230,8 @@ def main():
         print("benchbase: no run_tpcc.sh measurements in %s" % ", ".join(skipped))
     path = summary_md(raw, runs, tpcc)
     print("%d sysbench runs and %d TPC-C runs summarized in %s" % (
-        sum(map(len, runs.values())), len({(k[0], v[0]) for k, v in tpcc.items()}), path))
+        sum(map(len, runs.values())),
+        len({(k[0], r) for k, by in tpcc.items() for _, r in by.values()}), path))
 
 
 if __name__ == "__main__":

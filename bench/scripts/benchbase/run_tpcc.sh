@@ -11,8 +11,8 @@
 # <db>_tpcc_<fs>_fpw_<on|off>_w<WH>_c<terminals>_r<n> per measurement, and
 # summary.md (pilot_report.py).
 # VARIANT=ssd990: the test device is the Samsung 990 PRO 4TB (TAU_TARGET_DISK
-# when set_env.sh ran), kept in its steady state (no trim before the restore);
-# results <ts>_ssd990, configurations <fs>-ssd990 (as run_main.sh).
+# when set_env.sh ran), kept in its steady state (no trim before the restore, no
+# online discard); results <ts>_ssd990, configurations <fs>-ssd990 (as run_main.sh).
 # Usage: [THREADS_LIST="1 8 16 32 64"] [FS_GROUPS=ext4 FS_FPWON=ext4 FS_FPWOFF=ext4]
 #        [VARIANT=ssd990] [POINT_WARMUP_TIME=60] run_tpcc.sh <postgres|mysql> [warehouses (1100)]
 set -e
@@ -37,7 +37,7 @@ case "$VARIANT" in
   ssd990)
     [[ "$(cat /sys/block/$TAU_DEVICE_NAME/device/model 2>/dev/null | xargs)" == "Samsung SSD 990 PRO 4TB" ]] \
       || { echo "❌ VARIANT=ssd990: source set_env.sh with TAU_TARGET_DISK=\"Samsung SSD 990 PRO 4TB\""; exit 1; }
-    TAU_TRIM_BEFORE_RESTORE=0 ;;
+    TAU_TRIM_BEFORE_RESTORE=0; TAU_NO_DISCARD=1 ;;
   *) echo "❌ Unknown VARIANT: $VARIANT"; exit 1 ;;
 esac
 KEY="tpcc_w$WH"
@@ -63,6 +63,7 @@ for FS in $FS_GROUPS; do
     echo "=== $BLOCK: restoring ${FS}_${KEY} on $DEVICE $(date -u +%T)"
     restore_filesystem $FS "$KEY" "$BACKUP_DIR"
     mount_fs $FS "$MOUNT_DIR"
+    echo "mount: $(findmnt -no FSTYPE,OPTIONS "$MOUNT_DIR" | head -1)"
     set_fpw "$FPW"
     db_fs_settings "$FS"
     SERVER_LOG="$OUT/${BLOCK}_server.log"

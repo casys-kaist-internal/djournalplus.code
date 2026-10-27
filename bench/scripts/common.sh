@@ -106,7 +106,10 @@ mount_fs() {
       sudo mount -t f2fs $DEVICE $MOUNT_DIR
       ;;
     btrfs)
-      sudo mount -t btrfs $DEVICE $MOUNT_DIR
+      # TAU_NO_DISCARD=1 (VARIANT=ssd990, a steady-state SSD): nodiscard; btrfs
+      # turns on online discard for SSDs by default (discard=async, Linux 6.2+)
+      local bo=(); [[ "${TAU_NO_DISCARD:-0}" == 1 ]] && bo=(-o nodiscard)
+      sudo mount -t btrfs "${bo[@]}" $DEVICE $MOUNT_DIR
       ;;
     btrfs-nodatacow)  # files created on it skip CoW (and data checksums): the no-CoW floor
       sudo mount -t btrfs -o nodatacow $DEVICE $MOUNT_DIR

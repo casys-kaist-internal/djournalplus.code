@@ -124,10 +124,10 @@ case "$VARIANT" in
     TAU_FILL_BEFORE_RESTORE=1 ;;
   ssd990)  # consumer SSD (no PLP, volatile cache): the test device is the 990 PRO 4TB
             # (TAU_TARGET_DISK when set_env.sh ran), kept in its steady state: no trim
-            # before the restore
+            # before the restore, no online discard (btrfs nodiscard; common.sh)
     [[ "$(cat /sys/block/$TAU_DEVICE_NAME/device/model 2>/dev/null | xargs)" == "Samsung SSD 990 PRO 4TB" ]] \
       || { echo "❌ VARIANT=ssd990: source set_env.sh with TAU_TARGET_DISK=\"Samsung SSD 990 PRO 4TB\""; exit 1; }
-    TAU_TRIM_BEFORE_RESTORE=0 ;;
+    TAU_TRIM_BEFORE_RESTORE=0; TAU_NO_DISCARD=1 ;;
   *) echo "❌ Unknown VARIANT: $VARIANT"; exit 1 ;;
 esac
 [[ "${KCHECK:-0}" != 1 ]] || VARIANT="${VARIANT:+$VARIANT-}kcheck"   # names: <run>_..-kcheck, <fs>-..-kcheck
@@ -343,10 +343,11 @@ for WORKLOAD in "${WORKLOADS[@]}"; do
       BLOCK="${DBMS}_${WORKLOAD}_${FS}${VARIANT:+-$VARIANT}_fpw_${FPW}_t${TABLE}"
       echo "=== $BLOCK: restoring ${FS}_${IMAGE_KEY} on $DEVICE ==="
       echo "protocol: trim_before_restore=${TAU_TRIM_BEFORE_RESTORE:-1}" \
-        "fill_before_restore=${TAU_FILL_BEFORE_RESTORE:-0} pg_pre_checkpoint=$PG_PRE_CHECKPOINT" \
-        "fixed_seed=$SB_FIXED_SEED" >> "$RESULT_DIR/${BLOCK}.spec"
+        "fill_before_restore=${TAU_FILL_BEFORE_RESTORE:-0} no_discard=${TAU_NO_DISCARD:-0}" \
+        "pg_pre_checkpoint=$PG_PRE_CHECKPOINT fixed_seed=$SB_FIXED_SEED" >> "$RESULT_DIR/${BLOCK}.spec"
       restore_filesystem $FS "$IMAGE_KEY" $BACKUP_DIR
       mount_fs $FS $MOUNT_DIR
+      echo "mount: $(findmnt -no FSTYPE,OPTIONS "$MOUNT_DIR" | head -1)" >> "$RESULT_DIR/${BLOCK}.spec"
       log_discards "discard counters after restore:"
       if [[ "$FS" == zfs* ]]; then
         sudo zfs get -H -r -t filesystem -o name,property,value \
