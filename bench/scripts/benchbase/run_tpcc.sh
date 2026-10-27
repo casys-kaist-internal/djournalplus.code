@@ -96,6 +96,7 @@ for FS in $FS_GROUPS; do
     esac
     db_stop
     umount_fs "$MOUNT_DIR"
+    clear_fs $FS "$DEVICE"   # as run_main.sh: zfs pools exported, signatures wiped
   done
 done
 python3 "$TAUFS_BENCH/scripts/benchbase/pilot_report.py" "$OUT" > "$OUT/summary.md" || true

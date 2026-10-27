@@ -310,8 +310,9 @@ restore_filesystem() {
   # so nothing written by earlier runs is still valid inside the SSD (garbage
   # collection otherwise depends on the run order; 2026-10-09). The FS and DB
   # never trim afterwards (no discard mount option, autotrim off).
+  # A pool left imported holds the device: release it, trim or not.
+  sudo zpool export zfspool 2>/dev/null || true
   if [[ "${TAU_TRIM_BEFORE_RESTORE:-1}" == 1 ]]; then
-    sudo zpool export zfspool 2>/dev/null || true
     echo "[+] Trimming $TAU_DEVICE (blkdiscard)"
     sudo blkdiscard -f "$TAU_DEVICE" || { echo "blkdiscard $TAU_DEVICE failed"; exit 1; }
   fi
