@@ -80,6 +80,16 @@ mount_tau() {
 		die "mount -t $fs -o ${TAU_MOUNT_OPTS:-tjournal} failed"
 }
 
+# tau_home <0|1>: from kernel #372 a commit writes new blocks home, not to the
+# journal; 0 journals them again, for a test whose journal copies come from
+# fresh writes.  A no-op on a kernel without the knob.
+tau_home() {
+	local p=/sys/module/tau_journal/parameters/tau_home
+
+	[ -e "$p" ] || return 0
+	echo "$1" | sudo tee "$p" >/dev/null || die "cannot set tau_home"
+}
+
 # md5_of_repeat <byte> <count> -> md5 of <count> copies of <byte>
 md5_of_repeat() {
 	python3 -c "import hashlib,sys; print(hashlib.md5(bytes([int(sys.argv[1])])*int(sys.argv[2])).hexdigest())" "$1" "$2"

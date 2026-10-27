@@ -9,6 +9,7 @@ P=/sys/module/tau_journal/parameters
 probe() { cat $P/tau_probe_$1; }
 fsync_only() { sudo python3 -c 'import os,sys; fd=os.open(sys.argv[1], os.O_RDWR|0o40000000); os.fsync(fd); os.close(fd)' "$1"; }
 if [ "$2" = write ]; then
+	tau_home 0	# T1 and T2 in the journal, not written home
 	echo 600 | sudo tee $P/tau_max_transaction_age >/dev/null
 	mkfs_mount "$FS"
 	sudo dmesg | grep -i 'segment size' | tail -1

@@ -116,6 +116,9 @@ if [ "$CASE" = unlink ] || [ "$CASE" = truncate ]; then
 	echo 0 | sudo tee $P/tau_cp_small_tx >/dev/null
 	echo 120 | sudo tee $P/tau_max_transaction_age >/dev/null
 fi
+case "$CASE" in reuse|unlink|truncate)	# file 1 journaled, not written home
+	home=$(cat $P/tau_home 2>/dev/null || echo 1); tau_home 0 ;;
+esac
 sudo sh -c "echo 0 > $P/tau_probe_seg_reuse_flush" 2>/dev/null
 MNT_DEV=/dev/mapper/fo
 TAU_DEV=$MNT_DEV mkfs_mount "$FS"
@@ -225,6 +228,7 @@ echo 0 | sudo tee $P/tau_record_fua_only >/dev/null
 [ -e $P/tau_reuse_flush_only ] && echo 0 | sudo tee $P/tau_reuse_flush_only >/dev/null
 [ -e $P/tau_dead_nogate ] && echo 0 | sudo tee $P/tau_dead_nogate >/dev/null
 [ -e $P/tau_free_uncond ] && echo 0 | sudo tee $P/tau_free_uncond $P/tau_free_nohold >/dev/null
+case "$CASE" in reuse|unlink|truncate) tau_home "$home" ;; esac
 if [ "$CASE" = unlink ] || [ "$CASE" = truncate ]; then
 	echo "$small_tx" | sudo tee $P/tau_cp_small_tx >/dev/null
 	echo "$tx_age" | sudo tee $P/tau_max_transaction_age >/dev/null

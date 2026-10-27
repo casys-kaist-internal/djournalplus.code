@@ -39,6 +39,7 @@ SYNCBIN=${SYNCBIN:-$TAU_BIN/tausync}
 AGE=/sys/module/tau_journal/parameters/tau_max_commmit_age
 
 echo "== preparing $FS on $TAU_DEV =="
+tau_home 0	# a multi-segment journal commit, not a home write
 mkfs_mount "$FS"
 sudo dmesg -C
 

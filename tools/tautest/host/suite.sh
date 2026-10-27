@@ -45,6 +45,7 @@ TESTS=(
 	"shortcopy	900	./shortcopy-test.sh both"
 	"odirect	900	./odirect-test.sh both"
 	"unlink		3600	./unlink-test.sh both all"
+	"home		1800	./home-test.sh both all"
 	"writeend	1200	./writeend-test.sh both"
 	"mtime		1800	./mtime-test.sh both all"
 	"falloc		1800	./falloc-test.sh both"

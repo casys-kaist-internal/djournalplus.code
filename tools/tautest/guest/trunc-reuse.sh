@@ -145,6 +145,7 @@ os.close(fd)' "$A" $((32 * MB)) $((32 * MB)) || die "punch" ;;
 	echo WRITTEN
 elif [ "$MODE" = write ]; then
 	echo 120 | sudo tee $P/tau_max_transaction_age >/dev/null
+	[ "$CASE" = truncr ] || tau_home 0	# A journaled: the copies #20 must not replay
 	mkfs_mount "$FS"
 
 	if [ "$CASE" = truncr ]; then

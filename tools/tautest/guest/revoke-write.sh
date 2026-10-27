@@ -140,6 +140,7 @@ setup() {
 	return 0
 }
 
+tau_home 0	# T1 journaled, not written home
 COMMIT_AGE=$(cat "$P/tau_max_commmit_age")
 for attempt in 1 2 3; do
 	echo "== preparing $FS, case $CASE, attempt $attempt =="

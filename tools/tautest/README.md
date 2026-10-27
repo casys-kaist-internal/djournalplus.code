@@ -64,6 +64,7 @@ tools/tautest/
 │   ├── fsync-anatomy.sh    one fsync request by request: phases, flushes, FUA (ftrace)
 │   ├── db-bench.sh         sysbench update + insert on a tau fs: TPS, p95, flush/s, tau commits/s
 │   ├── flushorder.sh       dm-log-writes: every crash state a device cache allows
+│   ├── home.sh             new blocks written home by their commit, not journaled (plan §12.5)
 │   ├── thp-write.sh        large folios around an activation, then left for the power cut
 │   ├── thp-verify.sh       after it: every file against what was fsynced
 │   ├── xfs-hold-probe.sh   measure whether the XFS ordering bracket is reached
@@ -83,6 +84,7 @@ tools/tautest/
     ├── db-rollback-test.sh a live database over a rolled-back commit (#44)
     ├── flushorder-test.sh  flush order through dm-log-writes, with a control (§21)
     ├── trunc-reuse-test.sh crash-check replay over blocks freed and reused (bug #20); a free lost in a power cut
+    ├── home-test.sh        crash-check new blocks written home: a racing rewrite waits, an older copy stays out
     ├── range-test.sh       range operations keep the data, runtime and crash (#26 #36 #38 #39)
     ├── shortcopy-test.sh   a faulting write leaves the rest of its block alone (#24)
     ├── odirect-test.sh     O_DIRECT through tau for tau files, real for the rest (#40)
@@ -150,8 +152,8 @@ They are system tests, not unit tests: a real kernel in a VM, a real NVMe,
 syscalls only, and a power cut where the guarantee is about crashes. Three kinds:
 
 - **scenario** -- deterministic; one pass means the path is right: crash, sync,
-  revoke, seg-*, split, trunc-reuse, range, shortcopy, odirect, unlink, abort,
-  falloc, repair, migrate (churn).
+  revoke, seg-*, split, trunc-reuse, range, shortcopy, odirect, unlink, home,
+  abort, falloc, repair, migrate (churn).
 - **race hunt** -- probabilistic; a clean pass is weak evidence, which is what
   the soak's repetition is for: stress, trunc-race, sync-race, cp-race,
   xfs-hold, torn, migrate (busy).
@@ -1071,6 +1073,49 @@ wait until the host has the unlink on disk. Needs `CONFIG_TAU_PROBE_TORN`:
 |---|---|---|
 | #318 | live FAIL: the `tau_t` was freed only when background reclaim freed the `xfs_inode`, so the held count lagged by tens of seconds -- and an `xfs_inode` recycled before that kept the stale `i_tau` | -- |
 | #319 | live PASS (every file let go within 1 s, 203 released, 0 put back); crash PASS (B reused all 32768 of A's blocks, all 69680 blocks 0xBB after the power cut) | live PASS (same); crash PASS (32768 reused, all 141931 blocks 0xBB) |
+
+### New blocks go home, not to the journal
+
+`home-test.sh [xfs|ext4|both] [basic|race|reuse|nowait|norevoke|all]` (kernel
+`taudocs/plan.md` §12.5). From #372 a commit writes a tx's new blocks -- delalloc
+or unwritten, nothing the file would lose on disk -- straight to their home
+location, tagged `TAU_TAG_HOME`: no journal block, no checkpoint. The record
+still goes out after them behind its flush, and the blocks stay unwritten until
+the conversion after the record, so a crash before the record leaves the file
+as it was. Needs `CONFIG_TAU_PROBE_TORN` (`tau_home`, the `home_*` probes).
+
+- `basic`: 160 MiB of new data and an fsync -- every block home (`home_blocks`),
+  next to no journal blocks, and the more than a segment of journal room it held
+  given back at the close (#374 kept it: the next write warned in
+  `tau_finalize_log_space()`); 4 MiB rewritten over the start is journaled; then
+  on B one tx of both, 4 MiB overwritten and 4 MiB appended, aged out and
+  checkpointed (#373 hit a BUG there: its home blocks counted as removed); power
+  cut; all back. Any kernel warning in the guest's dmesg fails a case.
+- `race`: 8 KiB of new data, its fsync's commit held 8 s after pass 1
+  (`tau_inject_delay`); the same 8 KiB rewritten meanwhile must wait for that
+  commit (`home_wait`, 4 s or more) rather than go in place over a block on its
+  way home (`home_inplace` 0), and survive a power cut.
+- `reuse`: X and Y written, then rewritten (journaled; Y keeps that tx in the
+  journal); X punched and the host has it; X written again into the hole goes
+  home, onto some of its old blocks (INCONCLUSIVE if none); power cut. X's older
+  journal copy must not be replayed over it: a home tag revokes the file's older
+  copies of its block.
+- `nowait`: race with `tau_home_nowait=1` (the rewrite goes in place) -- the
+  control, which must fail in the write phase.
+- `norevoke`: reuse with `tau_home_norevoke=1` at recovery (a home tag revokes
+  nothing) -- the control, which must fail: X back with its older copy.
+
+Tests whose journal copies come from fresh writes -- revoke, split, seg-order,
+seg-reuse, sync-race, cp-race, repair, trunc-reuse trunc/punch/collapse, unlink
+gate/nogate/reuse, flushorder reuse/unlink/truncate -- pin `tau_home 0`
+(`guest/common.sh`) and test the journal path as before; the rest run with new
+blocks going home.
+
+| kernel | XFS | ext4 |
+|---|---|---|
+| #373 | basic (without B), race, reuse PASS, nowait and norevoke fail as they must -- but the suite's abort test hit `BUG_ON(removed > reserved)` checkpointing a tx of new and journaled blocks (its home blocks were counted as removed); basic's B step, added for it, hits it too | the same |
+| #374 | basic (64 MiB new then) and the rest PASS -- but the suite's abort test (xfs site 5) warned in `tau_finalize_log_space()`: the journal room a tx's home blocks held stayed with the file as whole spare segments; basic with 160 MiB new and the warning check hits it too | the same |
+| #375 | basic PASS (40960 blocks home, 102 journal blocks, no warning; the rewrite journaled; B's tx of both, 1024 home and 1030 journal blocks, checkpointed in 2 s); race, reuse PASS; nowait and norevoke fail as they must | the same |
 
 ### A block that misses the transaction at write_end
 

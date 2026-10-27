@@ -16,6 +16,7 @@ EXTENT_FILE=${EXTENT_FILE:-$HOME/repair-extent.txt}
 [ -n "$FS" ] || die "usage: $0 <xfs|ext4> [size-mb] [hold-seconds]"
 
 echo "== preparing $FS =="
+tau_home 0	# generation A journaled: the copy recovery repairs from
 mkfs_mount "$FS"
 
 F=$TAU_MNT/repair

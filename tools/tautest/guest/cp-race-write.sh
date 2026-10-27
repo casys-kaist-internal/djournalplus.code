@@ -24,6 +24,7 @@ HOLD=${3:-40}
 sudo dmesg -n 8
 
 echo "== preparing $FS on $TAU_DEV =="
+tau_home 0	# generation A journaled, so B takes a revoke
 mkfs_mount "$FS"
 
 D=$TAU_MNT

@@ -281,6 +281,7 @@ gate-write)
 	# F's copies are only in the journal, and the host still has F
 	echo 120 | sudo tee $P/tau_max_transaction_age >/dev/null
 	echo 0 | sudo tee $P/tau_cp_small_tx >/dev/null
+	tau_home 0	# A's copies in the journal only
 	echo "${NOGATE:-0}" | sudo tee $P/tau_dead_nogate >/dev/null
 	slow_host
 	mkfs_mount "$FS"
@@ -317,6 +318,7 @@ reuse-write)
 	# a new tau file under the dead one's ino: recovery tells files by ino
 	echo 120 | sudo tee $P/tau_max_transaction_age >/dev/null
 	echo 0 | sudo tee $P/tau_cp_small_tx >/dev/null
+	tau_home 0	# A's copies in the journal, under the ino B gets
 	slow_host
 	mkfs_mount "$FS"
 	echo "== A: 64 MiB of 0xA1, tau, fsync =="

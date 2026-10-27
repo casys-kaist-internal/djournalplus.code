@@ -24,6 +24,7 @@ wait_drained() {	# every segment free but the running one
 	die "checkpoint did not drain ($1): seg_free=$(probe seg_free) seg_total=$(probe seg_total)"
 }
 if [ "$2" = write ]; then
+	tau_home 0	# the small txs, B1 and B2 in the journal
 	echo 1 | sudo tee $P/tau_max_transaction_age >/dev/null
 	mkfs_mount "$FS"
 	sudo dmesg | grep -i 'segment size' | tail -1
