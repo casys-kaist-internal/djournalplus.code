@@ -169,6 +169,6 @@ vm_console_faults() {
 
 	from=$(grep -n 'Linux version' "$VM_LOG" 2>/dev/null | tail -2 | head -1 | cut -d: -f1)
 	tail -n +"${from:-1}" "$VM_LOG" 2>/dev/null |
-		grep -E 'kernel BUG at|invalid opcode|soft lockup|blocked for more than|WARNING: CPU' |
+		grep -E 'kernel BUG at|BUG:|Oops:|invalid opcode|soft lockup|blocked for more than|WARNING: CPU' |
 		head -10
 }

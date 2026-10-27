@@ -26,6 +26,11 @@
 #              tau (32 KiB, fsync each): it publishes a segment while the host has
 #              not logged the unlink -- wherever file 1 comes back, it must hold
 #              all twenty
+#   truncate   file 1's twenty 128 KiB writes, the first ten aged out and
+#              checkpointed, then it is truncated to ten; a background commit
+#              of a rewrite of its block 0 moves its tail, and file 2 is
+#              rewritten through tau as in unlink -- file 1 must hold all twenty
+#              (the truncate lost) or the first ten (kernel plan.md §12.4)
 #
 # Needs ~/tautest/dm-log-writes.ko built for the running kernel.  Loop devices
 # on /dev/shm only: no real disk is touched.  RECORD_FUA_ONLY=1 is the control
@@ -35,14 +40,16 @@
 # REUSE_FLUSH_ONLY=1 (tau_reuse_flush_only: a freed segment reused while the disk
 # map still names it) must FAIL in the single-drop states of reuse.
 # DEAD_NOGATE=1 (tau_dead_nogate: an unlinked file's segments given back at the
-# eviction) must FAIL in unlink.
+# eviction) must FAIL in unlink.  FREE_UNCOND=1 (tau_free_uncond: the truncate's
+# revoke tags unconditional) and FREE_NOHOLD=1 (tau_free_nohold: its txs not held
+# for the host) must FAIL in truncate.
 
 cd "$(dirname "$0")" || exit 1
 . ./common.sh
 
 FS=${1:-}; CASE=${2:-}; N=${3:-24}
 case "$FS" in ext4|xfs) ;; *) die "usage: $0 <ext4|xfs> <case> [fsyncs]" ;; esac
-case "$CASE" in append|falloc|subappend|overwrite|reuse|unlink) ;; *) die "unknown case '$CASE'" ;; esac
+case "$CASE" in append|falloc|subappend|overwrite|reuse|unlink|truncate) ;; *) die "unknown case '$CASE'" ;; esac
 W=/dev/shm/flushorder
 SIZE=${FO_SIZE:-4G}
 P=/sys/module/tau_journal/parameters
@@ -86,6 +93,12 @@ if [ -e $P/tau_dead_nogate ]; then
 elif [ "$CASE" = unlink ]; then
 	die "no tau_dead_nogate in this kernel"
 fi
+if [ -e $P/tau_free_uncond ]; then
+	echo "${FREE_UNCOND:-0}" | sudo tee $P/tau_free_uncond >/dev/null
+	echo "${FREE_NOHOLD:-0}" | sudo tee $P/tau_free_nohold >/dev/null
+elif [ "$CASE" = truncate ]; then
+	die "no tau_free_uncond in this kernel"
+fi
 # no discards, no background inode-table zeroing in the log
 export TAU_MKE2FS_OPTS="-E nodiscard,lazy_itable_init=0,lazy_journal_init=0"
 export TAU_MKFS_XFS_OPTS="-K"
@@ -97,7 +110,7 @@ if [ "$CASE" = reuse ]; then
 	echo 0 | sudo tee $P/tau_cp_small_tx >/dev/null
 	echo 2 | sudo tee $P/tau_max_transaction_age >/dev/null
 fi
-if [ "$CASE" = unlink ]; then
+if [ "$CASE" = unlink ] || [ "$CASE" = truncate ]; then
 	# file 1's copies stay in the journal only: never checkpointed
 	small_tx=$(cat $P/tau_cp_small_tx); tx_age=$(cat $P/tau_max_transaction_age)
 	echo 0 | sudo tee $P/tau_cp_small_tx >/dev/null
@@ -122,7 +135,7 @@ elif case == 'overwrite':
         os.pwrite(fd, page(j + 1, 0), j * 8192)
 elif case == 'subappend':
     os.pwrite(fd, b'A' * 100, 0)
-elif case == 'unlink':
+elif case in ('unlink', 'truncate'):
     # not tau, and fsync'd once more after the close: XFS logs the EOF trim
     for _ in range(2):
         fd2 = os.open(path + '2', os.O_RDWR | os.O_CREAT, 0o644)
@@ -167,6 +180,32 @@ if case == 'unlink':
         mark('fsync-%d' % k)
     mark('end')
     sys.exit()
+if case == 'truncate':
+    import time
+    def blk(k, tag, size):
+        return struct.pack('<II', k, tag) * (size // 8)
+    def age(s):
+        with open('/sys/module/tau_journal/parameters/tau_max_transaction_age', 'w') as f:
+            f.write(str(s))
+    age(2)			# the first ten go home and leave the journal
+    for k in range(1, 21):
+        if k == 11:
+            age(120)	# the last ten stay in the journal only
+        os.pwrite(fd, blk(k, 0xF1, 131072), (k - 1) * 131072)
+        os.fsync(fd)
+    time.sleep(8)
+    mark('f1-done')
+    os.ftruncate(fd, 10 * 131072)
+    # a background commit, no host log force: the tail passes what it dropped
+    os.pwrite(fd, blk(1, 0xF3, 4096), 0)
+    time.sleep(7)
+    fd2 = os.open(path + '2', os.O_RDWR | 0o40000000)
+    for k in range(1, n + 1):
+        os.pwrite(fd2, blk(k, 0xF2, 32768), (k - 1) * 32768)
+        os.fsync(fd2)
+        mark('fsync-%d' % k)
+    mark('end')
+    sys.exit()
 for k in range(1, n + 1):
     if case == 'subappend':
         os.pwrite(fd, bytes([0x40 + k % 60]) * 100, 100 * k)
@@ -185,7 +224,8 @@ echo 0 | sudo tee $P/tau_record_fua_only >/dev/null
 [ -e $P/tau_segmap_fua_only ] && echo 0 | sudo tee $P/tau_segmap_fua_only >/dev/null
 [ -e $P/tau_reuse_flush_only ] && echo 0 | sudo tee $P/tau_reuse_flush_only >/dev/null
 [ -e $P/tau_dead_nogate ] && echo 0 | sudo tee $P/tau_dead_nogate >/dev/null
-if [ "$CASE" = unlink ]; then
+[ -e $P/tau_free_uncond ] && echo 0 | sudo tee $P/tau_free_uncond $P/tau_free_nohold >/dev/null
+if [ "$CASE" = unlink ] || [ "$CASE" = truncate ]; then
 	echo "$small_tx" | sudo tee $P/tau_cp_small_tx >/dev/null
 	echo "$tx_age" | sudo tee $P/tau_max_transaction_age >/dev/null
 fi
@@ -199,7 +239,7 @@ if [ "$CASE" = reuse ]; then
 		exit 3
 	fi
 fi
-echo "== $FS $CASE: $N fsyncs logged${RECORD_FUA_ONLY:+ (control: records FUA only)}${SEGMAP_FUA_ONLY:+ (control: segment map FUA only)}${REUSE_FLUSH_ONLY:+ (control: reuse without the map write)}${DEAD_NOGATE:+ (control: dead segments back at once)} =="
+echo "== $FS $CASE: $N fsyncs logged${RECORD_FUA_ONLY:+ (control: records FUA only)}${SEGMAP_FUA_ONLY:+ (control: segment map FUA only)}${REUSE_FLUSH_ONLY:+ (control: reuse without the map write)}${DEAD_NOGATE:+ (control: dead segments back at once)}${FREE_UNCOND:+ (control: unconditional free tags)}${FREE_NOHOLD:+ (control: free not held)} =="
 
 # check one rebuilt disk: mount it (tau recovery runs) and judge the file
 cat > /tmp/fo-check.sh <<EOF
@@ -246,6 +286,39 @@ if case == 'reuse':
         print("BAD file 2: %d of %d fsync'd writes there" % (m2, durable))
     else:
         print("OK file 1 %d, file 2 %d writes (durable %d)" % (m1, m2, durable))
+    sys.exit()
+if case == 'truncate':
+    def blk(k, tag, size):
+        return struct.pack('<II', k, tag) * (size // 8)
+    try:
+        d1 = open(path, 'rb').read()
+    except FileNotFoundError:
+        print("BAD file 1 missing"); sys.exit()
+    m1 = len(d1) // 131072
+    # block 0 may hold its rewrite
+    bad1 = [k for k in range(1, m1 + 1)
+            if d1[(k-1)*131072:k*131072] != blk(k, 0xF1, 131072) and
+               not (k == 1 and d1[:4096] == blk(1, 0xF3, 4096) and
+                    d1[4096:131072] == blk(1, 0xF1, 131072)[4096:])]
+    if len(d1) % 131072 or bad1 or (f1done and m1 not in (10, 20)):
+        print("BAD file 1: size %d, writes %s wrong" % (len(d1), bad1)); sys.exit()
+    try:
+        d2 = open(path + '2', 'rb').read()
+    except FileNotFoundError:
+        print("BAD file 2 missing"); sys.exit()
+    m2, ok2 = 0, len(d2) == n * 32768
+    for j in range(n if ok2 else 0):
+        b = d2[j*32768:(j+1)*32768]
+        if b == blk(j + 1, 0xF2, 32768) and m2 == j:
+            m2 = j + 1
+        elif b != blk(j + 1, 0xE2, 32768):
+            ok2 = False
+    if not ok2:
+        print("BAD file 2: size %d, its rewrites not a whole prefix" % len(d2))
+    elif m2 < durable:
+        print("BAD file 2: %d of %d fsync'd rewrites there" % (m2, durable))
+    else:
+        print("OK file 1 %d writes, file 2 %d rewrites (durable %d)" % (m1, m2, durable))
     sys.exit()
 if case == 'unlink':
     def blk(k, tag, size):

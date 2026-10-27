@@ -82,7 +82,7 @@ tools/tautest/
     ├── epoch-test.sh       power-cut inside an allocating commit: host metadata vs the record (#44, #49-#51)
     ├── db-rollback-test.sh a live database over a rolled-back commit (#44)
     ├── flushorder-test.sh  flush order through dm-log-writes, with a control (§21)
-    ├── trunc-reuse-test.sh crash-check replay over blocks freed and reused (bug #20)
+    ├── trunc-reuse-test.sh crash-check replay over blocks freed and reused (bug #20); a free lost in a power cut
     ├── range-test.sh       range operations keep the data, runtime and crash (#26 #36 #38 #39)
     ├── shortcopy-test.sh   a faulting write leaves the rest of its block alone (#24)
     ├── odirect-test.sh     O_DIRECT through tau for tau files, real for the rest (#40)
@@ -697,15 +697,43 @@ power cut, so the next mount also checks that the journal can be backed again
 (bug.md #37). After recovery B must read all 0xBB; a 0xA1 block is A's journal
 copy replayed over B. INCONCLUSIVE when B landed on none of A's blocks.
 
-`keep` checks the home write that comes before the revoke: A's blocks are
+`keep` cuts the power before the host's truncate is durable: A's blocks are
 TauRedo over a home one version older (0xA1 journaled over 0xA0), A is
-truncated to 4 MiB and power is cut at once, before the host's truncate is
-durable (ext4 mounted `commit=60`; XFS waits for a log force). A must come back
-at 8 MiB of 0xA1 -- the tail's journal copies are revoked, so it is the home
-write that brings it back. 4 MiB is INCONCLUSIVE: the truncate became durable.
+truncated to 4 MiB and power is cut at once (ext4 mounted `commit=60`; XFS waits
+for a log force). A must come back at 8 MiB of 0xA1. Up to #369 the truncate
+wrote the tail home before revoking it, and that home write brought it back;
+from #370 (kernel `taudocs/plan.md` §12.4) nothing goes home: the revoke tags are
+conditional, and recovery drops each one whose block the file still maps
+written on disk, so the journal copies replay. 4 MiB is INCONCLUSIVE: the
+truncate became durable.
+
+`truncr` (#370) truncates A while its last 64 MiB are still unsynced writes in
+the running tx: the truncate's own commit allocates them in pass 1 and must tag
+them there, or B, landing on them after the free, gets them back as A's data
+(`free_cond` must show 16384 tags; which blocks B got is not checked, they were
+allocated after the map was read).
+
+`gate` and `gatepunch` (#370) also move the tail. A's 64 MiB of 0xA0 go home
+(T0, checkpointed); T1 rewrites the first 32 MiB with 0xA1 (checkpointed too),
+T2 the last 32 MiB with 0xA2 (journal only); the host is told to commit late
+(ext4 `commit=600`, XFS `xfssyncd_centisecs`); the last 32 MiB are truncated
+(`gate`) or punched (`gatepunch`, by fallocate(2) itself: fallocate(1) fsyncs
+before it closes, which makes the punch durable). The write side checks the
+probes: no home write, no old path, 8192 conditional tags (`free_cond`), one
+hold (`free_hold`), no tx dropped after the free. Block 0 is then rewritten
+without an fsync, and a background commit -- no host log force -- writes a
+record whose tail is the oldest tx still on A's checkpoint list. Power cut. A
+must come back at 64 MiB with the last 32 MiB 0xA2: the hold kept T2 (and the
+free's own commit) on the list, so the tail still names T2, and the tags are
+dropped because the blocks are still A's. The size cut, or a hole, is
+INCONCLUSIVE: the host had the free. Two controls run `gate` with a knob and
+must fail: `uncond` (`tau_free_uncond`: the tags apply whatever the disk says
+-- the last 32 MiB come back 0xA0) and `nohold` (`tau_free_nohold`: T2 leaves
+the checkpoint list once the truncate dropped its pages, the background
+record's tail passes it, and the last 32 MiB come back 0xA0).
 
 ```sh
-tools/tautest/host/trunc-reuse-test.sh both     # ~2 minutes per case
+tools/tautest/host/trunc-reuse-test.sh both     # ~1.5 minutes per case
 ```
 
 | kernel | ext4 trunc | ext4 punch | XFS trunc | XFS punch | keep (both) |
@@ -720,6 +748,11 @@ also checks #37:
 |---|---|---|---|
 | #307 | FAIL, 16384 blocks 0xA1 | mount ENOSPC (#37) | mount ENOSPC (#37) |
 | #309 | PASS, `replayed 16384, revoked 16384` | PASS | PASS (all eight cases pass) |
+
+| kernel | trunc, punch, collapse | keep | gate, gatepunch | uncond, nohold (controls) |
+|---|---|---|---|---|
+| #370 (conditional tags, no home write) | PASS both; trunc/punch: every conditional tag held (`32768 of 32768`, `16384 of 16384`) | PASS both, 0 blocks written home, `0 of 1024 conditional revoke tags hold` | PASS both: `replaying tid 2..4 (tail 2, newest 4)`, `0 of 8192 ... hold` | FAIL both, as they must: the last 32 MiB 0xA0 |
+| #371 | the same; `truncr` PASS both, `16384 of 16384` (on #370 ext4's oopsed: the second placeholder revoke block had no prealloc) | PASS both | PASS both | FAIL both, as they must |
 
 ### Range operations: collapse, insert, zero, unaligned punch and truncate
 
@@ -1189,7 +1222,11 @@ must keep its twenty 128 KiB writes -- taudocs/bug.md #57; INCONCLUSIVE unless a
 freed segment was really reused), `unlink` (file 1's twenty 128 KiB writes, never
 checkpointed, then unlinked; file 2, written before without tau, is rewritten
 through tau and publishes a segment while the host has not logged the unlink:
-wherever file 1 comes back it must hold all twenty -- kernel plan.md §12.3). The control (`RECORD_FUA_ONLY=1`, kernel knob
+wherever file 1 comes back it must hold all twenty -- kernel plan.md §12.3), `truncate`
+(file 1's twenty 128 KiB writes, the first ten aged out and checkpointed, then
+truncated to ten; a background commit of a rewrite of its block 0 moves its
+tail, and file 2 is rewritten through tau as in `unlink`: file 1 must hold all
+twenty or exactly the first ten -- kernel plan.md §12.4). The control (`RECORD_FUA_ONLY=1`, kernel knob
 `tau_record_fua_only`) sends every record FUA without PREFLUSH -- durable
 before its data -- and `overwrite` must FAIL. A second control
 (`SEGMAP_FUA_ONLY=1`, `tau_segmap_fua_only`) writes the segment map FUA without
@@ -1200,6 +1237,9 @@ segment after a bare flush, the map not written, as before #349, and `reuse`
 must FAIL in single-drop states (#348's `TAIL_UNFLUSHED` control went with
 #345's record without a flush). A fourth (`DEAD_NOGATE=1`, `tau_dead_nogate`)
 gives an unlinked file's segments back at its eviction, and `unlink` must FAIL.
+Two more run `truncate` with `FREE_UNCOND=1` (`tau_free_uncond`: the truncate's
+revoke tags apply whatever the disk says) and `FREE_NOHOLD=1` (`tau_free_nohold`:
+its txs leave the checkpoint list before the host has the truncate); both must FAIL.
 `FO_KEEP=1` keeps the log in the guest's
 `/dev/shm` for a look at the entries a failure names. Needs `drivers/md/dm-log-writes.ko`
 from the kernel tree (`make drivers/md/dm-log-writes.ko`); the host script
@@ -1219,6 +1259,9 @@ copies it in.
 | #349, control: reuse without the map write | FAIL: file 1's first write holds file 2's data | FAIL, the same |
 | #369, unlink (24 rewrites) | PASS: 173 states, 1082 single-drop | PASS: 178 states, 1186 single-drop |
 | #369, control: dead segments back at the eviction | FAIL 79 of 173, single-drop 408 of 1082: file 1 back, all twenty writes wrong | FAIL 79 of 176, single-drop 426 of 1182 |
+| #371, truncate (24 rewrites) | PASS: 177 states, 1408 single-drop | PASS: 182 states, 1509 single-drop |
+| #371, control: tags unconditional | FAIL 79 of 177, single-drop 218 of 1408: file 1 at twenty writes, the last ten wrong | FAIL 4 of 182, 7 of 1509 (ext4 at its default `commit=5` has the truncate on disk within seconds) |
+| #371, control: txs not held | FAIL 79 of 175, single-drop 409 of 1408 | FAIL 2 of 182, 5 of 1509 |
 
 ### One fsync, request by request
 

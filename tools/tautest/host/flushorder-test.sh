@@ -2,11 +2,12 @@
 # Flush order (taudocs/plan.md §10): every crash state a volatile write cache
 # can leave, rebuilt from a dm-log-writes log and recovered (guest/flushorder.sh).
 #   usage: flushorder-test.sh [xfs|ext4|both] [cases, comma list] [fsyncs]
-# cases: append falloc subappend overwrite reuse unlink (default: all).  CONTROL=0
-# skips the control runs (records FUA without PREFLUSH, and the segment map FUA
-# without PREFLUSH: overwrite must FAIL in both; a freed segment reused while the
-# disk map still names it: reuse must FAIL; an unlinked file's segments given back
-# before the host has the unlink: unlink must FAIL).
+# cases: append falloc subappend overwrite reuse unlink truncate (default: all).
+# CONTROL=0 skips the control runs (records FUA without PREFLUSH, and the segment
+# map FUA without PREFLUSH: overwrite must FAIL in both; a freed segment reused
+# while the disk map still names it: reuse must FAIL; an unlinked file's segments
+# given back before the host has the unlink: unlink must FAIL; a truncate's revoke
+# tags unconditional, or its txs not held for the host: truncate must FAIL).
 # Loop devices on the guest's /dev/shm: no real disk is written.
 
 set -u
@@ -14,7 +15,7 @@ cd "$(dirname "$0")" || exit 1
 . ./vm.sh
 
 FSLIST=${1:-both}
-CASES=${2:-append,falloc,subappend,overwrite,reuse,unlink}
+CASES=${2:-append,falloc,subappend,overwrite,reuse,unlink,truncate}
 N=${3:-24}
 [ "$FSLIST" = both ] && FSLIST="xfs ext4"
 CASES=${CASES//,/ }
@@ -69,6 +70,15 @@ if [ "${CONTROL:-1}" = 1 ]; then
 		*"RESULT: FAIL"*) summary+="$fs control (dead segments back at once, unlink): FAIL, as it must\n" ;;
 		*) summary+="$fs unlink control: did not fail -- the unlink case does not see the gate\n"; rc=1 ;;
 		esac
+		for knob in FREE_UNCOND FREE_NOHOLD; do
+			echo; echo "############ $fs control: truncate with $knob ############"
+			out=$(vm_ssh "$knob=1 ~/tautest/guest/flushorder.sh $fs truncate $N" 2>&1)
+			echo "$out"
+			case "$out" in
+			*"RESULT: FAIL"*) summary+="$fs control ($knob, truncate): FAIL, as it must\n" ;;
+			*) summary+="$fs truncate control $knob: did not fail -- the truncate case does not see it\n"; rc=1 ;;
+			esac
+		done
 	done
 fi
 vm_kill
