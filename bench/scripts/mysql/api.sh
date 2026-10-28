@@ -20,6 +20,7 @@ MY_LOG_SPIN_CPU_PCT_HWM=0
 # innodb_numa_interleave stays at its 8.4 default (ON: the buffer pool is spread
 # over both NUMA nodes). It exists only in a build WITH_NUMA=ON (install_mysql.sh).
 MY_EXTRA_ARGS=""           # extra server options, set by run_main.sh variants
+MY_PREWRITE_REDO=0         # 1: prewrite_spare_redo after the start (run_main.sh VARIANT=ssd990)
 
 wait_for_sock () {
   local path="$1" tries="${2:-60}"
@@ -29,6 +30,41 @@ wait_for_sock () {
   done
   echo "Socket $path not found (timeout)" >&2
   return 1
+}
+
+# mysqld recreates its spare redo files (#innodb_redo/#ib_redoN_tmp) at every
+# start with fallocate(FALLOC_FL_ZERO_RANGE), i.e. as unwritten extents. Until
+# each has been written once (about innodb_redo_log_capacity of redo), every redo
+# write converts extents and every redo fdatasync also commits the file system
+# journal: on the 990 PRO 4TB, XFS runs 7-8x and ext4 2x slower, and a slow
+# configuration stays in that phase for hours (2026-10-28; diag_mysql_* in
+# results/libra09/sysbench). Once mysqld has created them and before any load,
+# overwrite the spares with zeros (their content) with O_DIRECT, as in a server
+# that has run for a while. XFS and ext4 only: on ZFS mysqld writes the zeros.
+prewrite_spare_redo() {  # <redo dir>
+  local dir="$1" fst list prev="" f sz t0 i n=0
+  fst=$(stat -f -c %T "$dir")
+  if [[ "$fst" != xfs && "$fst" != ext2/ext3 ]]; then
+    echo "[*] spare redo pre-write skipped ($fst)"
+    return 0
+  fi
+  sleep 20   # the spares appear shortly after the socket; then wait for a stable listing
+  for (( i = 0; i < 12; i++ )); do
+    list=$(ls -i "$dir" | sort)
+    [[ "$list" == "$prev" && "$list" == *_tmp* ]] && break
+    prev=$list
+    sleep 5
+  done
+  t0=$(date +%s)
+  for f in "$dir"/*_tmp; do
+    sz=$(stat -c %s "$f")
+    (( sz % 1048576 == 0 )) || { echo "❌ $f: size $sz is not a multiple of 1 MiB"; return 1; }
+    sudo dd if=/dev/zero of="$f" bs=1M count=$(( sz / 1048576 )) oflag=direct conv=notrunc,fsync \
+      status=none || return 1
+    n=$(( n + 1 ))
+  done
+  [[ "$(ls -i "$dir" | sort)" == "$list" ]] || { echo "❌ the redo files changed during the pre-write"; return 1; }
+  echo "[*] pre-wrote $n spare redo files in $(( $(date +%s) - t0 )) s"
 }
 
 # Start mysqld in the background with the fixed settings; sets MYSQLD_PID.
@@ -52,7 +88,12 @@ start_mysqld() {
       --innodb_log_spin_cpu_pct_hwm=$MY_LOG_SPIN_CPU_PCT_HWM \
       "${extra[@]}" &
   MYSQLD_PID=$!
-  wait_for_sock "$sock" 120
+  wait_for_sock "$sock" 120 || return 1
+  if [[ "$MY_PREWRITE_REDO" == 1 ]]; then
+    local redo_dir=$datadir
+    [[ " $MY_EXTRA_ARGS " =~ \ --innodb_log_group_home_dir=([^ ]+) ]] && redo_dir=${BASH_REMATCH[1]}
+    prewrite_spare_redo "$redo_dir/#innodb_redo"
+  fi
 }
 
 # Doublewrite (the DWB cost), redo and data write volume, one line.
