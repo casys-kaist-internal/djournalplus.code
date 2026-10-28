@@ -18,6 +18,10 @@
 #   falloc     8 KiB pages into a fallocate'd file (conversions)
 #   subappend  100 B appends inside the last block (size-only commits)
 #   overwrite  8 KiB pages rewritten in place (no host log force)
+#   cpappend   append, journaled (tau_home 0), with a pause after each fsync: the
+#              previous tx is checkpointed before the next commit, whose record
+#              moves the tail past its home writes (bug.md #56)
+#   cpsub      subappend with the same pause
 #   reuse      2 MiB segments: file 1 fills its first segment and goes idle, its
 #              txs age out and are checkpointed, and file 2 is given that segment
 #              (32 KiB appends); file 1 must keep all twenty 128 KiB writes
@@ -42,14 +46,19 @@
 # DEAD_NOGATE=1 (tau_dead_nogate: an unlinked file's segments given back at the
 # eviction) must FAIL in unlink.  FREE_UNCOND=1 (tau_free_uncond: the truncate's
 # revoke tags unconditional) and FREE_NOHOLD=1 (tau_free_nohold: its txs not held
-# for the host) must FAIL in truncate.
+# for the host) must FAIL in truncate.  NOFLUSH_OLD_EPOCH=1
+# (tau_noflush_old_epoch: a record without a flush keeps the allocation epoch,
+# not the host tx running at the record) and GATE_TAIL=1 (tau_gate_tail:
+# recovery takes the tail of a record its gate refuses) must FAIL in cpsub;
+# GATE_FLOOR=1 (tau_gate_floor: a refused orphan commit sets a floor) must FAIL
+# in reuse.  The GATE_* knobs act on the recovery of the rebuilt disks.
 
 cd "$(dirname "$0")" || exit 1
 . ./common.sh
 
 FS=${1:-}; CASE=${2:-}; N=${3:-24}
 case "$FS" in ext4|xfs) ;; *) die "usage: $0 <ext4|xfs> <case> [fsyncs]" ;; esac
-case "$CASE" in append|falloc|subappend|overwrite|reuse|unlink|truncate) ;; *) die "unknown case '$CASE'" ;; esac
+case "$CASE" in append|falloc|subappend|overwrite|reuse|unlink|truncate|cpappend|cpsub) ;; *) die "unknown case '$CASE'" ;; esac
 W=/dev/shm/flushorder
 SIZE=${FO_SIZE:-4G}
 P=/sys/module/tau_journal/parameters
@@ -99,6 +108,13 @@ if [ -e $P/tau_free_uncond ]; then
 elif [ "$CASE" = truncate ]; then
 	die "no tau_free_uncond in this kernel"
 fi
+if [ -e $P/tau_noflush_old_epoch ]; then
+	echo "${NOFLUSH_OLD_EPOCH:-0}" | sudo tee $P/tau_noflush_old_epoch >/dev/null
+	echo "${NOFLUSH_NOMARK:-0}" | sudo tee $P/tau_noflush_nomark >/dev/null
+	echo 0 | sudo tee $P/tau_gate_tail $P/tau_gate_floor >/dev/null
+elif [ -n "${NOFLUSH_OLD_EPOCH:-}${NOFLUSH_NOMARK:-}${GATE_TAIL:-}${GATE_FLOOR:-}" ]; then
+	die "no tau_noflush_old_epoch in this kernel"
+fi
 # no discards, no background inode-table zeroing in the log
 export TAU_MKE2FS_OPTS="-E nodiscard,lazy_itable_init=0,lazy_journal_init=0"
 export TAU_MKFS_XFS_OPTS="-K"
@@ -116,16 +132,19 @@ if [ "$CASE" = unlink ] || [ "$CASE" = truncate ]; then
 	echo 0 | sudo tee $P/tau_cp_small_tx >/dev/null
 	echo 120 | sudo tee $P/tau_max_transaction_age >/dev/null
 fi
-case "$CASE" in reuse|unlink|truncate)	# file 1 journaled, not written home
+case "$CASE" in reuse|unlink|truncate|cpappend)	# file 1 journaled, not written home
 	home=$(cat $P/tau_home 2>/dev/null || echo 1); tau_home 0 ;;
 esac
 sudo sh -c "echo 0 > $P/tau_probe_seg_reuse_flush" 2>/dev/null
+sudo sh -c "echo 0 > $P/tau_probe_jwrite_record; echo 0 > $P/tau_probe_record_noflush" 2>/dev/null
 MNT_DEV=/dev/mapper/fo
 TAU_DEV=$MNT_DEV mkfs_mount "$FS"
 
 cat > /tmp/fo-work.py <<'EOF'
-import os, struct, subprocess, sys
+import os, struct, subprocess, sys, time
 path, case, n = sys.argv[1], sys.argv[2], int(sys.argv[3])
+gap = float(sys.argv[4]) if case in ('cpappend', 'cpsub') else 0
+case = {'cpappend': 'append', 'cpsub': 'subappend'}.get(case, case)
 def mark(name):
     subprocess.run(['dmsetup', 'message', 'fo', '0', 'mark', name], check=True)
 def page(k, v):
@@ -216,11 +235,15 @@ for k in range(1, n + 1):
         os.pwrite(fd, page(k, 1), (k - 1) * 8192)
     os.fsync(fd)
     mark('fsync-%d' % k)
+    if gap:
+        time.sleep(gap)		# checkpointed before the next commit
 mark('end')
 os.close(fd)
 EOF
-sudo python3 /tmp/fo-work.py "$F" "$CASE" "$N" || die "workload failed"
+sudo python3 /tmp/fo-work.py "$F" "$CASE" "$N" "${FO_GAP:-0.3}" || die "workload failed"
 reused=$(cat $P/tau_probe_seg_reuse_flush 2>/dev/null)
+records=$(cat $P/tau_probe_jwrite_record 2>/dev/null)
+noflush=$(cat $P/tau_probe_record_noflush 2>/dev/null)
 sudo umount "$TAU_MNT"
 sudo dmsetup remove fo || die "dmsetup remove"
 echo 0 | sudo tee $P/tau_record_fua_only >/dev/null
@@ -228,7 +251,8 @@ echo 0 | sudo tee $P/tau_record_fua_only >/dev/null
 [ -e $P/tau_reuse_flush_only ] && echo 0 | sudo tee $P/tau_reuse_flush_only >/dev/null
 [ -e $P/tau_dead_nogate ] && echo 0 | sudo tee $P/tau_dead_nogate >/dev/null
 [ -e $P/tau_free_uncond ] && echo 0 | sudo tee $P/tau_free_uncond $P/tau_free_nohold >/dev/null
-case "$CASE" in reuse|unlink|truncate) tau_home "$home" ;; esac
+[ -e $P/tau_noflush_old_epoch ] && echo 0 | sudo tee $P/tau_noflush_old_epoch $P/tau_noflush_nomark >/dev/null
+case "$CASE" in reuse|unlink|truncate|cpappend) tau_home "$home" ;; esac
 if [ "$CASE" = unlink ] || [ "$CASE" = truncate ]; then
 	echo "$small_tx" | sudo tee $P/tau_cp_small_tx >/dev/null
 	echo "$tx_age" | sudo tee $P/tau_max_transaction_age >/dev/null
@@ -243,7 +267,11 @@ if [ "$CASE" = reuse ]; then
 		exit 3
 	fi
 fi
-echo "== $FS $CASE: $N fsyncs logged${RECORD_FUA_ONLY:+ (control: records FUA only)}${SEGMAP_FUA_ONLY:+ (control: segment map FUA only)}${REUSE_FLUSH_ONLY:+ (control: reuse without the map write)}${DEAD_NOGATE:+ (control: dead segments back at once)}${FREE_UNCOND:+ (control: unconditional free tags)}${FREE_NOHOLD:+ (control: free not held)} =="
+echo "== $FS $CASE: $N fsyncs logged${RECORD_FUA_ONLY:+ (control: records FUA only)}${SEGMAP_FUA_ONLY:+ (control: segment map FUA only)}${REUSE_FLUSH_ONLY:+ (control: reuse without the map write)}${DEAD_NOGATE:+ (control: dead segments back at once)}${FREE_UNCOND:+ (control: unconditional free tags)}${FREE_NOHOLD:+ (control: free not held)}${NOFLUSH_OLD_EPOCH:+ (control: allocation epoch on records without a flush)}${NOFLUSH_NOMARK:+ (control: iclog not marked)}${GATE_TAIL:+ (control: recovery takes the tail of a refused record)}${GATE_FLOOR:+ (control: a refused orphan sets a floor)} =="
+echo "== records: ${records:-?}, of them without a flush: ${noflush:-?} =="
+# recovery-side controls: the mounts below recover the rebuilt disks
+[ -e $P/tau_gate_tail ] && echo "${GATE_TAIL:-0}" | sudo tee $P/tau_gate_tail >/dev/null
+[ -e $P/tau_gate_floor ] && echo "${GATE_FLOOR:-0}" | sudo tee $P/tau_gate_floor >/dev/null
 
 # check one rebuilt disk: mount it (tau recovery runs) and judge the file
 cat > /tmp/fo-check.sh <<EOF
@@ -260,6 +288,7 @@ chmod +x /tmp/fo-check.sh
 cat > /tmp/fo-judge.py <<'EOF'
 import struct, sys
 path, case, n = sys.argv[1], sys.argv[2], int(sys.argv[3])
+case = {'cpappend': 'append', 'cpsub': 'subappend'}.get(case, case)
 durable, f1done = (int(x) for x in sys.argv[4].split(':'))
 def page(k, v):
     return struct.pack('<II', k, v) * 1024
@@ -473,6 +502,7 @@ print("RESULT: %s" % ("PASS" if ok else "FAIL"))
 sys.exit(0 if ok else 1)
 EOF
 rc=$?
+[ -e $P/tau_gate_tail ] && echo 0 | sudo tee $P/tau_gate_tail $P/tau_gate_floor >/dev/null
 # FO_KEEP=1 keeps the log for a look at the entries a failure names
 [ "${FO_KEEP:-0}" = 1 ] && sudo cp --sparse=always "$W/log.img" /dev/shm/fo-keep-log.img
 cleanup

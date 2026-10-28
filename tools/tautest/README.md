@@ -1261,7 +1261,11 @@ write -- is checked as well. At every flush it also checks each state that
 lost one plain write of that flush's interval (single-drop: a volatile cache
 may lose any of them; `FO_DROP=0` skips these). Cases: `append`
 (allocating commits), `falloc` (conversions), `subappend` (size-only commits),
-`overwrite` (no host log force), `reuse` (2 MiB segments: file 1 fills its first
+`overwrite` (no host log force), `cpappend` and `cpsub` (append, journaled with
+`tau_home 0`, and subappend, each with a pause after every fsync: the previous
+tx is checkpointed before the next commit, whose record moves the tail past its
+home writes -- the shape of taudocs/bug.md #56; `FO_GAP`, default 0.3 s),
+`reuse` (2 MiB segments: file 1 fills its first
 segment and goes idle, its txs age out, file 2 is given that segment; file 1
 must keep its twenty 128 KiB writes -- taudocs/bug.md #57; INCONCLUSIVE unless a
 freed segment was really reused), `unlink` (file 1's twenty 128 KiB writes, never
@@ -1285,6 +1289,18 @@ gives an unlinked file's segments back at its eviction, and `unlink` must FAIL.
 Two more run `truncate` with `FREE_UNCOND=1` (`tau_free_uncond`: the truncate's
 revoke tags apply whatever the disk says) and `FREE_NOHOLD=1` (`tau_free_nohold`:
 its txs leave the checkpoint list before the host has the truncate); both must FAIL.
+From #376 (kernel taudocs/design.md §21.7: a record without a flush, its epoch
+the host tx running at the record, recovery counting only records its gate
+passes) three more: `NOFLUSH_OLD_EPOCH=1` (`tau_noflush_old_epoch`: a record
+without a flush keeps the allocation epoch, 0 for a size-only commit) and
+`GATE_TAIL=1` (`tau_gate_tail`: recovery takes the tail of a record its gate
+refuses) must FAIL in `cpsub`; `GATE_FLOOR=1` (`tau_gate_floor`: a refused orphan
+commit still sets a floor) must FAIL in `reuse`. The `GATE_*` knobs act on the
+recovery of the rebuilt disks, so they stay set through the checks.
+`NOFLUSH_NOMARK=1` (`tau_noflush_nomark`: XFS leaves the iclog unmarked) is not a
+default control: alone on the filesystem, the iclog a record waits for always
+starts the commit's own conversion checkpoint and XFS flushes it anyway. Each run
+prints how many records went without a flush (`== records: ... ==`).
 `FO_KEEP=1` keeps the log in the guest's
 `/dev/shm` for a look at the entries a failure names. Needs `drivers/md/dm-log-writes.ko`
 from the kernel tree (`make drivers/md/dm-log-writes.ko`); the host script
@@ -1307,6 +1323,11 @@ copies it in.
 | #371, truncate (24 rewrites) | PASS: 177 states, 1408 single-drop | PASS: 182 states, 1509 single-drop |
 | #371, control: tags unconditional | FAIL 79 of 177, single-drop 218 of 1408: file 1 at twenty writes, the last ten wrong | FAIL 4 of 182, 7 of 1509 (ext4 at its default `commit=5` has the truncate on disk within seconds) |
 | #371, control: txs not held | FAIL 79 of 175, single-drop 409 of 1408 | FAIL 2 of 182, 5 of 1509 |
+| #376, cpsub / append | PASS: prefix 86 / 90, single-drop 110 / 109; records without a flush 24 of 25, 23 of 24 | PASS: 89 / 95, 172 / 220; 24 of 25, 23 of 24 |
+| #376, controls: allocation epoch / refused tail (cpsub) | FAIL single-drop 23 of 110, both | FAIL 23 of 172, both |
+| #376, control: refused orphan sets a floor (reuse) | FAIL prefix 2 of 141, single-drop 1 of 1759: file 1's writes dropped | FAIL 2 of 148, 5 of 1942 |
+| #376, all nine cases (lockdep run and suite alike) | PASS: prefix 946, single-drop 4996 (reuse 1759); records without a flush 23/23/24/0/23/24/41/19/19 of 24/24/25/25/24/25/44/44/46 | PASS: prefix 982, single-drop 5808 (reuse 1942); the same counts |
+| #376, the nine controls | each FAILs, by the counts of the rows above | each FAILs, the same |
 
 ### One fsync, request by request
 
