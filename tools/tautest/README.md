@@ -51,7 +51,7 @@ tools/tautest/
 │   ├── split-verify.sh     check the write came back whole or not at all
 │   ├── trunc-reuse.sh      free a tau file's blocks, let another file reuse them (#20)
 │   ├── range.sh            collapse / insert / zero / unaligned punch+truncate / big fallocate
-│   ├── shortcopy.sh        a short copy into a block the page cache had not read (#24)
+│   ├── shortcopy.sh        a short copy into a block the page cache had not read (#24); efault (#69)
 │   ├── odirect.sh          O_DIRECT on a tjournal mount: plain file, tau file, refused open (#40)
 │   ├── seg-adopt.sh        journal segments a crash left mapped past a hole (#37)
 │   ├── mountinit.sh        journald before the mount backs a segment (#66); a mount that cannot (#67)
@@ -86,7 +86,7 @@ tools/tautest/
     ├── trunc-reuse-test.sh crash-check replay over blocks freed and reused (bug #20); a free lost in a power cut
     ├── home-test.sh        crash-check new blocks written home: a racing rewrite waits, an older copy stays out
     ├── range-test.sh       range operations keep the data, runtime and crash (#26 #36 #38 #39)
-    ├── shortcopy-test.sh   a faulting write leaves the rest of its block alone (#24)
+    ├── shortcopy-test.sh   a faulting write leaves the rest of its block alone (#24); an fsync after one that journaled nothing waits for the commit in flight (#69)
     ├── odirect-test.sh     O_DIRECT through tau for tau files, real for the rest (#40)
     ├── seg-adopt-test.sh   segments a crash left mapped come back to a full FS (#37)
     ├── mountinit-test.sh   journald waits for the mount's segments; a mount that cannot back one fails cleanly
@@ -800,13 +800,28 @@ and the write is retried for the 100 bytes that were copied. The block must
 read 100 bytes of 0x5A and then 0xC3, at once and after a power cut.
 
 ```sh
-tools/tautest/host/shortcopy-test.sh both
+tools/tautest/host/shortcopy-test.sh both            # both cases
+tools/tautest/host/shortcopy-test.sh both efault     # one: short | efault
 ```
 
 | kernel | XFS | ext4 |
 |---|---|---|
 | #307 (before) | PASS (the retry reads the block: iomap asks its own per-block uptodate bit, which the short copy did not set) | FAIL at runtime: the 3996 bytes after the copy read zero instead of 0xC3 |
 | #309 | PASS | PASS |
+
+`efault` (bug.md #69): a 64 KiB tau write with no fsync, whose background
+commit the delay injection holds for 8 s after pass 1 (`tau_inject_delay`
+bit 2, so it needs `CONFIG_TAU_PROBE_TORN`). During the delay a write from a
+`PROT_NONE` page fails with `EFAULT` before its first byte -- it journals
+nothing, but its tx is RUNNING -- and an fdatasync follows. The fdatasync must
+not return before the commit in flight: the run notes whether the delay had
+ended when it returned (runtime), and after a power cut the 64 KiB must be
+there (recovered).
+
+| kernel | XFS | ext4 |
+|---|---|---|
+| #377 (before) | FAIL: the fdatasync returned during the delay (EARLY); after the power cut the file was empty | FAIL: the same |
+| #378 | PASS | PASS |
 
 ### Multi-segment transactions: the segment chain on disk
 
