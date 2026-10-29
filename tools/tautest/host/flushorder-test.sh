@@ -2,8 +2,9 @@
 # Flush order (taudocs/plan.md §10): every crash state a volatile write cache
 # can leave, rebuilt from a dm-log-writes log and recovered (guest/flushorder.sh).
 #   usage: flushorder-test.sh [xfs|ext4|both] [cases, comma list] [fsyncs]
-# cases: append falloc subappend overwrite cpappend cpsub reuse unlink truncate
-# (default: all).
+# cases: append falloc subappend overwrite cpappend cpsub fsoverwrite fscpover
+# reuse unlink truncate (default: all; fs* sync with fsync(2), the rest with
+# fdatasync).
 # CONTROL=0 skips the control runs (records FUA without PREFLUSH, and the segment
 # map FUA without PREFLUSH: overwrite must FAIL in both; a freed segment reused
 # while the disk map still names it: reuse must FAIL; an unlinked file's segments
@@ -11,7 +12,8 @@
 # tags unconditional, or its txs not held for the host: truncate must FAIL; a
 # record without a flush that keeps the allocation epoch, or recovery that takes
 # the tail of a record its gate refuses: cpsub must FAIL; a refused orphan
-# commit that still sets a floor: reuse must FAIL).
+# commit that still sets a floor: reuse must FAIL; an fsync(2) commit that
+# leaves the inode out: fsoverwrite must FAIL).
 # Loop devices on the guest's /dev/shm: no real disk is written.
 
 set -u
@@ -19,7 +21,7 @@ cd "$(dirname "$0")" || exit 1
 . ./vm.sh
 
 FSLIST=${1:-both}
-CASES=${2:-append,falloc,subappend,overwrite,cpappend,cpsub,reuse,unlink,truncate}
+CASES=${2:-append,falloc,subappend,overwrite,cpappend,cpsub,fsoverwrite,fscpover,reuse,unlink,truncate}
 N=${3:-24}
 [ "$FSLIST" = both ] && FSLIST="xfs ext4"
 CASES=${CASES//,/ }
@@ -98,6 +100,13 @@ if [ "${CONTROL:-1}" = 1 ]; then
 		case "$out" in
 		*"RESULT: FAIL"*) summary+="$fs control (GATE_FLOOR, reuse): FAIL, as it must\n" ;;
 		*) summary+="$fs reuse control GATE_FLOOR: did not fail -- the reuse case does not see it\n"; rc=1 ;;
+		esac
+		echo; echo "############ $fs control: fsync(2) without the inode ############"
+		out=$(vm_ssh "FSYNC_NOINODE=1 ~/tautest/guest/flushorder.sh $fs fsoverwrite $N" 2>&1)
+		echo "$out"
+		case "$out" in
+		*"RESULT: FAIL"*) summary+="$fs control (FSYNC_NOINODE, fsoverwrite): FAIL, as it must\n" ;;
+		*) summary+="$fs fsoverwrite control FSYNC_NOINODE: did not fail -- the fsoverwrite case does not see it\n"; rc=1 ;;
 		esac
 	done
 fi

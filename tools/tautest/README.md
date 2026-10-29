@@ -1060,8 +1060,10 @@ wait until the host has the unlink on disk. Needs `CONFIG_TAU_PROBE_TORN`:
 - `gate`: the host told to commit late (ext4 `commit=600`, XFS
   `xfssyncd_centisecs`); A (64 MiB, tau, fsync'd, never checkpointed) unlinked
   with its segments held (`dead_held`); H, written without tau, rewritten through
-  tau -- a new segment and a map write, no host commit; power cut. A must come
-  back with its last fsync (INCONCLUSIVE if the host had the unlink after all).
+  tau and fdatasync'd -- a new segment and a map write, no host commit (an
+  fsync(2) logs H's inode from kernel #377, and the host commit takes the unlink
+  with it); power cut. A must come back with its last fsync (INCONCLUSIVE if the
+  host had the unlink after all).
 - `nogate`: the same with `tau_dead_nogate=1` (segments given back at the
   eviction) -- the control, which must fail: A back with its home never written.
 - `reuse`: A unlinked with its segments held, then B created and made tau under
@@ -1073,6 +1075,7 @@ wait until the host has the unlink on disk. Needs `CONFIG_TAU_PROBE_TORN`:
 |---|---|---|
 | #318 | live FAIL: the `tau_t` was freed only when background reclaim freed the `xfs_inode`, so the held count lagged by tens of seconds -- and an `xfs_inode` recycled before that kept the stale `i_tau` | -- |
 | #319 | live PASS (every file let go within 1 s, 203 released, 0 put back); crash PASS (B reused all 32768 of A's blocks, all 69680 blocks 0xBB after the power cut) | live PASS (same); crash PASS (32768 reused, all 141931 blocks 0xBB) |
+| #377 | gate, nogate INCONCLUSIVE while H was fsync'd: its fsync(2) logged the inode, and the host commit took A's unlink with it. H fdatasync'd: gate PASS (A back, all 16384 blocks 0xA1), nogate FAIL as it must (A all zeros) | the same |
 
 ### New blocks go home, not to the journal
 
@@ -1133,23 +1136,29 @@ both writes must come back whole.
 | #322 (control: redo taken out, `WEND_CONTROL=1`) | FAIL: 2 blocks old after the power cut, one per faulted write | FAIL: the same 2 blocks |
 | #321, #323 | PASS: 2 folios redone, both writes whole | PASS (same) |
 
-### Timestamps: lazytime, fsync at datasync level
+### Timestamps: lazytime; fsync(2) commits them, fdatasync does not
 
 `mtime-test.sh [xfs|ext4|both] [live|crash|all]` (bug.md #24). A tau file's
 timestamps change in memory and reach the disk with the inode's next write;
-its fsync forces size and blocks but not the timestamps.
+its fdatasync forces size and blocks but not the timestamps. Its fsync(2)
+forced them neither up to #376; from #377 it commits them too (kernel
+taudocs/plan.md §14.3.4: the commit logs the inode after its record, and the
+host commit that makes the record valid carries it).
 
 - `live`: a write moves mtime; a clean umount keeps it; 200 rewrites with an
-  fsync each cost fewer than 50 host journal commits (ext4, `/proc/fs/jbd2`) or
-  log forces (XFS, `stats`) -- one per fsync would mean the timestamps are
-  being forced again.
+  fdatasync each cost fewer than 50 host journal commits (ext4,
+  `/proc/fs/jbd2`) or log forces (XFS, `stats`) -- one per fdatasync would mean
+  the timestamps are being forced again; 200 rewrites with an fsync each cost
+  at least 200.
 - `crash`: S rewritten, fsync'd and `syncfs`'d; F rewritten and fsync'd only;
-  power cut. Both files' data must be whole, S's mtime the synced one, F's
-  mtime either the old or the new one -- never anything else.
+  D rewritten and fdatasync'd only; power cut. All three files' data must be
+  whole, S's mtime the synced one, F's the new one, D's either the old or the
+  new one -- never anything else.
 
 | kernel | XFS | ext4 |
 |---|---|---|
 | #321, #323 | live PASS: mtime moved, kept across umount, 0 log forces for 200 fsyncs; crash PASS: S kept by the sync, F the old mtime | live PASS: 1 jbd2 commit for 200 fsyncs; crash PASS (same) |
+| #377 | live PASS: 0 log forces for 200 fdatasyncs, 200 for 200 fsyncs; crash PASS: S kept by the sync, F kept by the fsync (the new mtime), D the old one | live PASS: 1 jbd2 commit for 200 fdatasyncs, 200 for 200 fsyncs; crash PASS (same) |
 
 Before #321 an ext4 tau file's mtime never moved, and every XFS tau fsync after
 a write forced the log for the timestamp.
@@ -1259,13 +1268,19 @@ an fsync returned for present (a mark follows each fsync). The replay goes on
 to the end of the log, so the unmount -- its last checkpoint and segment map
 write -- is checked as well. At every flush it also checks each state that
 lost one plain write of that flush's interval (single-drop: a volatile cache
-may lose any of them; `FO_DROP=0` skips these). Cases: `append`
+may lose any of them; `FO_DROP=0` skips these). Each write is followed by
+fdatasync, except in the `fs*` cases (fsync(2), below). Cases: `append`
 (allocating commits), `falloc` (conversions), `subappend` (size-only commits),
 `overwrite` (no host log force), `cpappend` and `cpsub` (append, journaled with
 `tau_home 0`, and subappend, each with a pause after every fsync: the previous
 tx is checkpointed before the next commit, whose record moves the tail past its
 home writes -- the shape of taudocs/bug.md #56; `FO_GAP`, default 0.3 s),
-`reuse` (2 MiB segments: file 1 fills its first
+`fsoverwrite` (overwrite with fsync(2), whose commit logs the inode after its
+record from #377 -- kernel taudocs/plan.md §14.3.4; before each fsync a utime
+logs the timestamps and another file's fsync commits them, so no host tx runs
+when the record goes out and only the inode logged after it makes the record
+valid), `fscpover` (overwrite with fsync(2) and the pause), `reuse`
+(2 MiB segments: file 1 fills its first
 segment and goes idle, its txs age out, file 2 is given that segment; file 1
 must keep its twenty 128 KiB writes -- taudocs/bug.md #57; INCONCLUSIVE unless a
 freed segment was really reused), `unlink` (file 1's twenty 128 KiB writes, never
@@ -1299,8 +1314,10 @@ commit still sets a floor) must FAIL in `reuse`. The `GATE_*` knobs act on the
 recovery of the rebuilt disks, so they stay set through the checks.
 `NOFLUSH_NOMARK=1` (`tau_noflush_nomark`: XFS leaves the iclog unmarked) is not a
 default control: alone on the filesystem, the iclog a record waits for always
-starts the commit's own conversion checkpoint and XFS flushes it anyway. Each run
-prints how many records went without a flush (`== records: ... ==`).
+starts the commit's own conversion checkpoint and XFS flushes it anyway. From
+#377 one more: `FSYNC_NOINODE=1` (`tau_fsync_noinode`: an fsync(2) commit leaves
+the inode out, its record still without a flush) must FAIL in `fsoverwrite`.
+Each run prints how many records went without a flush (`== records: ... ==`).
 `FO_KEEP=1` keeps the log in the guest's
 `/dev/shm` for a look at the entries a failure names. Needs `drivers/md/dm-log-writes.ko`
 from the kernel tree (`make drivers/md/dm-log-writes.ko`); the host script
@@ -1328,6 +1345,10 @@ copies it in.
 | #376, control: refused orphan sets a floor (reuse) | FAIL prefix 2 of 141, single-drop 1 of 1759: file 1's writes dropped | FAIL 2 of 148, 5 of 1942 |
 | #376, all nine cases (lockdep run and suite alike) | PASS: prefix 946, single-drop 4996 (reuse 1759); records without a flush 23/23/24/0/23/24/41/19/19 of 24/24/25/25/24/25/44/44/46 | PASS: prefix 982, single-drop 5808 (reuse 1942); the same counts |
 | #376, the nine controls | each FAILs, by the counts of the rows above | each FAILs, the same |
+| #377, fsoverwrite / fscpover (fsync(2)) | PASS: prefix 134 / 86, single-drop 182 / 158; records without a flush 24 of 25, both | PASS: 137 / 89, 294 / 220; 24 of 25, both |
+| #377, control: fsync(2) without the inode (fsoverwrite) | FAIL prefix 44 of 86, single-drop 105 of 182 (lockdep run: 40, 93): fsync'd writes missing in the states right after an fsync returned | FAIL 44 of 89, 143 of 246 (41, 136) |
+| #377, all eleven cases (lockdep run and suite alike) | PASS: prefix 1164, single-drop 5337 (lockdep run 5342); records without a flush as on #376, fsoverwrite and fscpover 24 of 25 | PASS: prefix 1208, single-drop 6320 (6326); the same counts |
+| #377, the ten controls | each FAILs | each FAILs |
 
 ### One fsync, request by request
 

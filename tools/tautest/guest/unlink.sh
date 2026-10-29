@@ -84,7 +84,8 @@ wait_held() {
 	return 1
 }
 
-# fill <path> <MiB> <byte>: a tau file in 4 MiB writes, then fsync
+# fill <path> <MiB> <byte> [datasync]: a tau file in 4 MiB writes, then fsync
+# (fdatasync with a nonzero datasync)
 fill() {
 	local i
 
@@ -92,7 +93,7 @@ fill() {
 		sudo "$TAUWRITE_NOFSYNC" "$1" $((4 * MB)) "$3" $((i * 4 * MB)) >/dev/null ||
 			die "write $1"
 	done
-	sudo "$TAUWRITE" "$1" 4096 "$3" 0 >/dev/null || die "fsync $1"
+	sudo "$TAUWRITE" "$1" 4096 "$3" 0 "${4:-0}" >/dev/null || die "fsync $1"
 }
 
 # physical blocks of <file> in [<first>, <end>) logical blocks, one per line
@@ -294,8 +295,9 @@ gate-write)
 	d=$(( $(probe dead_held) - d0 ))
 	echo "== A unlinked, the host not told to commit; segments held: $d =="
 	[ "$d" = $(( 1 - ${NOGATE:-0} )) ] || fail "held $d"
-	echo "== H rewritten through tau with 0xC2, fsync: a new segment, no host commit =="
-	fill "$H" 64 $((0xC2))
+	# fdatasync: an fsync(2) would force the host log, and the unlink with it
+	echo "== H rewritten through tau with 0xC2, fdatasync: a new segment, no host commit =="
+	fill "$H" 64 $((0xC2)) 1
 	[ $rc -eq 0 ] || exit $rc
 	echo WRITTEN
 	;;

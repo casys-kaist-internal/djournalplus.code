@@ -1,12 +1,13 @@
 #!/bin/bash
 # A tau file's timestamps are lazytime: a write moves them in memory, a clean
-# umount or a sync writes them, and fsync makes the data durable without a host
-# journal commit per call (#24).
+# umount, a sync or an fsync(2) writes them, and fdatasync makes the data
+# durable without a host journal commit per call (#24; fsync(2) at fsync level,
+# kernel taudocs/plan.md §14.3.4).
 # Layout: README.  usage: mtime.sh <xfs|ext4> live|write|verify
 cd ~/tautest/guest || exit 1
 . ./common.sh
 FS=$1; MODE=$2
-A=$TAU_MNT/a; S=$TAU_MNT/s; F=$TAU_MNT/f
+A=$TAU_MNT/a; S=$TAU_MNT/s; F=$TAU_MNT/f; D=$TAU_MNT/d
 REC=$HOME/mtime-rec.txt
 rc=0
 fail() { echo "  FAIL: $*"; rc=1; }
@@ -54,14 +55,24 @@ live)
 	m2=$(mt "$A")
 	[ "$m2" = "$m1" ] && echo "  kept" || fail "mtime after umount $m2, want $m1"
 
-	echo "== 200 x (rewrite + fsync): no host commit per fsync =="
+	what=$( [ "$FS" = ext4 ] && echo "journal commits" || echo "log forces")
+	echo "== 200 x (rewrite + fdatasync): no host commit per fdatasync =="
+	c0=$(hostcommits)
+	for i in $(seq 1 200); do
+		sudo "$TAUWRITE" "$A" 4096 $((i % 256)) 0 1 >/dev/null || die "rewrite $i"
+	done
+	c=$(( $(hostcommits) - c0 ))
+	echo "  $c host $what"
+	[ "$c" -lt 50 ] || fail "$c host commits for 200 fdatasyncs"
+
+	echo "== 200 x (rewrite + fsync): a host commit each =="
 	c0=$(hostcommits)
 	for i in $(seq 1 200); do
 		sudo "$TAUWRITE" "$A" 4096 $((i % 256)) 0 >/dev/null || die "rewrite $i"
 	done
 	c=$(( $(hostcommits) - c0 ))
-	echo "  $c host $( [ "$FS" = ext4 ] && echo "journal commits" || echo "log forces")"
-	[ "$c" -lt 50 ] || fail "$c host commits for 200 fsyncs"
+	echo "  $c host $what"
+	[ "$c" -ge 200 ] || fail "$c host commits for 200 fsyncs"
 
 	sudo umount "$TAU_MNT" || fail "umount"
 	[ "$(kernel_faults)" = "0" ] || { show_kernel_faults; fail "kernel fault"; }
@@ -72,34 +83,43 @@ write)
 	mkfs_mount "$FS"
 	sudo "$TAUWRITE" "$S" $((4 * MB)) $((0xC1)) >/dev/null || die "S"
 	sudo "$TAUWRITE" "$F" $((4 * MB)) $((0xD1)) >/dev/null || die "F"
+	sudo "$TAUWRITE" "$D" $((4 * MB)) $((0xE1)) >/dev/null || die "D"
 	sleep 1.1
 	echo "== S: rewrite, fsync, syncfs =="
 	sudo "$TAUWRITE" "$S" 4096 $((0xC2)) 0 >/dev/null || die "S rewrite"
 	sudo sync -f "$S" || die "syncfs"
 	ms=$(mt "$S")
 	fo=$(mt "$F")
+	dold=$(mt "$D")
 	sleep 1.1
 	echo "== F: rewrite, fsync only =="
 	sudo "$TAUWRITE" "$F" 4096 $((0xD2)) 0 >/dev/null || die "F rewrite"
 	fn=$(mt "$F")
-	echo "$ms $fo $fn" > "$REC"
+	echo "== D: rewrite, fdatasync only =="
+	sudo "$TAUWRITE" "$D" 4096 $((0xE2)) 0 1 >/dev/null || die "D rewrite"
+	dnew=$(mt "$D")
+	echo "$ms $fo $fn $dold $dnew" > "$REC"
 	sync -f "$REC"
 	echo WRITTEN
 	;;
 verify)
 	mount_tau "$FS"
-	read -r ms fo fn < "$REC" || die "no record"
+	read -r ms fo fn dold dnew < "$REC" || die "no record"
 	content "$S" 0xC2 0xC1 && echo "  S: data intact" || fail "S: data"
 	content "$F" 0xD2 0xD1 && echo "  F: data intact" || fail "F: data"
+	content "$D" 0xE2 0xE1 && echo "  D: data intact" || fail "D: data"
 	m=$(mt "$S")
 	[ "$m" = "$ms" ] && echo "  S: mtime kept by the sync" || fail "S: mtime $m, want $ms"
 	m=$(mt "$F")
-	if [ "$m" = "$fn" ]; then
-		echo "  F: mtime the new one (a host commit came first)"
-	elif [ "$m" = "$fo" ]; then
-		echo "  F: mtime the old one (lazytime, as documented)"
+	[ "$m" = "$fn" ] && echo "  F: mtime kept by the fsync" ||
+		fail "F: mtime $m, want $fn (before: $fo)"
+	m=$(mt "$D")
+	if [ "$m" = "$dnew" ]; then
+		echo "  D: mtime the new one (a host commit came first)"
+	elif [ "$m" = "$dold" ]; then
+		echo "  D: mtime the old one (lazytime, as documented)"
 	else
-		fail "F: mtime $m, neither $fo nor $fn"
+		fail "D: mtime $m, neither $dold nor $dnew"
 	fi
 	[ "$(kernel_faults)" = "0" ] || { show_kernel_faults; fail "kernel fault"; }
 	sudo umount "$TAU_MNT" || fail "umount"

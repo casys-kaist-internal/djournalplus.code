@@ -1,7 +1,8 @@
 #!/bin/bash
-# A tau file's timestamps are lazytime and fsync is datasync-level: mtime moves
-# on a write, survives a clean umount and a sync + power cut, and 200 fsyncs
-# cost no host journal commit each (#24).
+# A tau file's timestamps are lazytime; fsync(2) commits them, fdatasync does
+# not: mtime moves on a write, survives a clean umount and a sync or an fsync(2)
+# + power cut, 200 fdatasyncs cost no host journal commit each and 200 fsyncs one
+# each (#24; kernel taudocs/plan.md §14.3.4).
 #   usage: mtime-test.sh [xfs|ext4|both] [live|crash|all]
 # WARNING: runs mkfs on $TAU_DEV inside the guest.
 

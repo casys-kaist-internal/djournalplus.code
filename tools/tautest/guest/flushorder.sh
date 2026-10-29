@@ -12,9 +12,11 @@
 #     is never there without it
 #   - every write an fsync returned for is there (a mark after each fsync)
 #
-#   usage: flushorder.sh <ext4|xfs> <append|falloc|subappend|overwrite> [fsyncs]
+#   usage: flushorder.sh <ext4|xfs> <case> [fsyncs]
 #
-#   append     8 KiB pages appended, fsync each (allocating commits)
+# Each write is followed by fdatasync, except in the fs* cases: fsync(2), whose
+# commit logs the inode after the record (kernel taudocs/plan.md §14.3.4).
+#   append     8 KiB pages appended, fdatasync each (allocating commits)
 #   falloc     8 KiB pages into a fallocate'd file (conversions)
 #   subappend  100 B appends inside the last block (size-only commits)
 #   overwrite  8 KiB pages rewritten in place (no host log force)
@@ -22,6 +24,11 @@
 #              previous tx is checkpointed before the next commit, whose record
 #              moves the tail past its home writes (bug.md #56)
 #   cpsub      subappend with the same pause
+#   fsoverwrite  overwrite, fsync(2), the timestamps logged and committed first
+#              (utime, then another file's fsync): no host tx runs when the
+#              record goes out; only the inode logged after it carries its flush
+#   fscpover   overwrite, fsync(2), with the pause: the record without a flush
+#              moves the tail past the previous tx's home writes
 #   reuse      2 MiB segments: file 1 fills its first segment and goes idle, its
 #              txs age out and are checkpointed, and file 2 is given that segment
 #              (32 KiB appends); file 1 must keep all twenty 128 KiB writes
@@ -52,13 +59,15 @@
 # recovery takes the tail of a record its gate refuses) must FAIL in cpsub;
 # GATE_FLOOR=1 (tau_gate_floor: a refused orphan commit sets a floor) must FAIL
 # in reuse.  The GATE_* knobs act on the recovery of the rebuilt disks.
+# FSYNC_NOINODE=1 (tau_fsync_noinode: an fsync(2) commit leaves the inode out,
+# its record still without a flush) must FAIL in fsoverwrite.
 
 cd "$(dirname "$0")" || exit 1
 . ./common.sh
 
 FS=${1:-}; CASE=${2:-}; N=${3:-24}
 case "$FS" in ext4|xfs) ;; *) die "usage: $0 <ext4|xfs> <case> [fsyncs]" ;; esac
-case "$CASE" in append|falloc|subappend|overwrite|reuse|unlink|truncate|cpappend|cpsub) ;; *) die "unknown case '$CASE'" ;; esac
+case "$CASE" in append|falloc|subappend|overwrite|reuse|unlink|truncate|cpappend|cpsub|fsoverwrite|fscpover) ;; *) die "unknown case '$CASE'" ;; esac
 W=/dev/shm/flushorder
 SIZE=${FO_SIZE:-4G}
 P=/sys/module/tau_journal/parameters
@@ -115,6 +124,11 @@ if [ -e $P/tau_noflush_old_epoch ]; then
 elif [ -n "${NOFLUSH_OLD_EPOCH:-}${NOFLUSH_NOMARK:-}${GATE_TAIL:-}${GATE_FLOOR:-}" ]; then
 	die "no tau_noflush_old_epoch in this kernel"
 fi
+if [ -e $P/tau_fsync_noinode ]; then
+	echo "${FSYNC_NOINODE:-0}" | sudo tee $P/tau_fsync_noinode >/dev/null
+elif [ "${FSYNC_NOINODE:-0}" = 1 ]; then
+	die "no tau_fsync_noinode in this kernel"
+fi
 # no discards, no background inode-table zeroing in the log
 export TAU_MKE2FS_OPTS="-E nodiscard,lazy_itable_init=0,lazy_journal_init=0"
 export TAU_MKFS_XFS_OPTS="-K"
@@ -143,13 +157,18 @@ TAU_DEV=$MNT_DEV mkfs_mount "$FS"
 cat > /tmp/fo-work.py <<'EOF'
 import os, struct, subprocess, sys, time
 path, case, n = sys.argv[1], sys.argv[2], int(sys.argv[3])
-gap = float(sys.argv[4]) if case in ('cpappend', 'cpsub') else 0
-case = {'cpappend': 'append', 'cpsub': 'subappend'}.get(case, case)
+gap = float(sys.argv[4]) if case in ('cpappend', 'cpsub', 'fscpover') else 0
+sync = os.fsync if case.startswith('fs') else os.fdatasync
+pre = case == 'fsoverwrite'
+case = {'cpappend': 'append', 'cpsub': 'subappend', 'fsoverwrite': 'overwrite',
+        'fscpover': 'overwrite'}.get(case, case)
 def mark(name):
     subprocess.run(['dmsetup', 'message', 'fo', '0', 'mark', name], check=True)
 def page(k, v):
     return struct.pack('<II', k, v) * 1024
 fd = os.open(path, os.O_RDWR | os.O_CREAT | 0o40000000, 0o644)
+if pre:		# not tau: its fsync commits the host's running tx
+    pfd = os.open(path + '.plain', os.O_RDWR | os.O_CREAT, 0o644)
 if case == 'falloc':
     os.posix_fallocate(fd, 0, 32 * 8192)
 elif case == 'overwrite':
@@ -166,7 +185,7 @@ elif case in ('unlink', 'truncate'):
                 os.pwrite(fd2, struct.pack('<II', k, 0xE2) * 4096, (k - 1) * 32768)
         os.fsync(fd2)
         os.close(fd2)
-os.fsync(fd)
+sync(fd)
 os.sync()			# the setup is durable before the first check
 mark('ready')
 if case == 'reuse':
@@ -175,13 +194,13 @@ if case == 'reuse':
         return struct.pack('<II', k, tag) * (size // 8)
     for k in range(1, 21):	# 680 journal blocks: the first segment fills
         os.pwrite(fd, blk(k, 0xF1, 131072), (k - 1) * 131072)
-        os.fsync(fd)
+        sync(fd)
     mark('f1-done')
     time.sleep(15)		# aged out and checkpointed: the segment is free again
     fd2 = os.open(path + '2', os.O_RDWR | os.O_CREAT | 0o40000000, 0o644)
     for k in range(1, n + 1):
         os.pwrite(fd2, blk(k, 0xF2, 32768), (k - 1) * 32768)
-        os.fsync(fd2)
+        sync(fd2)
         mark('fsync-%d' % k)
     mark('end')
     sys.exit()
@@ -191,14 +210,14 @@ if case == 'unlink':
         return struct.pack('<II', k, tag) * (size // 8)
     for k in range(1, 21):
         os.pwrite(fd, blk(k, 0xF1, 131072), (k - 1) * 131072)
-        os.fsync(fd)
+        sync(fd)
     os.close(fd)
     mark('f1-done')
     os.unlink(path)		# evicted here: its segments wait for the host
     fd2 = os.open(path + '2', os.O_RDWR | 0o40000000)
     for k in range(1, n + 1):
         os.pwrite(fd2, blk(k, 0xF2, 32768), (k - 1) * 32768)
-        os.fsync(fd2)
+        sync(fd2)
         mark('fsync-%d' % k)
     mark('end')
     sys.exit()
@@ -214,7 +233,7 @@ if case == 'truncate':
         if k == 11:
             age(120)	# the last ten stay in the journal only
         os.pwrite(fd, blk(k, 0xF1, 131072), (k - 1) * 131072)
-        os.fsync(fd)
+        sync(fd)
     time.sleep(8)
     mark('f1-done')
     os.ftruncate(fd, 10 * 131072)
@@ -224,7 +243,7 @@ if case == 'truncate':
     fd2 = os.open(path + '2', os.O_RDWR | 0o40000000)
     for k in range(1, n + 1):
         os.pwrite(fd2, blk(k, 0xF2, 32768), (k - 1) * 32768)
-        os.fsync(fd2)
+        sync(fd2)
         mark('fsync-%d' % k)
     mark('end')
     sys.exit()
@@ -233,7 +252,11 @@ for k in range(1, n + 1):
         os.pwrite(fd, bytes([0x40 + k % 60]) * 100, 100 * k)
     else:
         os.pwrite(fd, page(k, 1), (k - 1) * 8192)
-    os.fsync(fd)
+    if pre:
+        os.utime(path)		# the timestamps logged now ...
+        os.pwrite(pfd, page(k, 2), 0)
+        os.fsync(pfd)		# ... and committed: no host tx at the record
+    sync(fd)
     mark('fsync-%d' % k)
     if gap:
         time.sleep(gap)		# checkpointed before the next commit
@@ -252,6 +275,7 @@ echo 0 | sudo tee $P/tau_record_fua_only >/dev/null
 [ -e $P/tau_dead_nogate ] && echo 0 | sudo tee $P/tau_dead_nogate >/dev/null
 [ -e $P/tau_free_uncond ] && echo 0 | sudo tee $P/tau_free_uncond $P/tau_free_nohold >/dev/null
 [ -e $P/tau_noflush_old_epoch ] && echo 0 | sudo tee $P/tau_noflush_old_epoch $P/tau_noflush_nomark >/dev/null
+[ -e $P/tau_fsync_noinode ] && echo 0 | sudo tee $P/tau_fsync_noinode >/dev/null
 case "$CASE" in reuse|unlink|truncate|cpappend) tau_home "$home" ;; esac
 if [ "$CASE" = unlink ] || [ "$CASE" = truncate ]; then
 	echo "$small_tx" | sudo tee $P/tau_cp_small_tx >/dev/null
@@ -267,7 +291,7 @@ if [ "$CASE" = reuse ]; then
 		exit 3
 	fi
 fi
-echo "== $FS $CASE: $N fsyncs logged${RECORD_FUA_ONLY:+ (control: records FUA only)}${SEGMAP_FUA_ONLY:+ (control: segment map FUA only)}${REUSE_FLUSH_ONLY:+ (control: reuse without the map write)}${DEAD_NOGATE:+ (control: dead segments back at once)}${FREE_UNCOND:+ (control: unconditional free tags)}${FREE_NOHOLD:+ (control: free not held)}${NOFLUSH_OLD_EPOCH:+ (control: allocation epoch on records without a flush)}${NOFLUSH_NOMARK:+ (control: iclog not marked)}${GATE_TAIL:+ (control: recovery takes the tail of a refused record)}${GATE_FLOOR:+ (control: a refused orphan sets a floor)} =="
+echo "== $FS $CASE: $N fsyncs logged${RECORD_FUA_ONLY:+ (control: records FUA only)}${SEGMAP_FUA_ONLY:+ (control: segment map FUA only)}${REUSE_FLUSH_ONLY:+ (control: reuse without the map write)}${DEAD_NOGATE:+ (control: dead segments back at once)}${FREE_UNCOND:+ (control: unconditional free tags)}${FREE_NOHOLD:+ (control: free not held)}${NOFLUSH_OLD_EPOCH:+ (control: allocation epoch on records without a flush)}${NOFLUSH_NOMARK:+ (control: iclog not marked)}${GATE_TAIL:+ (control: recovery takes the tail of a refused record)}${GATE_FLOOR:+ (control: a refused orphan sets a floor)}${FSYNC_NOINODE:+ (control: fsync(2) without the inode)} =="
 echo "== records: ${records:-?}, of them without a flush: ${noflush:-?} =="
 # recovery-side controls: the mounts below recover the rebuilt disks
 [ -e $P/tau_gate_tail ] && echo "${GATE_TAIL:-0}" | sudo tee $P/tau_gate_tail >/dev/null
@@ -288,7 +312,8 @@ chmod +x /tmp/fo-check.sh
 cat > /tmp/fo-judge.py <<'EOF'
 import struct, sys
 path, case, n = sys.argv[1], sys.argv[2], int(sys.argv[3])
-case = {'cpappend': 'append', 'cpsub': 'subappend'}.get(case, case)
+case = {'cpappend': 'append', 'cpsub': 'subappend', 'fsoverwrite': 'overwrite',
+        'fscpover': 'overwrite'}.get(case, case)
 durable, f1done = (int(x) for x in sys.argv[4].split(':'))
 def page(k, v):
     return struct.pack('<II', k, v) * 1024

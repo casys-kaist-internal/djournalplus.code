@@ -6,10 +6,11 @@
  * Every block written here is expected to survive a crash: after recovery the
  * file must read back as the exact pattern this wrote.
  *
- *   usage: tauwrite <path> <size> <seed> [offset]
+ *   usage: tauwrite <path> <size> <seed> [offset] [datasync]
  *
  *   seed is the byte value the region is filled with (0-255), so the expected
  *   content after recovery is simply <size> copies of <seed> at <offset>.
+ *   A nonzero datasync calls fdatasync instead of fsync.
  */
 #define _GNU_SOURCE
 #include <fcntl.h>
@@ -26,18 +27,20 @@ int main(int argc, char **argv)
 {
 	const char *path;
 	size_t size;
-	int seed, fd;
+	int seed, fd, datasync;
 	off_t off;
 	char *buf;
 
 	if (argc < 4) {
-		fprintf(stderr, "usage: %s <path> <size> <seed> [offset]\n", argv[0]);
+		fprintf(stderr, "usage: %s <path> <size> <seed> [offset] [datasync]\n",
+			argv[0]);
 		return 2;
 	}
 	path = argv[1];
 	size = strtoul(argv[2], NULL, 0);
 	seed = atoi(argv[3]);
 	off = argc > 4 ? strtoll(argv[4], NULL, 0) : 0;
+	datasync = argc > 5 && atoi(argv[5]);
 
 	fd = open(path, O_CREAT | O_RDWR | O_TAU_UNTORN, 0644);
 	if (fd < 0) {
@@ -55,8 +58,8 @@ int main(int argc, char **argv)
 		perror("pwrite");
 		return 1;
 	}
-	if (fsync(fd)) {
-		perror("fsync");
+	if (datasync ? fdatasync(fd) : fsync(fd)) {
+		perror(datasync ? "fdatasync" : "fsync");
 		return 1;
 	}
 	close(fd);
