@@ -132,6 +132,10 @@ mkdir -p "$(dirname "$PRE")"
 gcc -O2 -Wall -shared -fPIC -o "$PRE" "$HERE/tau_preload.c" -ldl
 STATDEV=$(tau_stat_devs)
 DEVT=$(( (0x$(stat -c %t "$DEVICE") << 20) | 0x$(stat -c %T "$DEVICE") ))   # dev_t as the jbd2 tracepoints give it
+if [[ "${M3_TRACE:-0}" == 1 ]]; then   # m3_phases.bt probes kfunc:xfs, which needs the module
+  command -v bpftrace >/dev/null || { echo "❌ no bpftrace"; exit 1; }
+  sudo modprobe xfs
+fi
 
 RESULT_DIR=$TAU_RESULTS/micro/$(date +%Y%m%d_%H%M%S)_fio_$TAG
 mkdir -p "$RESULT_DIR/runs"

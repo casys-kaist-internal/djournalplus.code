@@ -2,73 +2,190 @@
 /*
  * EVAL_PLAN M3: where one process's fsync time goes (run_fio.sh M3_TRACE=1
  * attaches it to atomicw after the ramp; ends with SIGINT). Needs kernel BTF.
+ * fentry/fexit (kfunc/kretfunc); kfunc:xfs needs the xfs module loaded
+ * (run_fio.sh loads it).
  *
  * $1  pid (atomicw)
  * $2  dev_t of the test device (major << 20 | minor), for the jbd2 tracepoint
  *
  * Per vfs_fsync_range of the process (fdatasync or fsync: @sync_ds counts the
- * fdatasyncs), the time nested in it, summed over all syncs:
- *   D   file_write_and_wait_range   data writeback and its wait
- *   JC  jbd2_log_wait_commit        ext4: waiting for the journal commit
- *   LF  xfs_log_force_seq           XFS: the log force
- *   FL  blkdev_issue_flush          the cache flush (none sent to a
- *                                   write-through device)
- * and the jbd2 commits of the device (all of them, not only the process's):
- * request delay, running, locked (waiting for handles), flushing (ordered
- * data), logging (journal blocks and the commit block) in jiffies (HZ 1000 on
- * the base kernel: ms), handles and blocks. Times in microseconds.
+ * fdatasyncs), its time split into exclusive phases (a nested phase's time is
+ * taken out of the enclosing one; data=journal waits for the commit inside
+ * the data writeback), summed over all syncs as @x[phase]:
+ *   0 other  the rest of the sync
+ *   1 D      file_write_and_wait_range: data writeback and its wait
+ *   2 JC     jbd2_log_wait_commit: ext4, waiting for the journal commit
+ *   3 LF     xfs_log_force_seq: XFS, the log force
+ *   4 FL     blkdev_issue_flush: the cache flush (none sent to a write-through
+ *            device)
+ * and @inc[phase] / @calls[phase] the inclusive time and the number of calls.
+ * Each sync's phases collect per thread and count only when the sync returns,
+ * and only syncs that start 2 s after BEGIN count (BEGIN fires before the
+ * other probes attach), so a sync cut by the start or the end of the window
+ * leaves nothing (the jbd2 commits count from then too). Two nesting levels
+ * are kept (deeper ones count to their parent). @sync_ns, @x and @inc in ns,
+ * one timestamp per probe. The jbd2 commits of the device (all, not only the
+ * process's): request delay, running, locked (waiting for handles), flushing
+ * (ordered data), logging (journal blocks and the commit block) in jiffies
+ * (HZ 1000 on the base kernel: ms), handles and blocks.
  */
 
-kprobe:vfs_fsync_range /pid == $1/
+kfunc:vmlinux:vfs_fsync_range /pid == $1 && nsecs > @gate/
 {
-	@s[tid] = nsecs;
-	@ds[tid] = arg3;
+	$now = nsecs;
+	@s[tid] = $now;
+	@ds[tid] = args.datasync;
+	@ph[tid] = 0;
+	@p0[tid] = $now;
+	@lvl[tid] = 0;
 }
 
-kretprobe:vfs_fsync_range /pid == $1 && @s[tid]/
+kretfunc:vmlinux:vfs_fsync_range /pid == $1 && @s[tid]/
 {
-	$us = (nsecs - @s[tid]) / 1000;
+	$now = nsecs;
+	@cx[tid, @ph[tid]] = @cx[tid, @ph[tid]] + $now - @p0[tid];
 	@sync_n = count();
-	@sync_us = sum($us);
+	@sync_ns = sum($now - @s[tid]);
 	@sync_ds = sum(@ds[tid] != 0 ? 1 : 0);
-	@sync_hist = hist($us);
+	@sync_us_hist = hist(($now - @s[tid]) / 1000);
+	@x[0] = sum(@cx[tid, 0]);
+	@x[1] = sum(@cx[tid, 1]);
+	@x[2] = sum(@cx[tid, 2]);
+	@x[3] = sum(@cx[tid, 3]);
+	@x[4] = sum(@cx[tid, 4]);
+	@inc[1] = sum(@ci[tid, 1]);
+	@inc[2] = sum(@ci[tid, 2]);
+	@inc[3] = sum(@ci[tid, 3]);
+	@inc[4] = sum(@ci[tid, 4]);
+	@calls[1] = sum(@cn[tid, 1]);
+	@calls[2] = sum(@cn[tid, 2]);
+	@calls[3] = sum(@cn[tid, 3]);
+	@calls[4] = sum(@cn[tid, 4]);
+	delete(@cx[tid, 0]); delete(@cx[tid, 1]); delete(@cx[tid, 2]); delete(@cx[tid, 3]); delete(@cx[tid, 4]);
+	delete(@ci[tid, 1]); delete(@ci[tid, 2]); delete(@ci[tid, 3]); delete(@ci[tid, 4]);
+	delete(@cn[tid, 1]); delete(@cn[tid, 2]); delete(@cn[tid, 3]); delete(@cn[tid, 4]);
 	delete(@s[tid]);
 	delete(@ds[tid]);
+	delete(@ph[tid]);
+	delete(@p0[tid]);
+	delete(@lvl[tid]);
+	delete(@o1[tid]);
+	delete(@o2[tid]);
 }
 
-kprobe:file_write_and_wait_range /pid == $1 && @s[tid]/ { @d0[tid] = nsecs; }
-kretprobe:file_write_and_wait_range /pid == $1 && @d0[tid]/
+/* A phase's entry closes the enclosing phase's segment and pushes it; its exit
+   closes its own segment and pops back. One pair per phase: this bpftrace
+   cannot test the probe name. */
+
+kfunc:vmlinux:file_write_and_wait_range /pid == $1 && @s[tid]/
 {
-	@D_n = count();
-	@D_us = sum((nsecs - @d0[tid]) / 1000);
-	delete(@d0[tid]);
+	$now = nsecs;
+	@t0[tid, 1] = $now;
+	if (@lvl[tid] < 2) {
+		@cx[tid, @ph[tid]] = @cx[tid, @ph[tid]] + $now - @p0[tid];
+		if (@lvl[tid] == 0) { @o1[tid] = @ph[tid]; } else { @o2[tid] = @ph[tid]; }
+		@ph[tid] = 1;
+		@p0[tid] = $now;
+	}
+	@lvl[tid] = @lvl[tid] + 1;
 }
 
-kprobe:jbd2_log_wait_commit /pid == $1 && @s[tid]/ { @j0[tid] = nsecs; }
-kretprobe:jbd2_log_wait_commit /pid == $1 && @j0[tid]/
+kretfunc:vmlinux:file_write_and_wait_range /pid == $1 && @s[tid] && @lvl[tid] > 0/
 {
-	@JC_n = count();
-	@JC_us = sum((nsecs - @j0[tid]) / 1000);
-	delete(@j0[tid]);
+	$now = nsecs;
+	@ci[tid, 1] = @ci[tid, 1] + $now - @t0[tid, 1];
+	@cn[tid, 1] = @cn[tid, 1] + 1;
+	delete(@t0[tid, 1]);
+	@lvl[tid] = @lvl[tid] - 1;
+	if (@lvl[tid] < 2) {
+		@cx[tid, @ph[tid]] = @cx[tid, @ph[tid]] + $now - @p0[tid];
+		@ph[tid] = @lvl[tid] == 0 ? @o1[tid] : @o2[tid];
+		@p0[tid] = $now;
+	}
 }
 
-kprobe:xfs_log_force_seq /pid == $1 && @s[tid]/ { @x0[tid] = nsecs; }
-kretprobe:xfs_log_force_seq /pid == $1 && @x0[tid]/
+kfunc:vmlinux:jbd2_log_wait_commit /pid == $1 && @s[tid]/
 {
-	@LF_n = count();
-	@LF_us = sum((nsecs - @x0[tid]) / 1000);
-	delete(@x0[tid]);
+	$now = nsecs;
+	@t0[tid, 2] = $now;
+	if (@lvl[tid] < 2) {
+		@cx[tid, @ph[tid]] = @cx[tid, @ph[tid]] + $now - @p0[tid];
+		if (@lvl[tid] == 0) { @o1[tid] = @ph[tid]; } else { @o2[tid] = @ph[tid]; }
+		@ph[tid] = 2;
+		@p0[tid] = $now;
+	}
+	@lvl[tid] = @lvl[tid] + 1;
 }
 
-kprobe:blkdev_issue_flush /pid == $1 && @s[tid]/ { @f0[tid] = nsecs; }
-kretprobe:blkdev_issue_flush /pid == $1 && @f0[tid]/
+kretfunc:vmlinux:jbd2_log_wait_commit /pid == $1 && @s[tid] && @lvl[tid] > 0/
 {
-	@FL_n = count();
-	@FL_us = sum((nsecs - @f0[tid]) / 1000);
-	delete(@f0[tid]);
+	$now = nsecs;
+	@ci[tid, 2] = @ci[tid, 2] + $now - @t0[tid, 2];
+	@cn[tid, 2] = @cn[tid, 2] + 1;
+	delete(@t0[tid, 2]);
+	@lvl[tid] = @lvl[tid] - 1;
+	if (@lvl[tid] < 2) {
+		@cx[tid, @ph[tid]] = @cx[tid, @ph[tid]] + $now - @p0[tid];
+		@ph[tid] = @lvl[tid] == 0 ? @o1[tid] : @o2[tid];
+		@p0[tid] = $now;
+	}
 }
 
-tracepoint:jbd2:jbd2_run_stats /args.dev == $2/
+kfunc:xfs:xfs_log_force_seq /pid == $1 && @s[tid]/
+{
+	$now = nsecs;
+	@t0[tid, 3] = $now;
+	if (@lvl[tid] < 2) {
+		@cx[tid, @ph[tid]] = @cx[tid, @ph[tid]] + $now - @p0[tid];
+		if (@lvl[tid] == 0) { @o1[tid] = @ph[tid]; } else { @o2[tid] = @ph[tid]; }
+		@ph[tid] = 3;
+		@p0[tid] = $now;
+	}
+	@lvl[tid] = @lvl[tid] + 1;
+}
+
+kretfunc:xfs:xfs_log_force_seq /pid == $1 && @s[tid] && @lvl[tid] > 0/
+{
+	$now = nsecs;
+	@ci[tid, 3] = @ci[tid, 3] + $now - @t0[tid, 3];
+	@cn[tid, 3] = @cn[tid, 3] + 1;
+	delete(@t0[tid, 3]);
+	@lvl[tid] = @lvl[tid] - 1;
+	if (@lvl[tid] < 2) {
+		@cx[tid, @ph[tid]] = @cx[tid, @ph[tid]] + $now - @p0[tid];
+		@ph[tid] = @lvl[tid] == 0 ? @o1[tid] : @o2[tid];
+		@p0[tid] = $now;
+	}
+}
+
+kfunc:vmlinux:blkdev_issue_flush /pid == $1 && @s[tid]/
+{
+	$now = nsecs;
+	@t0[tid, 4] = $now;
+	if (@lvl[tid] < 2) {
+		@cx[tid, @ph[tid]] = @cx[tid, @ph[tid]] + $now - @p0[tid];
+		if (@lvl[tid] == 0) { @o1[tid] = @ph[tid]; } else { @o2[tid] = @ph[tid]; }
+		@ph[tid] = 4;
+		@p0[tid] = $now;
+	}
+	@lvl[tid] = @lvl[tid] + 1;
+}
+
+kretfunc:vmlinux:blkdev_issue_flush /pid == $1 && @s[tid] && @lvl[tid] > 0/
+{
+	$now = nsecs;
+	@ci[tid, 4] = @ci[tid, 4] + $now - @t0[tid, 4];
+	@cn[tid, 4] = @cn[tid, 4] + 1;
+	delete(@t0[tid, 4]);
+	@lvl[tid] = @lvl[tid] - 1;
+	if (@lvl[tid] < 2) {
+		@cx[tid, @ph[tid]] = @cx[tid, @ph[tid]] + $now - @p0[tid];
+		@ph[tid] = @lvl[tid] == 0 ? @o1[tid] : @o2[tid];
+		@p0[tid] = $now;
+	}
+}
+
+tracepoint:jbd2:jbd2_run_stats /args.dev == $2 && nsecs > @gate/
 {
 	@jc_n = count();
 	@jc_request_delay = sum(args.request_delay);
@@ -83,16 +200,23 @@ tracepoint:jbd2:jbd2_run_stats /args.dev == $2/
 
 BEGIN
 {
-	printf("window_begin_ns %llu\n", nsecs);
+	@gate = nsecs + 2000000000;
+	printf("window_begin_ns %llu\n", @gate);
 }
 
 END
 {
 	printf("window_end_ns %llu\n", nsecs);
+	clear(@gate);
 	clear(@s);
 	clear(@ds);
-	clear(@d0);
-	clear(@j0);
-	clear(@x0);
-	clear(@f0);
+	clear(@ph);
+	clear(@p0);
+	clear(@lvl);
+	clear(@o1);
+	clear(@o2);
+	clear(@t0);
+	clear(@cx);
+	clear(@ci);
+	clear(@cn);
 }
