@@ -1420,6 +1420,11 @@ copies it in.
 | #377, control: fsync(2) without the inode (fsoverwrite) | FAIL prefix 44 of 86, single-drop 105 of 182 (lockdep run: 40, 93): fsync'd writes missing in the states right after an fsync returned | FAIL 44 of 89, 143 of 246 (41, 136) |
 | #377, all eleven cases (lockdep run and suite alike) | PASS: prefix 1164, single-drop 5337 (lockdep run 5342); records without a flush as on #376, fsoverwrite and fscpover 24 of 25 | PASS: prefix 1208, single-drop 6320 (6326); the same counts |
 | #377, the ten controls | each FAILs | each FAILs |
+| #378, mapsplit | FAIL 1 of 23 states: at the first map block's FUA the three fsync'd page writes before the big write are gone (taudocs/bug.md #70) | FAIL 1 of 34 |
+| #382 (segment map log), mapsplit / maplog | PASS: prefix 25 / 109 (maplog wrote the map blocks 3 times in the run, 33 commits waited for them); with `FO_DROP=1` single-drop 2486 / 376 too | PASS: 36 / 125 (4 times, 32), 2510 / 406 |
+| #382, controls: claims split (mapsplit) / base first (maplog) | FAIL 3 of 25 / 13 of 109 | FAIL 3 of 36 / 13 of 120 |
+| #382, all thirteen cases (lockdep run and suite alike) | PASS: prefix 1349, single-drop 5355 (lockdep run 5358) | PASS: prefix 1421, single-drop 6340 (6345) |
+| #382, the twelve controls | each FAILs; the refused orphan floor (reuse) by one prefix state now, no single-drop one (#377: 2 and 1) | each FAILs; the floor by 1 prefix state and 4 single-drop |
 
 ### One fsync, request by request
 
