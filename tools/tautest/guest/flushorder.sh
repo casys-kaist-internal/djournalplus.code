@@ -55,6 +55,18 @@
 #              blocks are written during the run, by a commit that finds the
 #              log full (the first half) and by journald (the second, with the
 #              pause); every fsync'd rewrite must stay (kernel plan.md §15)
+#   fsmapsplit mapsplit with the big write fsync(2)'d: its record goes without
+#              a flush -- the inode logged after it carries one -- and vouches
+#              for both claims
+#   mapappend  mapsplit, but the big write is a 4.3 MiB append past file 1's
+#              EOF, journaled (tau_home 0): an allocating commit, its record
+#              without a flush, its blocks converted only after it -- it whole
+#              or absent, the writes before it kept
+#   logappend  maplog, but each round four threads append a block to four new
+#              files, fdatasync each: allocating commits, records without a
+#              flush, a new segment each -- the map blocks are written while
+#              other commits' claims wait for their host commits; every
+#              fsync'd append must stay
 #   inoreuse   file 1's twenty 128 KiB writes, never checkpointed, then it is
 #              unlinked; file 2, created after it with its ino, is given its
 #              segment and writes ten 128 KiB pages the same way: file 1's txs
@@ -66,7 +78,9 @@
 # on /dev/shm only: no real disk is touched.  RECORD_FUA_ONLY=1 is the control
 # (tau_record_fua_only: records durable before their data) -- overwrite must
 # then FAIL.  SEGMAP_FUA_ONLY=1 (tau_segmap_fua_only: a freed segment map entry
-# durable before the home writes) must FAIL during the unmount.
+# durable before the home writes) must FAIL during the unmount, and in reuse
+# before it: the run writes no map blocks there, so a free block alone goes
+# out ahead of its txs' home writes (bug.md #53).
 # REUSE_FLUSH_ONLY=1 (tau_reuse_flush_only: a freed segment reused while the disk
 # map still names it) must FAIL in the single-drop states of reuse.  With the
 # segment map log the new owner's claim goes out with its first writes and hides
@@ -85,9 +99,10 @@
 # FSYNC_NOINODE=1 (tau_fsync_noinode: an fsync(2) commit leaves the inode out,
 # its record still without a flush) must FAIL in fsoverwrite.  MAPLOG_SPLIT=1
 # (tau_maplog_split: a commit's claims one per log block, its record vouching
-# for the last) must FAIL in mapsplit; MAPLOG_EARLY_BASE=1
-# (tau_maplog_early_base: the superblock's base moved before the map blocks are
-# written) must FAIL in maplog.  SERIAL_IGNORE=1 (tau_serial_ignore: recovery
+# for the last) must FAIL in mapsplit, fsmapsplit and mapappend;
+# MAPLOG_EARLY_BASE=1 (tau_maplog_early_base: the superblock's base moved before
+# the map blocks are written) must FAIL in maplog and logappend.
+# SERIAL_IGNORE=1 (tau_serial_ignore: recovery
 # does not tell apart the files a mount gave one ino) must FAIL in inoreuse; it
 # acts on the recovery of the rebuilt disks.
 
@@ -96,12 +111,17 @@ cd "$(dirname "$0")" || exit 1
 
 FS=${1:-}; CASE=${2:-}; N=${3:-24}
 case "$FS" in ext4|xfs) ;; *) die "usage: $0 <ext4|xfs> <case> [fsyncs]" ;; esac
-case "$CASE" in append|falloc|subappend|overwrite|reuse|unlink|truncate|cpappend|cpsub|fsoverwrite|fscpover|mapsplit|maplog|inoreuse) ;; *) die "unknown case '$CASE'" ;; esac
-[ "$CASE" = mapsplit ] && N=1
+case "$CASE" in append|falloc|subappend|overwrite|reuse|unlink|truncate|cpappend|cpsub|fsoverwrite|fscpover|mapsplit|fsmapsplit|mapappend|maplog|logappend|inoreuse) ;; *) die "unknown case '$CASE'" ;; esac
+case "$CASE" in	# a journal of two map blocks: one big write, or the log wrapping
+mapsplit|fsmapsplit|mapappend) GEOM=split ;;
+maplog|logappend) GEOM=log ;;
+*) GEOM= ;;
+esac
+[ "$GEOM" = split ] && N=1
 [ "$CASE" = inoreuse ] && N=10	# file 1 writes twenty
 W=/dev/shm/flushorder
 SIZE=${FO_SIZE:-4G}
-case "$CASE" in mapsplit|maplog) SIZE=${FO_SIZE:-8G} ;; esac	# ext4: a tenth of it is two map blocks
+[ -n "$GEOM" ] && SIZE=${FO_SIZE:-8G}	# ext4: a tenth of it is two map blocks
 DROP=${FO_DROP:-1}
 P=/sys/module/tau_journal/parameters
 F=$TAU_MNT/fo.dat
@@ -171,8 +191,8 @@ if [ -e $P/tau_maplog_len ]; then
 	echo "${MAPLOG_SPLIT:-0}" | sudo tee $P/tau_maplog_split >/dev/null
 	echo "${MAPLOG_EARLY_BASE:-0}" | sudo tee $P/tau_maplog_early_base >/dev/null
 	mllen=$(cat $P/tau_maplog_len)
-	[ "$CASE" = maplog ] && echo 8 | sudo tee $P/tau_maplog_len >/dev/null
-elif [ "$CASE" = maplog ] || [ -n "${MAPLOG_SPLIT:-}${MAPLOG_EARLY_BASE:-}" ]; then
+	[ "$GEOM" = log ] && echo 8 | sudo tee $P/tau_maplog_len >/dev/null
+elif [ "$GEOM" = log ] || [ -n "${MAPLOG_SPLIT:-}${MAPLOG_EARLY_BASE:-}" ]; then
 	die "no segment map log in this kernel"
 fi
 # no discards, no background inode-table zeroing in the log
@@ -187,26 +207,26 @@ if [ "$CASE" = reuse ]; then
 	echo 2 | sudo tee $P/tau_max_transaction_age >/dev/null
 	[ -e $P/tau_claim_flush ] && echo 1 | sudo tee $P/tau_claim_flush >/dev/null
 fi
-if [ "$CASE" = mapsplit ] || [ "$CASE" = maplog ]; then
+if [ -n "$GEOM" ]; then
 	# 512 segments of 2 MiB, two map blocks
 	TAU_MKE2FS_OPTS="$TAU_MKE2FS_OPTS,tau_segsize=2m"
 	TAU_MKFS_XFS_OPTS="$TAU_MKFS_XFS_OPTS -l tjsegsize=2m,tjmaxsize=1G"
 	export TAU_MOUNT_OPTS=tjournal,tjournal_size=1
 	DROP=${FO_DROP:-0}
 fi
-if [ "$CASE" = unlink ] || [ "$CASE" = truncate ] || [ "$CASE" = mapsplit ] || [ "$CASE" = maplog ] ||
-   [ "$CASE" = inoreuse ]; then
+if [ "$CASE" = unlink ] || [ "$CASE" = truncate ] || [ -n "$GEOM" ] || [ "$CASE" = inoreuse ]; then
 	# file 1's copies stay in the journal only: never checkpointed
 	small_tx=$(cat $P/tau_cp_small_tx); tx_age=$(cat $P/tau_max_transaction_age)
 	echo 0 | sudo tee $P/tau_cp_small_tx >/dev/null
 	echo 120 | sudo tee $P/tau_max_transaction_age >/dev/null
 fi
-case "$CASE" in reuse|unlink|truncate|cpappend|inoreuse)	# file 1 journaled, not written home
+case "$CASE" in reuse|unlink|truncate|cpappend|inoreuse|mapappend)	# file 1 journaled, not written home
 	home=$(cat $P/tau_home 2>/dev/null || echo 1); tau_home 0 ;;
 esac
 sudo sh -c "echo 0 > $P/tau_probe_seg_reuse_flush" 2>/dev/null
 sudo sh -c "echo 0 > $P/tau_probe_seg_reused" 2>/dev/null
 sudo sh -c "echo 0 > $P/tau_probe_maplog_wait" 2>/dev/null
+sudo sh -c "echo 0 > $P/tau_probe_maplog_snapshot" 2>/dev/null
 sudo sh -c "echo 0 > $P/tau_probe_jwrite_record; echo 0 > $P/tau_probe_record_noflush" 2>/dev/null
 MNT_DEV=/dev/mapper/fo
 TAU_DEV=$MNT_DEV mkfs_mount "$FS"
@@ -214,21 +234,31 @@ TAU_DEV=$MNT_DEV mkfs_mount "$FS"
 cat > /tmp/fo-work.py <<'EOF'
 import os, struct, subprocess, sys, time
 path, case, n = sys.argv[1], sys.argv[2], int(sys.argv[3])
-gap = float(sys.argv[4]) if case in ('cpappend', 'cpsub', 'fscpover', 'maplog') else 0
+gap = float(sys.argv[4]) if case in ('cpappend', 'cpsub', 'fscpover', 'maplog', 'logappend') else 0
 sync = os.fsync if case.startswith('fs') else os.fdatasync
 pre = case == 'fsoverwrite'
+grow = case == 'mapappend'
+fan = 4 if case == 'logappend' else 1	# files appended at once a round
 case = {'cpappend': 'append', 'cpsub': 'subappend', 'fsoverwrite': 'overwrite',
-        'fscpover': 'overwrite'}.get(case, case)
+        'fscpover': 'overwrite', 'fsmapsplit': 'mapsplit', 'mapappend': 'mapsplit',
+        'logappend': 'maplog'}.get(case, case)
 def mark(name):
     subprocess.run(['dmsetup', 'message', 'fo', '0', 'mark', name], check=True)
+def ready():		# the map blocks the setup wrote are not the run's
+    try:
+        with open('/sys/module/tau_journal/parameters/tau_probe_maplog_snapshot', 'w') as f:
+            f.write('0')
+    except OSError:
+        pass
+    mark('ready')
 def page(k, v):
     return struct.pack('<II', k, v) * 1024
 if case == 'mapsplit':
     def blk(k, tag):
         return struct.pack('<II', k, tag) * 512
-    # written without tau first: the run only overwrites, so no record waits on
-    # a host epoch
-    for name, n_, tag in [(path, 2048, 0xE0)] + [('%s.f%03d' % (path, i), 1, 0xE1) for i in range(1, 255)]:
+    # written without tau first: the setup only overwrites, so no record waits
+    # on a host epoch; the big write's does in fsmapsplit and mapappend
+    for name, n_, tag in [(path, 256 if grow else 2048, 0xE0)] + [('%s.f%03d' % (path, i), 1, 0xE1) for i in range(1, 255)]:
         with open(name, 'wb') as f:
             f.write(b''.join(blk(k, tag) for k in range(n_)))
             f.flush()
@@ -243,18 +273,19 @@ if case == 'mapsplit':
         os.fdatasync(g)
         os.close(g)
     os.sync()
-    mark('ready')
+    ready()
     # past the rest of entry 0 and one more segment: entries 255 and 256
     os.pwrite(fd, b''.join(blk(k, 0xB2) for k in range(256, 1356)), 256 * 4096)
-    os.fdatasync(fd)
+    sync(fd)
     mark('fsync-1')
     mark('end')
     os.close(fd)
     sys.exit()
 if case == 'maplog':
+    import threading
     def blk(k, tag):
         return struct.pack('<II', k, tag) * 512
-    names = ['%s.f%03d' % (path, i) for i in range(255 + n)]
+    names = ['%s.f%03d' % (path, i) for i in range(255 + n * fan)]
     for name in names:		# not tau first: no record waits on a host epoch
         with open(name, 'wb') as f:
             f.write(blk(0, 0xE1))
@@ -265,14 +296,31 @@ if case == 'maplog':
         os.pwrite(g, blk(0, tag), 0)
         os.fdatasync(g)
         os.close(g)
+    errs = []
+    def append(name, tag):	# allocating: its record goes without a flush
+        try:
+            g = os.open(name, os.O_RDWR | 0o40000000)
+            os.pwrite(g, blk(1, tag), 4096)
+            os.fdatasync(g)
+            os.close(g)
+        except OSError as e:
+            errs.append(e)
     for name in names[:255]:	# entries 0-254
         rewrite(name, 0xA2)
     os.sync()
-    with open('/sys/module/tau_journal/parameters/tau_probe_maplog_snapshot', 'w') as f:
-        f.write('0')
-    mark('ready')
+    ready()
     for k in range(1, n + 1):	# one new segment each, from entry 255
-        rewrite(names[254 + k], 0xA3)
+        if fan == 1:
+            rewrite(names[254 + k], 0xA3)
+        else:		# the commits overlap: a full log waits for their claims
+            ts = [threading.Thread(target=append, args=(names[255 + (k - 1) * fan + t], 0xA3))
+                  for t in range(fan)]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join()
+            if errs:
+                raise errs[0]
         mark('fsync-%d' % k)
         if k > n // 2:
             time.sleep(gap)	# journald's round writes the map blocks
@@ -299,7 +347,7 @@ elif case in ('unlink', 'truncate'):
         os.close(fd2)
 sync(fd)
 os.sync()			# the setup is durable before the first check
-mark('ready')
+ready()
 if case == 'reuse':
     import time
     def blk(k, tag, size):
@@ -397,7 +445,7 @@ mark('end')
 os.close(fd)
 EOF
 sudo python3 /tmp/fo-work.py "$F" "$CASE" "$N" "${FO_GAP:-0.3}" || die "workload failed"
-if [ "$CASE" = mapsplit ]; then
+if [ "$GEOM" = split ]; then
 	# the disk map after the big write: the tau superblock (jbd2 magic, a 2 MiB
 	# segment size), the two map blocks after it, and the map log's blocks past
 	# its base, if there is a log
@@ -463,13 +511,12 @@ if [ -e $P/tau_maplog_len ]; then
 	echo 0 | sudo tee $P/tau_maplog_split $P/tau_maplog_early_base >/dev/null
 	echo "$mllen" | sudo tee $P/tau_maplog_len >/dev/null
 fi
-case "$CASE" in reuse|unlink|truncate|cpappend|inoreuse) tau_home "$home" ;; esac
-if [ "$CASE" = unlink ] || [ "$CASE" = truncate ] || [ "$CASE" = mapsplit ] || [ "$CASE" = maplog ] ||
-   [ "$CASE" = inoreuse ]; then
+case "$CASE" in reuse|unlink|truncate|cpappend|inoreuse|mapappend) tau_home "$home" ;; esac
+if [ "$CASE" = unlink ] || [ "$CASE" = truncate ] || [ -n "$GEOM" ] || [ "$CASE" = inoreuse ]; then
 	echo "$small_tx" | sudo tee $P/tau_cp_small_tx >/dev/null
 	echo "$tx_age" | sudo tee $P/tau_max_transaction_age >/dev/null
 fi
-if [ "$CASE" = mapsplit ]; then
+if [ "$GEOM" = split ]; then
 	case "$split" in
 	*"255 file 1, 256 file 1"*) ;;
 	*)	echo "RESULT: INCONCLUSIVE (the big write did not take entries 255 and 256)"
@@ -477,6 +524,13 @@ if [ "$CASE" = mapsplit ]; then
 		exit 3 ;;
 	esac
 fi
+case "$CASE" in fsmapsplit|mapappend)
+	if [ "${noflush:-0}" -lt 1 ]; then
+		echo "RESULT: INCONCLUSIVE (the big write's record went with a flush)"
+		cleanup
+		exit 3
+	fi ;;
+esac
 if [ "$CASE" = inoreuse ]; then
 	read -r ino1 ino2 < /tmp/fo-inoreuse
 	echo "== inoreuse: file 1 was ino $ino1, file 2 is ino $ino2 =="
@@ -486,10 +540,15 @@ if [ "$CASE" = inoreuse ]; then
 		exit 3
 	fi
 fi
-if [ "$CASE" = maplog ]; then
-	echo "== maplog: map blocks written in the run: ${snaps:-?}, commits that waited for them: ${mlwait:-?} =="
+if [ "$GEOM" = log ]; then
+	echo "== $CASE: map blocks written in the run: ${snaps:-?}, commits that waited for them: ${mlwait:-?} =="
 	if [ "${snaps:-0}" -lt 2 ]; then
 		echo "RESULT: INCONCLUSIVE (the run wrote the map blocks fewer than twice)"
+		cleanup
+		exit 3
+	fi
+	if [ "$CASE" = logappend ] && [ "${noflush:-0}" -lt $((N * 4)) ]; then
+		echo "RESULT: INCONCLUSIVE (${noflush:-?} records without a flush, the run's appends $((N * 4)))"
 		cleanup
 		exit 3
 	fi
@@ -497,7 +556,7 @@ fi
 if [ "$CASE" = reuse ]; then
 	echo "$small_tx" | sudo tee $P/tau_cp_small_tx >/dev/null
 	echo "$tx_age" | sudo tee $P/tau_max_transaction_age >/dev/null
-	echo "== reuse: freed segments given out again: ${reused:-?}, of them waiting for their free: ${reuse_wait:-?} =="
+	echo "== reuse: freed segments given out again: ${reused:-?}, of them waiting for their free: ${reuse_wait:-?}, map blocks written in the run: ${snaps:-?} =="
 	if [ "${reused:-0}" = 0 ]; then
 		echo "RESULT: INCONCLUSIVE (no freed segment was reused)"
 		cleanup
@@ -520,7 +579,7 @@ if ! mount -t $FS -o "${TAU_MOUNT_OPTS:-tjournal}" \$dev "$TAU_MNT" 2>/dev/null;
 	losetup -d \$dev; echo "MOUNT-FAILED"; exit 0
 fi
 python3 /tmp/fo-judge.py "$F" "$CASE" "$N" "\$1"
-[ "$CASE" = mapsplit ] && dmesg | tail -n +\$((n0 + 1)) |
+[ "$GEOM" = split ] && dmesg | tail -n +\$((n0 + 1)) |
 	grep -m3 -E 'orphan commit|not in the journal|checkpointed through' | sed 's/^/    /'
 umount "$TAU_MNT"; losetup -d \$dev
 EOF
@@ -529,8 +588,11 @@ chmod +x /tmp/fo-check.sh
 cat > /tmp/fo-judge.py <<'EOF'
 import struct, sys
 path, case, n = sys.argv[1], sys.argv[2], int(sys.argv[3])
+grow = case == 'mapappend'
+fan = 4 if case == 'logappend' else 1
 case = {'cpappend': 'append', 'cpsub': 'subappend', 'fsoverwrite': 'overwrite',
-        'fscpover': 'overwrite'}.get(case, case)
+        'fscpover': 'overwrite', 'fsmapsplit': 'mapsplit', 'mapappend': 'mapsplit',
+        'logappend': 'maplog'}.get(case, case)
 durable, f1done = (int(x) for x in sys.argv[4].split(':'))
 def page(k, v):
     return struct.pack('<II', k, v) * 1024
@@ -541,19 +603,21 @@ if case == 'mapsplit':
         d = open(path, 'rb').read()
     except FileNotFoundError:
         print("BAD file 1 missing"); sys.exit()
-    if len(d) != 2048 * 4096:
+    nb = len(d) // 4096		# mapappend: the append there or not
+    if len(d) % 4096 or nb not in ((256, 1356) if grow else (2048,)):
         print("BAD file 1: size %d" % len(d)); sys.exit()
     b = lambda k: d[k * 4096:(k + 1) * 4096]
+    big = range(256, min(nb, 1356))
     lost = [k for k in range(3) if b(k) != blk(k, 0xA1)]
-    new = sum(b(k) == blk(k, 0xB2) for k in range(256, 1356))
-    old = sum(b(k) == blk(k, 0xE0) for k in range(256, 1356))
-    rest = [k for k in list(range(3, 256)) + list(range(1356, 2048)) if b(k) != blk(k, 0xE0)]
+    new = sum(b(k) == blk(k, 0xB2) for k in big)
+    old = 0 if grow else sum(b(k) == blk(k, 0xE0) for k in big)
+    rest = [k for k in list(range(3, 256)) + list(range(1356, nb)) if b(k) != blk(k, 0xE0)]
     small = [i for i in range(1, 255)
              if open('%s.f%03d' % (path, i), 'rb').read() != blk(0, 0xA2)]
     if lost:
         print("BAD file 1: the fsync'd page writes %s before the big write are gone" % lost)
-    elif new + old != 1100 or (new and old):
-        print("BAD the big write torn: %d of 1100 blocks new, %d old" % (new, old))
+    elif new + old != len(big) or (new and old):
+        print("BAD the big write torn: %d of %d blocks new, %d old" % (new, len(big), old))
     elif durable and not new:
         print("BAD the big write's fsync returned and it is not there")
     elif rest or small:
@@ -569,24 +633,29 @@ if case == 'maplog':
             return open('%s.f%03d' % (path, i), 'rb').read()
         except FileNotFoundError:
             return b''
+    # logappend: a block appended to each of fan files a round
+    new = blk(0, 0xE1) + blk(1, 0xA3) if fan > 1 else blk(0, 0xA3)
+    what = 'appends' if fan > 1 else 'rewrites'
     before = [i for i in range(255) if read(i) != blk(0, 0xA2)]
     m, wrong, lost = 0, [], []
     for k in range(1, n + 1):
-        d = read(254 + k)
-        if d == blk(0, 0xA3):
-            m += 1
-        elif d != blk(0, 0xE1):
-            wrong.append(k)
-        elif k <= durable:
-            lost.append(k)
+        for t in range(fan):
+            i = 255 + (k - 1) * fan + t
+            d = read(i)
+            if d == new:
+                m += 1
+            elif d != blk(0, 0xE1):
+                wrong.append(i)
+            elif k <= durable:
+                lost.append(i)
     if before:
         print("BAD %d of the 255 rewrites before the run gone: files %s" % (len(before), before[:8]))
     elif wrong:
-        print("BAD rewrites %s neither old nor new" % wrong[:8])
+        print("BAD %s to files %s neither old nor new" % (what, wrong[:8]))
     elif lost:
-        print("BAD fsync'd rewrites %s gone (durable %d)" % (lost[:8], durable))
+        print("BAD fsync'd %s to files %s gone (durable %d)" % (what, lost[:8], durable))
     else:
-        print("OK %d of %d rewrites there (durable %d)" % (m, n, durable))
+        print("OK %d of %d %s there (durable %d)" % (m, n * fan, what, durable))
     sys.exit()
 if case == 'reuse':
     def blk(k, tag, size):
@@ -761,6 +830,7 @@ rf = os.open(replay, os.O_RDWR)
 pos, state, durable, checks, bad, seen = secsz, None, 0, 0, 0, {}
 f1done = 0
 phase = {'run': 0, 'umount': 0}
+badat = {'run': 0, 'umount': 0}
 DROP = sys.argv[4] == '1'
 pending = []	# plain writes since the last flush: (entry, offset, bytes before it)
 dchecks, dbad, dseen = 0, 0, {}
@@ -785,6 +855,7 @@ for i in range(nr):
             dseen[verdict] = dseen.get(verdict, 0) + 1
             if verdict != 'OK':
                 dbad += 1
+                badat[state] += 1
                 if dbad <= 5:
                     print("  flush at entry %d without entry %d (%s), %d fsyncs returned: %s" %
                           (i, e, state, durable, out))
@@ -820,6 +891,7 @@ for i in range(nr):
     seen[verdict] = seen.get(verdict, 0) + 1
     if verdict != 'OK':
         bad += 1
+        badat[state] += 1
         if bad <= 5:
             kind = 'mark' if flags & MARK else ('FUA' if flags & FUA else 'flush')
             print("  entry %d (%s, %s), %d fsyncs returned: %s" % (i, kind, state, durable, out))
@@ -827,6 +899,8 @@ print("  %d crash states checked (%d in the run, %d during the unmount): %s" %
       (checks, phase['run'], phase['umount'], ", ".join("%s %d" % kv for kv in sorted(seen.items()))))
 if DROP:
     print("  %d single-drop states: %s" % (dchecks, ", ".join("%s %d" % kv for kv in sorted(dseen.items()))))
+if bad or dbad:
+    print("  BAD states: %d in the run, %d during the unmount" % (badat['run'], badat['umount']))
 ok = checks and not bad and not dbad
 print("RESULT: %s" % ("PASS" if ok else "FAIL"))
 sys.exit(0 if ok else 1)

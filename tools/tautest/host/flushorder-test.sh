@@ -3,22 +3,25 @@
 # can leave, rebuilt from a dm-log-writes log and recovered (guest/flushorder.sh).
 #   usage: flushorder-test.sh [xfs|ext4|both] [cases, comma list] [fsyncs]
 # cases: append falloc subappend overwrite cpappend cpsub fsoverwrite fscpover
-# reuse unlink truncate mapsplit maplog inoreuse (default: all; fs* sync with
-# fsync(2), the rest with fdatasync; mapsplit and maplog need the segment map
-# log, kernel plan.md §15 -- before it mapsplit fails; inoreuse fails before
-# the files of one ino are told apart, plan.md §16).
+# reuse unlink truncate mapsplit fsmapsplit mapappend maplog logappend inoreuse
+# (default: all; fs* sync with fsync(2), the rest with fdatasync; the map*
+# and *log* cases need the segment map log, kernel plan.md §15 -- before it
+# mapsplit fails; fsmapsplit, mapappend and logappend put records without a
+# flush on it; inoreuse fails before the files of one ino are told apart,
+# plan.md §16).
 # CONTROL=0 skips the control runs (records FUA without PREFLUSH, and the segment
-# map FUA without PREFLUSH: overwrite must FAIL in both; a freed segment reused
-# while the disk map still names it: reuse must FAIL; an unlinked file's segments
+# map FUA without PREFLUSH: overwrite must FAIL in both, and reuse in the run,
+# where only the frees lose it; a freed segment reused while the disk map still
+# names it: reuse must FAIL; an unlinked file's segments
 # given back before the host has the unlink: unlink must FAIL; a truncate's revoke
 # tags unconditional, or its txs not held for the host: truncate must FAIL; a
 # record without a flush that keeps the allocation epoch, or recovery that takes
 # the tail of a record its gate refuses: cpsub must FAIL; a refused orphan
 # commit that still sets a floor: reuse must FAIL; an fsync(2) commit that
 # leaves the inode out: fsoverwrite must FAIL; a commit's claims split over map
-# log blocks: mapsplit must FAIL; the base moved before the map blocks are
-# written: maplog must FAIL; recovery that does not tell apart the files a mount
-# gave one ino: inoreuse must FAIL).
+# log blocks: mapsplit, fsmapsplit and mapappend must FAIL; the base moved before
+# the map blocks are written: maplog and logappend must FAIL; recovery that does
+# not tell apart the files a mount gave one ino: inoreuse must FAIL).
 # Loop devices on the guest's /dev/shm: no real disk is written.
 
 set -u
@@ -26,7 +29,7 @@ cd "$(dirname "$0")" || exit 1
 . ./vm.sh
 
 FSLIST=${1:-both}
-CASES=${2:-append,falloc,subappend,overwrite,cpappend,cpsub,fsoverwrite,fscpover,reuse,unlink,truncate,mapsplit,maplog,inoreuse}
+CASES=${2:-append,falloc,subappend,overwrite,cpappend,cpsub,fsoverwrite,fscpover,reuse,unlink,truncate,mapsplit,fsmapsplit,mapappend,maplog,logappend,inoreuse}
 N=${3:-24}
 [ "$FSLIST" = both ] && FSLIST="xfs ext4"
 CASES=${CASES//,/ }
@@ -67,6 +70,17 @@ if [ "${CONTROL:-1}" = 1 ]; then
 		*"RESULT: FAIL"*) summary+="$fs control (FUA-only segment map, overwrite): FAIL, as it must\n" ;;
 		*) summary+="$fs segment map control: did not fail -- the unmount is not covered\n"; rc=1 ;;
 		esac
+		echo; echo "############ $fs control: segment frees FUA without PREFLUSH ############"
+		out=$(vm_ssh "SEGMAP_FUA_ONLY=1 ~/tautest/guest/flushorder.sh $fs reuse $N" 2>&1)
+		echo "$out"
+		# the run writes no map blocks: a bad state there is a free's
+		if printf '%s\n' "$out" | grep -q 'RESULT: FAIL' &&
+		   printf '%s\n' "$out" | grep -qE 'BAD states: [1-9][0-9]* in the run' &&
+		   printf '%s\n' "$out" | grep -q 'map blocks written in the run: 0 '; then
+			summary+="$fs control (FUA-only segment frees, reuse): FAIL in the run, as it must\n"
+		else
+			summary+="$fs segment free control: no failure in the run from the frees alone\n"; rc=1
+		fi
 		echo; echo "############ $fs control: segment reused before the map stops naming it ############"
 		out=$(vm_ssh "REUSE_FLUSH_ONLY=1 ~/tautest/guest/flushorder.sh $fs reuse $N" 2>&1)
 		echo "$out"
@@ -120,12 +134,28 @@ if [ "${CONTROL:-1}" = 1 ]; then
 		*"RESULT: FAIL"*) summary+="$fs control (MAPLOG_SPLIT, mapsplit): FAIL, as it must\n" ;;
 		*) summary+="$fs mapsplit control MAPLOG_SPLIT: did not fail -- the mapsplit case does not see it\n"; rc=1 ;;
 		esac
+		for c in fsmapsplit mapappend; do
+			echo; echo "############ $fs control: a commit's claims split over log blocks ($c) ############"
+			out=$(vm_ssh "MAPLOG_SPLIT=1 ~/tautest/guest/flushorder.sh $fs $c" 2>&1)
+			echo "$out"
+			case "$out" in
+			*"RESULT: FAIL"*) summary+="$fs control (MAPLOG_SPLIT, $c): FAIL, as it must\n" ;;
+			*) summary+="$fs $c control MAPLOG_SPLIT: did not fail -- the $c case does not see it\n"; rc=1 ;;
+			esac
+		done
 		echo; echo "############ $fs control: the base before the map blocks ############"
 		out=$(vm_ssh "MAPLOG_EARLY_BASE=1 ~/tautest/guest/flushorder.sh $fs maplog $N" 2>&1)
 		echo "$out"
 		case "$out" in
 		*"RESULT: FAIL"*) summary+="$fs control (MAPLOG_EARLY_BASE, maplog): FAIL, as it must\n" ;;
 		*) summary+="$fs maplog control MAPLOG_EARLY_BASE: did not fail -- the maplog case does not see it\n"; rc=1 ;;
+		esac
+		echo; echo "############ $fs control: the base before the map blocks (logappend) ############"
+		out=$(vm_ssh "MAPLOG_EARLY_BASE=1 ~/tautest/guest/flushorder.sh $fs logappend $N" 2>&1)
+		echo "$out"
+		case "$out" in
+		*"RESULT: FAIL"*) summary+="$fs control (MAPLOG_EARLY_BASE, logappend): FAIL, as it must\n" ;;
+		*) summary+="$fs logappend control MAPLOG_EARLY_BASE: did not fail -- the logappend case does not see it\n"; rc=1 ;;
 		esac
 		echo; echo "############ $fs control: files of one ino not told apart ############"
 		out=$(vm_ssh "SERIAL_IGNORE=1 ~/tautest/guest/flushorder.sh $fs inoreuse" 2>&1)

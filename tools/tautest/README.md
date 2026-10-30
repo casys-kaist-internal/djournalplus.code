@@ -1362,14 +1362,25 @@ take entries 0-254, then each fsync is one more file's first tau rewrite, a new
 segment each, so the log wraps and the map blocks are written during the run --
 by a commit that finds the log full in the first half, by journald in the
 second, which pauses after each fsync; every fsync'd rewrite must stay;
-INCONCLUSIVE unless the map blocks were written twice in the run) and `inoreuse`
+INCONCLUSIVE unless the map blocks were written twice in the run), `fsmapsplit`
+(`mapsplit` with the big write fsync(2)'d: its record goes without a flush, the
+inode logged after it carrying one), `mapappend` (`mapsplit`'s geometry, the big
+write a 4.3 MiB append past file 1's EOF, journaled with `tau_home 0`: an
+allocating commit, its record without a flush, its blocks converted only after
+it -- whole or absent, its size with it; these two are INCONCLUSIVE unless the
+big write's record went without a flush), `logappend` (`maplog`'s geometry; each
+round four threads append a block to four new files, fdatasync each --
+allocating commits, records without a flush, a new segment each -- so the map
+blocks are written while other commits' claims wait for their host commits;
+every fsync'd append must stay; INCONCLUSIVE unless the map blocks were written
+twice in the run and every append's record went without a flush) and `inoreuse`
 (file 1's twenty 128 KiB writes, never checkpointed, then unlinked; file 2,
 created after it with its ino, gets its segment and writes ten 128 KiB pages
 the same way, so file 1's txs stay right behind file 2's -- kernel plan.md §16,
 taudocs/bug.md #72: file 2 must keep every fsync'd write, each whole, and file 1,
 if it comes back, all twenty; INCONCLUSIVE unless file 2 got file 1's ino).
-`mapsplit` and `maplog` need the segment map log (kernel plan.md §15); before it
-`mapsplit` fails. `inoreuse` fails before the files a mount gives one ino are
+`mapsplit`, `fsmapsplit`, `mapappend`, `maplog` and `logappend` need the segment
+map log (kernel plan.md §15); before it `mapsplit` fails. `inoreuse` fails before the files a mount gives one ino are
 told apart (#385). The control (`RECORD_FUA_ONLY=1`, kernel knob
 `tau_record_fua_only`) sends every record FUA without PREFLUSH -- durable
 before its data -- and `overwrite` must FAIL. A second control
@@ -1399,12 +1410,16 @@ starts the commit's own conversion checkpoint and XFS flushes it anyway. From
 the inode out, its record still without a flush) must FAIL in `fsoverwrite`.
 With the segment map log two more: `MAPLOG_SPLIT=1` (`tau_maplog_split`: a
 commit's claims one per log block, its record vouching for the last only) must
-FAIL in `mapsplit`, and `MAPLOG_EARLY_BASE=1` (`tau_maplog_early_base`: the
-superblock's base moved before the map blocks are written) must FAIL in
-`maplog`. From #385 one more: `SERIAL_IGNORE=1` (`tau_serial_ignore`: recovery
+FAIL in `mapsplit`, `fsmapsplit` and `mapappend`, and `MAPLOG_EARLY_BASE=1`
+(`tau_maplog_early_base`: the superblock's base moved before the map blocks are
+written) must FAIL in `maplog` and `logappend`. From #385 one more: `SERIAL_IGNORE=1` (`tau_serial_ignore`: recovery
 does not tell apart the files a mount gave one ino) must FAIL in `inoreuse`; like
 the `GATE_*` knobs it acts on the recovery of the rebuilt disks. `SEGMAP_FUA_ONLY` then drops the PREFLUSH of the map blocks and of the
-log's free blocks, and `REUSE_FLUSH_ONLY` reuses a segment after a bare flush
+log's free blocks -- it runs on `reuse` too, which must FAIL in the run, where no
+map blocks are written (`map blocks written in the run: 0`), so the bad states
+come from the free blocks alone, ahead of their txs' home writes (a failing run
+prints how many bad states were in the run and how many during the unmount) --
+and `REUSE_FLUSH_ONLY` reuses a segment after a bare flush
 with its free kept off the log (journald writes none either). There the new
 owner's claim goes out with its first writes into the segment and hides the old
 owner's claim, unless another file's flush lands between those writes and the
@@ -1453,6 +1468,10 @@ copies it in.
 | #385, inoreuse | PASS: prefix 93, single-drop 1356; 30 records, all without a flush | PASS: 100, 1500 |
 | #385, control: files of one ino not told apart (inoreuse) | FAIL single-drop 626 of 1356, as #382 | FAIL 662 of 1500 |
 | #385, mapsplit / maplog / reuse / unlink | PASS with #382's state counts | PASS, the same |
+| #385, fsmapsplit / mapappend: the big write's record the one without a flush (1 of 258), vouching for entries 255 and 256 | PASS: prefix 25 / 25 (lockdep run the same) | PASS: 28 / 30 (the same) |
+| #385, logappend: four commits at once, the map blocks written 12 times in the run, 96 of 96 records without a flush | PASS: prefix 246 (lockdep run 240) | PASS: 217 (233) |
+| #385, controls: claims split (fsmapsplit, mapappend) / base first (logappend) | FAIL 3 of 25 (2 in the run), both / 3 of 264, all in the run | FAIL 3 of 28, 3 of 30 / 3 of 237 |
+| #385, control: the free blocks FUA only (reuse) | FAIL in the run, no map block written there: 513 bad states in the run (4 prefix, the rest single-drop) -- at the free's FUA, file 1's first 16 fsync'd writes are gone | FAIL, the same counts |
 
 ### One fsync, request by request
 

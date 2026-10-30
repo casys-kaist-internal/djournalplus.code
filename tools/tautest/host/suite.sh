@@ -62,7 +62,7 @@ TESTS=(
 	"db-crash-pg	2400	./db-crash-test.sh both postgres 20"
 	"db-crash-mysql	2400	./db-crash-test.sh both mysql 20"
 	"db-rollback	2400	./db-rollback-test.sh both 1"
-	"flushorder	9000	./flushorder-test.sh both append,falloc,subappend,overwrite,cpappend,cpsub,fsoverwrite,fscpover,reuse,unlink,truncate,mapsplit,maplog,inoreuse 24"
+	"flushorder	12600	./flushorder-test.sh both append,falloc,subappend,overwrite,cpappend,cpsub,fsoverwrite,fscpover,reuse,unlink,truncate,mapsplit,fsmapsplit,mapappend,maplog,logappend,inoreuse 24"
 	"pg-torn-ext4	5400	env FS=ext4 ./pg-torn-test.sh 1 300"
 	"pg-torn-xfs	5400	env FS=xfs ./pg-torn-test.sh 1 300"
 )
