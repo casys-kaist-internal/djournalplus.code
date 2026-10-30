@@ -62,6 +62,7 @@ db_fs_settings() {  # <fs>
   case "$MODE" in
     postgres)
       case $1 in btrfs|zfs*) pg_cow_settings "$PG_DATA" ;; esac
+      if [[ -n "$PG_WAL_COMPRESSION" ]]; then pg_conf_set "$PG_DATA" wal_compression "$PG_WAL_COMPRESSION"; fi
       if [[ -n "$log_dir" && ! -L "$PG_DATA/pg_wal" ]]; then
         echo "❌ $PG_DATA/pg_wal is not a link into $log_dir"
         exit 1

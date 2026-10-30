@@ -39,6 +39,13 @@ case "$VARIANT" in
     [[ "$(cat /sys/block/$TAU_DEVICE_NAME/device/model 2>/dev/null | xargs)" == "Samsung SSD 990 PRO 4TB" ]] \
       || { echo "❌ VARIANT=ssd990: source set_env.sh with TAU_TARGET_DISK=\"Samsung SSD 990 PRO 4TB\""; exit 1; }
     TAU_TRIM_BEFORE_RESTORE=0; TAU_NO_DISCARD=1; MY_PREWRITE_REDO=1 ;;
+  odirect)  # as run_main.sh: MySQL O_DIRECT, buffer pool 75% of TAU_MEM_GB
+    [[ "$MODE" == "mysql" ]] || { echo "❌ VARIANT=odirect is for mysql"; exit 1; }
+    MY_FLUSH_METHOD=O_DIRECT; MY_BUFFER_POOL_SIZE=$(( TAU_MEM_GB * 3 / 4 ))G ;;
+  walcomp)  # as run_main.sh: PG wal_compression=lz4 with pg_install_lz4
+    [[ "$MODE" == "postgres" ]] || { echo "❌ VARIANT=walcomp is for postgres"; exit 1; }
+    PG_BIN="$TAUFS_BENCH_WS/pg_install_lz4/bin"; PG_WAL_COMPRESSION=lz4
+    [[ -x "$PG_BIN/postgres" ]] || { echo "❌ VARIANT=walcomp: no $PG_BIN (PG_LZ4=1 install_postgres.sh)"; exit 1; } ;;
   *) echo "❌ Unknown VARIANT: $VARIANT"; exit 1 ;;
 esac
 KEY="tpcc_w$WH"

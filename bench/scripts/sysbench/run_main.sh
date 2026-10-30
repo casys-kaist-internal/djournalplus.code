@@ -106,9 +106,16 @@ source "$TAUFS_BENCH/scripts/$DBMS/api.sh"
 VARIANT="${VARIANT:-}"
 case "$VARIANT" in
   "") ;;
-  odirect)  # MySQL 8.4 default flush method instead of fsync
+  odirect)  # EVAL_PLAN §2.2 reference point: MySQL 8.4's default flush method (O_DIRECT)
+            # instead of fsync; it bypasses the page cache, so the buffer pool gets 75%
+            # of TAU_MEM_GB (48 GB on libra09) instead of 25%
     [[ "$DBMS" == "mysql" ]] || { echo "❌ VARIANT=odirect is for mysql"; exit 1; }
-    MY_FLUSH_METHOD=O_DIRECT ;;
+    MY_FLUSH_METHOD=O_DIRECT; MY_BUFFER_POOL_SIZE=$(( TAU_MEM_GB * 3 / 4 ))G ;;
+  walcomp)  # EVAL_PLAN §2.2 reference point: PG wal_compression=lz4 (an FPW mitigation),
+            # with the same PG source built --with-lz4 into pg_install_lz4 (install_postgres.sh)
+    [[ "$DBMS" == "postgres" ]] || { echo "❌ VARIANT=walcomp is for postgres"; exit 1; }
+    PG_BIN="$TAUFS_BENCH_WS/pg_install_lz4/bin"; PG_WAL_COMPRESSION=lz4
+    [[ -x "$PG_BIN/postgres" ]] || { echo "❌ VARIANT=walcomp: no $PG_BIN (PG_LZ4=1 install_postgres.sh)"; exit 1; } ;;
   spin)  # MySQL 8.4 default redo spin-waits (heuristic) instead of off
     [[ "$DBMS" == "mysql" ]] || { echo "❌ VARIANT=spin is for mysql"; exit 1; }
     MY_LOG_SPIN_CPU_PCT_HWM=50 ;;
@@ -253,6 +260,7 @@ run_postgres_block() {
   fi
   pg_fpw $PG_DATA $FPW
   pg_fixed_settings $PG_DATA
+  if [[ -n "$PG_WAL_COMPRESSION" ]]; then pg_conf_set $PG_DATA wal_compression "$PG_WAL_COMPRESSION"; fi
   case $FS in btrfs|zfs*) pg_cow_settings $PG_DATA ;; esac
   if [[ -n "$PROFILE" ]]; then profile_pg_settings $PG_DATA; fi
 

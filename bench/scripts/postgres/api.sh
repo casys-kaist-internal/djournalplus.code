@@ -10,6 +10,7 @@ PGUSER=$TAU_USERNAME
 # The build itself is stock: 1 GB relation segments, 8 KiB blocks.
 PG_SHARED_BUFFERS=${TAU_DB_CACHE_GB}GB  # 25% of TAU_MEM_GB (bench/machines/<host>.env)
 PG_MAX_WAL_SIZE=16GB     # same for FPW on and off
+PG_WAL_COMPRESSION=""    # "" = the default (off); VARIANT=walcomp sets lz4 (pg_install_lz4)
 
 # Call before starting PostgreSQL
 pg_conf_set() {
@@ -74,6 +75,7 @@ log_pg_specs() {
     sudo -u "$PGUSER" "$PG_BIN/psql" -p "$PG_PORT" -d postgres -c "
       SHOW fsync;
       SHOW full_page_writes;
+      SHOW wal_compression;
       SHOW wal_init_zero;
       SHOW wal_recycle;
       SHOW synchronous_commit;
