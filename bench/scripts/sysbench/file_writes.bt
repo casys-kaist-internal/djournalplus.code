@@ -1,0 +1,109 @@
+#!/usr/bin/env bpftrace
+/*
+ * EVAL_PLAN DB2: which files one DBMS writes and syncs, and its sync latency
+ * per file type, during a measurement (run_main.sh / run_tpcc.sh
+ * PROFILE=files; file_report.py). Needs kernel BTF.
+ *
+ * $1  task filter: 0 = tasks named "postgres", otherwise the mysqld pid
+ * $2  dev_t of the test device (major << 20 | minor): files on it only
+ *
+ * Per inode (first key) and file type (second key; the classes of profile_io.bt,
+ * from the name's bytes, once per inode: 0 log = PG WAL segment (24
+ * characters, "00000001...") or MySQL "#ib_redo*", 1 dwb = "*.dblwr", 2 data =
+ * PG relation file (name starts with 1-9) or "*.ibd", 3 other): writes (calls of the file system's write_iter, which write,
+ * pwrite, pwritev and io_submit all reach; ext4 and XFS, kfunc:xfs needs the
+ * module loaded) and bytes, and syncs (vfs_fsync_range) with their time. Sync
+ * latency per file type: 2-µs buckets to 2 ms, 200-µs buckets to 200 ms, and
+ * log2; syncs per type and datasync flag. Times in µs.
+ */
+
+/* One probe per file system (this bpftrace cannot attach one body to
+   functions of vmlinux and a module) */
+kretfunc:vmlinux:ext4_file_write_iter
+/(($1 == 0 && comm == "postgres") || ($1 != 0 && pid == $1)) && args.iocb->ki_filp->f_inode->i_sb->s_dev == $2/
+{
+	$i = args.iocb->ki_filp->f_inode->i_ino;
+	if (@ty[$i] == 0) {
+		$n = args.iocb->ki_filp->f_path.dentry->d_name.name;
+		$len = args.iocb->ki_filp->f_path.dentry->d_name.len;
+		$head = *(uint64 *)$n;
+		$tail = $len >= 4 ? *(uint32 *)($n + $len - 4) : 0;
+		$t = 3;
+		if ($head == 0x6f6465725f626923) { $t = 0; }
+		else if ($len == 24 && $head == 0x3130303030303030) { $t = 0; }
+		else if ($len >= 6 && $tail == 0x72776c62 && *(uint16 *)($n + $len - 6) == 0x642e) { $t = 1; }
+		else if ($tail == 0x6462692e) { $t = 2; }
+		else if (($head & 0xff) >= 0x31 && ($head & 0xff) <= 0x39) { $t = 2; }
+		@ty[$i] = $t + 1;
+	}
+	$ty = @ty[$i] - 1;
+	@w_n[$i, $ty] = count();
+	if (retval > 0) { @w_bytes[$i, $ty] = sum(retval); }
+}
+
+kretfunc:xfs:xfs_file_write_iter
+/(($1 == 0 && comm == "postgres") || ($1 != 0 && pid == $1)) && args.iocb->ki_filp->f_inode->i_sb->s_dev == $2/
+{
+	$i = args.iocb->ki_filp->f_inode->i_ino;
+	if (@ty[$i] == 0) {
+		$n = args.iocb->ki_filp->f_path.dentry->d_name.name;
+		$len = args.iocb->ki_filp->f_path.dentry->d_name.len;
+		$head = *(uint64 *)$n;
+		$tail = $len >= 4 ? *(uint32 *)($n + $len - 4) : 0;
+		$t = 3;
+		if ($head == 0x6f6465725f626923) { $t = 0; }
+		else if ($len == 24 && $head == 0x3130303030303030) { $t = 0; }
+		else if ($len >= 6 && $tail == 0x72776c62 && *(uint16 *)($n + $len - 6) == 0x642e) { $t = 1; }
+		else if ($tail == 0x6462692e) { $t = 2; }
+		else if (($head & 0xff) >= 0x31 && ($head & 0xff) <= 0x39) { $t = 2; }
+		@ty[$i] = $t + 1;
+	}
+	$ty = @ty[$i] - 1;
+	@w_n[$i, $ty] = count();
+	if (retval > 0) { @w_bytes[$i, $ty] = sum(retval); }
+}
+
+kfunc:vmlinux:vfs_fsync_range
+/(($1 == 0 && comm == "postgres") || ($1 != 0 && pid == $1)) && args.file->f_inode->i_sb->s_dev == $2/
+{
+	@s_t[tid] = nsecs;
+}
+
+kretfunc:vmlinux:vfs_fsync_range
+/@s_t[tid]/
+{
+	$us = (nsecs - @s_t[tid]) / 1000;
+	delete(@s_t[tid]);
+	$i = args.file->f_inode->i_ino;
+	if (@ty[$i] == 0) {
+		$n = args.file->f_path.dentry->d_name.name;
+		$len = args.file->f_path.dentry->d_name.len;
+		$head = *(uint64 *)$n;
+		$tail = $len >= 4 ? *(uint32 *)($n + $len - 4) : 0;
+		$t = 3;
+		if ($head == 0x6f6465725f626923) { $t = 0; }
+		else if ($len == 24 && $head == 0x3130303030303030) { $t = 0; }
+		else if ($len >= 6 && $tail == 0x72776c62 && *(uint16 *)($n + $len - 6) == 0x642e) { $t = 1; }
+		else if ($tail == 0x6462692e) { $t = 2; }
+		else if (($head & 0xff) >= 0x31 && ($head & 0xff) <= 0x39) { $t = 2; }
+		@ty[$i] = $t + 1;
+	}
+	$ty = @ty[$i] - 1;
+	@s_n[$i, $ty] = count();
+	@s_us[$i, $ty] = sum($us);
+	@sync_ds[$ty, args.datasync != 0 ? 1 : 0] = count();
+	@sync_fine[$ty] = lhist($us, 0, 2000, 2);
+	@sync_coarse[$ty] = lhist($us, 0, 200000, 200);
+	@sync_log2[$ty] = hist($us);
+}
+
+BEGIN
+{
+	printf("window_begin_ns %llu\n", nsecs);
+}
+
+END
+{
+	printf("window_end_ns %llu\n", nsecs);
+	clear(@s_t);
+}

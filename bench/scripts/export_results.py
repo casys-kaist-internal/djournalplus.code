@@ -75,7 +75,9 @@ def tpcc_points(raw):
     points, skipped = {}, []
     for db in ("mysql", "postgres"):
         src = raw / "benchbase" / db
-        for run in sorted(d for d in src.glob("20*") if d.is_dir()) if src.is_dir() else []:
+        # profiling runs (run_tpcc.sh PROFILE=files, <run>_prof-files) left out
+        for run in sorted(d for d in src.glob("20*") if d.is_dir() and "_prof-" not in d.name) \
+                if src.is_dir() else []:
             vals = defaultdict(list)
             for xml in sorted(run.glob("*_r[0-9]*.xml")):
                 m = TPCC_LABEL.match(xml.stem)

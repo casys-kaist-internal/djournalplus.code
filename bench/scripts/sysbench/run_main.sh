@@ -148,7 +148,7 @@ esac
 # window (2026-10-09).
 PG_PRE_CHECKPOINT=${PG_PRE_CHECKPOINT:-0}
 
-# Profiling runs (PROFILE=trace|perf|walkeep|diag, bench/scripts/sysbench/profile.sh):
+# Profiling runs (PROFILE=trace|files|perf|walkeep|diag, bench/scripts/sysbench/profile.sh):
 # one 5-min measurement at 64 threads after the usual restore and warm-up, with
 # collectors around it. PROFILE_THREADS="1 8 16 32 64" first measures the lower
 # points as the throughput runs do (no collectors), so that the profiled last

@@ -1,9 +1,12 @@
-# Profiling runs of run_main.sh (PROFILE=trace|perf|walkeep|diag), sourced by it:
+# Profiling runs of run_main.sh (PROFILE=trace|files|perf|walkeep|diag), sourced by it:
 # the usual restore and 10-min warm-up, then one 5-min measurement at 64
 # threads with collectors around it. Separate from the throughput runs, which
 # carry no tracing.
 #   trace    profile_io.bt: write and sync paths per file type, jbd2 commits and
 #            checkpoints, ZFS waits
+#   files    file_writes.bt: writes and syncs per file, sync latency per file
+#            type (EVAL_PLAN DB2; ext4 and XFS), and the files of the mount
+#            with their inode numbers at the end (<label>.inodes)
 #   perf     perf lock contention -ab (top 20 waiters with call stacks), then
 #            perf record -a -g, 60 s each inside the measurement
 #   walkeep  PG only: wal_keep_size keeps every WAL segment of the measurement,
@@ -30,6 +33,7 @@ PERF_BIN=${PERF_BIN:-$HOME/codes/linux-6.8.0plus-build/tools/perf/perf}
 PG_WAL_KEEP=${PG_WAL_KEEP:-400GB}  # > WAL of warm-up tail + 5 min at 64 threads with FPW
 ZFS_TXG_HISTORY=1000               # txgs kept in /proc/spl/kstat/zfs/<pool>/txgs
 PROFILE_IO_BT="$TAUFS_BENCH/scripts/sysbench/profile_io.bt"
+PROFILE_FILES_BT="$TAUFS_BENCH/scripts/sysbench/file_writes.bt"
 PROFILE_FREEPAGE_BT="$TAUFS_BENCH/scripts/sysbench/freepage_wait.bt"
 PROFILE_OFFCPU_BT="$TAUFS_BENCH/scripts/sysbench/offcpu.bt"
 DIAG_TOOLS=${DIAG_TOOLS:-}          # instead of the default instruments
@@ -41,6 +45,12 @@ PG_DIAG_WAL_KEEP=200GB              # > DIAG_WAL_S of WAL plus what pg_waldump's
 profile_check() {
   case "$PROFILE" in
     trace|perf) ;;
+    files)
+      local f
+      for f in $FS_GROUPS; do
+        case $f in zfs*|btrfs) echo "❌ PROFILE=files is for ext4 and xfs, not $f"; return 1 ;; esac
+      done
+      ;;
     diag)
       if [[ "$DBMS" == "mysql" ]]; then
         nm "$MYSQL_BIN/mysqld" | grep -q " T _Z22buf_LRU_get_free_blockP10buf_pool_t" ||
@@ -169,11 +179,16 @@ profile_begin() {
     PROF_SAMPLER_PID=$!
   fi
   case "$PROFILE" in
-    trace)
+    trace|files)
       local filt=0 devnum
       [[ "$DBMS" == "mysql" ]] && filt=$MYSQLD_PID
       devnum=$(( (0x$(stat -c %t "$DEVICE") << 20) | 0x$(stat -c %T "$DEVICE") ))
-      sudo bpftrace "$PROFILE_IO_BT" "$filt" "$devnum" > "$o.bpftrace" 2>&1 &
+      if [[ "$PROFILE" == trace ]]; then
+        sudo bpftrace "$PROFILE_IO_BT" "$filt" "$devnum" > "$o.bpftrace" 2>&1 &
+      else
+        sudo modprobe xfs   # file_writes.bt probes kfunc:xfs
+        sudo env BPFTRACE_MAX_MAP_KEYS=200000 bpftrace "$PROFILE_FILES_BT" "$filt" "$devnum" > "$o.bpftrace" 2>&1 &
+      fi
       PROF_BT_PID=$!
       # start the measurement only once every probe is attached
       local i
@@ -202,6 +217,9 @@ profile_end() {
   echo "end $(date -u +%s.%N)" >> "$o.time"
   if [[ -n "$PROF_BT_PID" ]]; then
     sudo kill -INT "$PROF_BT_PID" 2>/dev/null; wait "$PROF_BT_PID" 2>/dev/null; PROF_BT_PID=
+  fi
+  if [[ "$PROFILE" == "files" ]]; then
+    sudo find "$MOUNT_DIR" -xdev -type f -printf '%i %s %p\n' > "$o.inodes" 2>/dev/null
   fi
   if [[ -n "$PROF_PERF_PID" ]]; then
     wait "$PROF_PERF_PID" 2>/dev/null; PROF_PERF_PID=
