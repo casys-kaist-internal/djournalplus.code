@@ -8,6 +8,10 @@
 #
 #   usage: crash-test.sh [xfs|ext4|both]
 #
+# VERIFY_KERNEL=<tree> boots that kernel after the power cut: a journal one
+# kernel wrote, recovered by another.  One filesystem per run then, since the
+# next one would be written by the second kernel.
+#
 # WARNING: this runs mkfs on $TAU_DEV inside the guest (default /dev/nvme0n1).
 # Everything on that device is destroyed.
 
@@ -21,6 +25,8 @@ both) FSLIST="xfs ext4" ;;
 xfs|ext4) ;;
 *) echo "usage: $0 [xfs|ext4|both]" >&2; exit 2 ;;
 esac
+[ -n "${VERIFY_KERNEL:-}" ] && [ "$FSLIST" != xfs ] && [ "$FSLIST" != ext4 ] &&
+	{ echo "VERIFY_KERNEL: one filesystem per run" >&2; exit 2; }
 
 rc=0
 
@@ -42,6 +48,7 @@ for fs in $FSLIST; do
 	vm_crash || { rc=1; continue; }
 
 	echo "--- rebooting ---"
+	[ -n "${VERIFY_KERNEL:-}" ] && TAUFS_KERNEL=$VERIFY_KERNEL
 	if ! vm_boot; then
 		echo "RESULT[$fs]: FAIL (VM did not come back)"
 		vm_console_faults

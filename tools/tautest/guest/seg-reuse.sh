@@ -15,10 +15,12 @@ FS=$1; F=$TAU_MNT/seg-reuse; G=$TAU_MNT/other; K=4096
 P=/sys/module/tau_journal/parameters
 probe() { cat $P/tau_probe_$1; }
 X=0; B=$((1<<20)); C=$((8<<20)); Y=$((16<<20))
-wait_drained() {	# every segment free but the running one
+# taken while drained: the running segment, and the segment map log's (kernel plan.md §15)
+held=1; [ -e $P/tau_maplog_len ] && held=2
+wait_drained() {	# every segment free but those
 	local i
 	for i in $(seq 60); do
-		[ $(probe seg_free) -ge $(( $(probe seg_total) - 1 )) ] && return 0
+		[ $(probe seg_free) -ge $(( $(probe seg_total) - held )) ] && return 0
 		sleep 1
 	done
 	die "checkpoint did not drain ($1): seg_free=$(probe seg_free) seg_total=$(probe seg_total)"

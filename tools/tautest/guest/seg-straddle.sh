@@ -45,6 +45,11 @@ sys.exit(1 if bad else 0)
 PY
 	rc=$?
 	sudo umount "$TAU_MNT"
+	# every commit of the file finished: no claim of its is void
+	if sudo dmesg | grep -q "TAU: ino $ino: segment .* left out"; then
+		echo "  a segment of the file was left out"
+		rc=1
+	fi
 	if [ $rc != 0 ]; then
 		echo "RESULT: FAIL"
 	elif sudo dmesg | grep -q "TAU: ino $ino: orphan commit"; then

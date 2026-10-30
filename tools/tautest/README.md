@@ -133,6 +133,7 @@ cd tools/tautest
 
 ./host/crash-test.sh both      # crash recovery, ext4 + XFS   (~15 min)
 ./host/crash-test.sh xfs       # one filesystem only
+VERIFY_KERNEL=<tree> ./host/crash-test.sh xfs   # recovered by another kernel
 
 ./host/stress-test.sh both     # concurrency hunt             (long, see below)
 ./host/stress-test.sh ext4 300 6 5    # rounds, racers, seconds per round
@@ -617,10 +618,17 @@ tools/tautest/host/seg-reuse-test.sh xfs
 | kernel | recovery | result |
 |---|---|---|
 | #284 (fix, bug.md #25) | stale start found (`first transaction 10`), chain breaks at 50; replays tid 53 only (its tail) | PASS |
+| #381 (segment map log) | the same lines | PASS |
 
 The old scan starts at the lowest first descriptor (tid 10) and stops at 50,
 so it writes old 0xaa over the checkpointed 0xcc and never reaches tid 53.
 Not run on a pre-fix kernel.
+
+From kernel #381 the segment map log holds a segment of its own (the highest
+free one), so a drained journal has every segment free but two: the running
+one and the log's. The drain check allows for that when the kernel has
+`tau_maplog_len`; on #380 it waited for `seg_free` 76543 of 76544 and gave up
+at 76542.
 
 ### The newest transaction straddled a segment and was checkpointed
 
@@ -646,6 +654,17 @@ tools/tautest/host/seg-straddle-test.sh xfs     # or ext4
 | #298 (fix, bug.md #27) | `orphan commit 7925 ... checkpointed through tid 7925, nothing to replay` | PASS, all 0x2a |
 | #299, the floor switched off (control) | stale start `first transaction 1633`, replays 1636-1638 | FAIL, 97 blocks of 0xa0 |
 | #300 ext4 (2 runs) | `first transaction 12400` behind `orphan commit 12413`, nothing replayed | PASS, all 0x2a |
+| #381 ext4 (lockdep #37) | `first transaction 416` at offset 222; `segment 491520 claimed by map log block 110 without a valid record, left out` | INCONCLUSIVE then, FAIL with the check below |
+| #382 ext4 (4 runs), XFS (4 runs) | the same layout (`first transaction 5025` at offset 222) behind `orphan commit 5037`, nothing replayed | PASS, all 0x2a |
+
+With the segment map log (kernel #381) a segment the settle took back is on
+the map by its claim, which counts only if a record vouches for it.  #381
+read the claim range from the last commit record ahead of the first
+descriptor -- there the older record of the file's earlier pass through the
+segment, not the settle's -- so the settle's segment was left out and the
+orphan floor went with it (kernel taudocs/plan.md §15.11).  Every commit of
+the file has finished when the power is cut, so no claim of its can be void:
+from #382 the verify fails when one of the file's segments is left out.
 
 ### One write split between journal and in place
 
@@ -1025,7 +1044,7 @@ through that point of the commit fail once.
 | 1 | the write loop, with journal copies built but not submitted |
 | 2 | a submitted journal write comes back failed |
 | 3 | the commit record is not written |
-| 4 | publishing the segment map fails |
+| 4 | a commit's claims on the segment map log fail, before its record (up to the map log: publishing the segment map after the record) |
 | 5 | pass 2, after the record (allocating commits only) |
 | 6 | right after pass 1 of an allocating commit |
 
@@ -1224,6 +1243,16 @@ and hides the bug):
 |---|---|---|
 | #342 | `append`, `append-umount` FAIL: size 100 | PASS |
 | #343 | all four PASS (`append-torn`: rolled back by size; with `NOROLLBACK=1` A*80 C*20) | all four PASS (`append-torn`: the gate refused the tx) |
+| #380, #381 | all four PASS (`append-torn`: the gate refused the tx) | all four PASS (the same) |
+
+From #380 (the segment map log) a commit that enters a new segment no longer
+needs `PREFLUSH | FUA` on its record, so the first commit of a file goes
+without a flush like any other allocating or size-moving one, with epoch R
+(kernel taudocs/design.md §21.7, §24). At the `append-torn` cut R has not
+committed, so recovery leaves the record out instead of rolling the tx back by
+size -- the file reads the same, size 100. ext4 `split` likewise: "record left
+out" where #377 rolled back "0 of 2 new blocks converted". The rollback itself
+is still exercised by `publish`, `partial` and flushorder.
 
 Appends into a TauRedo block (bug.md #52; part of `all`). F is 4 KiB of A and
 100 B of B, a clean remount, then 10 B of b over block 1 + fsync with
@@ -1305,7 +1334,21 @@ wherever file 1 comes back it must hold all twenty -- kernel plan.md §12.3), `t
 (file 1's twenty 128 KiB writes, the first ten aged out and checkpointed, then
 truncated to ten; a background commit of a rewrite of its block 0 moves its
 tail, and file 2 is rewritten through tau as in `unlink`: file 1 must hold all
-twenty or exactly the first ten -- kernel plan.md §12.4). The control (`RECORD_FUA_ONLY=1`, kernel knob
+twenty or exactly the first ten -- kernel plan.md §12.4), `mapsplit` (2 MiB
+segments, a journal of two segment map blocks: file 1 and 254 small files take
+entries 0-254, then one 4.3 MiB overwrite of file 1 enters two new segments,
+entries 255 and 256, one in each map block -- kernel plan.md §15.1 b; the writes
+before it must stay and it must be whole or absent; INCONCLUSIVE unless it took
+those two entries, read from the map blocks and the map log; no single-drop
+states unless `FO_DROP=1`) and `maplog` (the same geometry with the segment
+map log cut to 8 blocks, `tau_maplog_len`: 255 small files rewritten through tau
+take entries 0-254, then each fsync is one more file's first tau rewrite, a new
+segment each, so the log wraps and the map blocks are written during the run --
+by a commit that finds the log full in the first half, by journald in the
+second, which pauses after each fsync; every fsync'd rewrite must stay;
+INCONCLUSIVE unless the map blocks were written twice in the run). `mapsplit`
+and `maplog` need the segment map log (kernel plan.md §15); before it `mapsplit`
+fails. The control (`RECORD_FUA_ONLY=1`, kernel knob
 `tau_record_fua_only`) sends every record FUA without PREFLUSH -- durable
 before its data -- and `overwrite` must FAIL. A second control
 (`SEGMAP_FUA_ONLY=1`, `tau_segmap_fua_only`) writes the segment map FUA without
@@ -1332,6 +1375,19 @@ default control: alone on the filesystem, the iclog a record waits for always
 starts the commit's own conversion checkpoint and XFS flushes it anyway. From
 #377 one more: `FSYNC_NOINODE=1` (`tau_fsync_noinode`: an fsync(2) commit leaves
 the inode out, its record still without a flush) must FAIL in `fsoverwrite`.
+With the segment map log two more: `MAPLOG_SPLIT=1` (`tau_maplog_split`: a
+commit's claims one per log block, its record vouching for the last only) must
+FAIL in `mapsplit`, and `MAPLOG_EARLY_BASE=1` (`tau_maplog_early_base`: the
+superblock's base moved before the map blocks are written) must FAIL in
+`maplog`. `SEGMAP_FUA_ONLY` then drops the PREFLUSH of the map blocks and of the
+log's free blocks, and `REUSE_FLUSH_ONLY` reuses a segment after a bare flush
+with its free kept off the log (journald writes none either). There the new
+owner's claim goes out with its first writes into the segment and hides the old
+owner's claim, unless another file's flush lands between those writes and the
+claim: `reuse` sets `tau_claim_flush` (a device flush right there) in both runs,
+and counts a reuse by `tau_probe_seg_reused` (segments given out again after a
+free) -- before the map log every reuse waited for its free, so
+`tau_probe_seg_reuse_flush` counted them.
 Each run prints how many records went without a flush (`== records: ... ==`).
 `FO_KEEP=1` keeps the log in the guest's
 `/dev/shm` for a look at the entries a failure names. Needs `drivers/md/dm-log-writes.ko`
