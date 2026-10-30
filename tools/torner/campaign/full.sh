@@ -16,6 +16,11 @@
 #   QUEUES [q1 q2 q3 q4 q5 q6] runs some of them, and MERGE names captures of an
 #   earlier run to merge in -- after a tau fix, the tau columns alone:
 #   QUEUES="q1 q2" MERGE="$(ls -d <earlier out>/{q3,q4,q5,q6}/cap-*)"
+#   CONTROLS: the tau queues' controls, each switch restoring a bug a fix closed
+#   (the rows must fail again); VARIANTS: settings the rows must still pass.
+#   Entries <tag>[:cap=<p>=<v>[,...]][:exp=<p>=<v>[,...]][:rows=<r>[,...]][:profiles=<p>[,...]]:
+#   cap is set for each capture, exp while its states are explored (the
+#   recovery side), rows [ow16k,ap16k], profiles [busy]; a variant's tag starts "set-"
 set -u
 TC=$(cd "$(dirname "$0")" && pwd)
 KT=$(cd "${1:?usage: full.sh <tau tree> <basevm tree> <out dir>}" && pwd) || exit 1
@@ -29,16 +34,28 @@ export MEM=${MEM:-10G}
 
 # tau: no budget preference -- every write is a candidate; T has nothing to cut
 # (tau writes each block in its own bio), so its time goes to O, R and prefix
+CONTROLS=${CONTROLS:-record_fua_only:cap=tau_record_fua_only=1 segmap_fua_only:cap=tau_segmap_fua_only=1 reuse_flush_only:cap=tau_reuse_flush_only=1}
+VARIANTS=${VARIANTS:-}
 tq() {	# <name> <port> <gdb> <fs>
-	local n=$1 p=$2 gp=$3 fs=$4 sw
+	local n=$1 p=$2 gp=$3 fs=$4 c tag f cap exp rows profs kind lim
 	CELLS="$(cells $fs)" PROFILES="quiet busy" LIMIT_ATOM=${LIMIT_TAU_ATOM:-1500} \
 		LIMIT_EPOCH=${LIMIT_TAU_EPOCH:-2000} NAME=$n PORT=$p GDB_PORT=$gp \
 		bash $TC/table.sh "$KT" "$OUT/$n-main"
-	# controls: each switch restores a bug a fix closed; the rows must fail again
-	for sw in tau_record_fua_only tau_segmap_fua_only tau_reuse_flush_only; do
-		CELLS="$(cells $fs ow16k ap16k)" PROFILES="busy" CAP_PARAM="$sw=1" TAG=${sw#tau_} \
-			LIMIT_ATOM=${LIMIT_CTL:-800} LIMIT_EPOCH=${LIMIT_CTL:-800} NAME=$n PORT=$p \
-			GDB_PORT=$gp bash $TC/table.sh "$KT" "$OUT/$n-ctl-${sw#tau_}"
+	for c in $CONTROLS $VARIANTS; do
+		tag=${c%%:*} cap= exp= rows="ow16k ap16k" profs=busy kind=ctl lim=${LIMIT_CTL:-800}
+		case $tag in set-*) kind=var lim=${LIMIT_VAR:-1000} ;; esac
+		for f in $(tr : ' ' <<< "${c#"$tag"}"); do
+			case $f in
+			cap=*) cap=${f#cap=} ;;
+			exp=*) exp=${f#exp=} ;;
+			rows=*) rows=$(tr , ' ' <<< "${f#rows=}") ;;
+			profiles=*) profs=$(tr , ' ' <<< "${f#profiles=}") ;;
+			*) echo "$c: unknown field $f" ;;
+			esac
+		done
+		CELLS="$(cells $fs $rows)" PROFILES="$profs" CAP_PARAM="$cap" EXPLORE_PARAM="$exp" TAG=$tag \
+			LIMIT_ATOM=$lim LIMIT_EPOCH=$lim NAME=$n PORT=$p \
+			GDB_PORT=$gp bash $TC/table.sh "$KT" "$OUT/$n-$kind-$tag"
 	done
 }
 # baselines: a witness is enough where they tear, so atom-* take split writes
@@ -84,15 +101,21 @@ fi
 python3 $TC/cell_csv.py --header "$OUT"/*/cap-* ${MERGE:-} > "$OUT/table.csv"
 {
 	python3 $TC/paper_table.py "$OUT/table.csv"
-	echo; echo "controls (a switch restores a fixed bug: each must fail)"
 	python3 - "$OUT/table.csv" <<'PYEOF'
 import csv, sys
-for r in csv.DictReader(open(sys.argv[1])):
-    if r["tag"]:
+rows = [r for r in csv.DictReader(open(sys.argv[1])) if r["tag"]]
+for title, var in (("controls (a switch restores a fixed bug: each must fail)", False),
+                   ("variants (a setting: each must pass)", True)):
+    sel = [r for r in rows if r["tag"].startswith("set-") == var]
+    if not sel:
+        continue
+    print("\n" + title)
+    for r in sel:
         bad = sum(int(r[k] or 0) for k in ("viol_content", "viol_size", "viol_durability", "writes_torn"))
-        print("  %-9s %-6s %-22s states=%-5s content=%s size=%s durability=%s torn=%s/%s  %s" % (
-            r["config"], r["row"], r["tag"], r["states"], r["viol_content"], r["viol_size"],
-            r["viol_durability"], r["writes_torn"], r["writes_targeted"], "FAILS (good)" if bad else "no signal"))
+        verdict = ("VIOLATIONS" if bad else "passes") if var else ("FAILS (good)" if bad else "no signal")
+        print("  %-9s %-9s %-6s %-30s states=%-5s content=%s size=%s durability=%s torn=%s/%s  %s" % (
+            r["config"], r["row"], r["profile"], r["tag"], r["states"], r["viol_content"], r["viol_size"],
+            r["viol_durability"], r["writes_torn"], r["writes_targeted"], verdict))
 PYEOF
 } > "$OUT/summary.md"
 cat "$OUT/summary.md"

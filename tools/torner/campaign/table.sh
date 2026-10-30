@@ -5,12 +5,13 @@
 #
 #   usage: table.sh <kernel tree> <out dir>
 #   env:   CELLS (required), PROFILES, LIMIT_ATOM, LIMIT_EPOCH, PREFER_SPLIT,
-#          CAP_PARAM, TAU_SEG, MKFS_OPTS, TAG -- passed to table_guest.sh
+#          CAP_PARAM, EXPLORE_PARAM, TAU_SEG, MKFS_OPTS, TAG -- passed to table_guest.sh
 #          PORT [5556], GDB_PORT [1236], NAME [table]: two calls with different
 #          ones run side by side; DEADLINE_MIN [600]; MEM [16G]
 #          ZFS_KIT: build_zfs.sh's kit (spl/zfs modules for the basevm kernel,
 #          the noble userland they match), for the zfs-* configs
 #          BASE: a copy of tautest's qemu-image.qcow2 to put the overlay on
+#          OVDIR [tools/qemu/vm_imgs]: where the overlay goes (that is on root)
 #
 # Kernels: the tau columns boot the kernel tree's test-config build (dm-log-
 # writes a module, loaded from the tree; the control switches need its
@@ -47,14 +48,17 @@ pgrep -f "hostfwd=tcp::$PORT-:22" >/dev/null && die "a VM already listens on ssh
 BASE=${BASE:-qemu-image.qcow2}
 if [ "$BASE" = qemu-image.qcow2 ]; then
 	pgrep -af qemu-system | grep -qE 'file=[^,]*qemu-image\.qcow2,' && die "a tautest VM is running"
+	BASE=$V/$BASE	# qemu reads a relative backing file next to the overlay
 else
 	[ -f "$BASE" ] || die "no base image $BASE"
+	BASE=$(realpath "$BASE")
 fi
-mkdir -p "$OUT" "$SCR" || exit 1
+OVDIR=${OVDIR:-$V}
+mkdir -p "$OUT" "$SCR" "$OVDIR" || exit 1
 exec > >(tee -a "$OUT/table.log") 2>&1
-OV=$V/$NAME-overlay.qcow2; SD=$SCR/$NAME-scratch.raw
+OV=$OVDIR/$NAME-overlay.qcow2; SD=$SCR/$NAME-scratch.raw
 rm -f "$OV" "$SD"
-(cd $V && qemu-img create -q -f qcow2 -b "$BASE" -F qcow2 "$OV") || exit 1
+qemu-img create -q -f qcow2 -b "$BASE" -F qcow2 "$OV" || exit 1
 
 echo "===== boot $(date '+%F %T')  $KV"
 echo "cells: $CELLS"
@@ -129,7 +133,8 @@ rc=$?; cat "$OUT/setup.log"; [ $rc = 0 ] || die "guest setup failed"
 
 g "setsid nohup env CELLS='$CELLS' PROFILES='${PROFILES:-quiet busy}' \
 	LIMIT_ATOM=${LIMIT_ATOM:-1000} LIMIT_EPOCH=${LIMIT_EPOCH:-1000} \
-	PREFER_SPLIT=${PREFER_SPLIT:-0} CAP_PARAM='${CAP_PARAM:-}' TAU_SEG='${TAU_SEG:-2m}' \
+	PREFER_SPLIT=${PREFER_SPLIT:-0} CAP_PARAM='${CAP_PARAM:-}' EXPLORE_PARAM='${EXPLORE_PARAM:-}' \
+	TAU_SEG='${TAU_SEG:-2m}' \
 	MKFS_OPTS='${MKFS_OPTS:-}' \
 	TAG='${TAG:-}' bash ~/torner/campaign/table_guest.sh > /mnt/scratch/table_guest.log 2>&1 < /dev/null &"
 deadline=$(( $(date +%s) + ${DEADLINE_MIN:-600} * 60 ))
