@@ -691,7 +691,7 @@ It commits the later write (journaled) and leaves the earlier one's revoke tag
 pending, so after the power cut the later write is there and the earlier one is
 rolled back to its journal copy -- whole, and never older than what the last
 fsync promised. tau keeps each write untorn; it does not keep unsynced writes
-in order (`taudocs/architecture.md` §8.7).
+in order (`taudocs/paper/architecture.md` §8.7).
 
 ```sh
 tools/tautest/host/split-test.sh both        # ~2 minutes per case
