@@ -69,6 +69,7 @@ full_page_writes / InnoDB doublewrite; KB/trx = device writes per transaction at
 | write_only | ext4-dj40-uniform | off | 1109 | 5202 | 6921 | 8164 | 9264 | 124.4 | `20261017_202936_uniform` |
 | write_only | ext4-fullfill | off | 2388 | 16662 | 27414 | 38897 | 45597 | 25.7 | `20261009_212738_fullfill` |
 | write_only | ext4-fullfill | on | 2047 | 13091 | 19840 | 26331 | 33192 | 47.5 | `20261009_212738_fullfill` |
+| write_only | ext4-odirect | off | 2624 | 18247 | 31069 | 44438 | 56572 | 10.7 | `20261030_171320_odirect` |
 | write_only | ext4-odirect | on | 2498 | 16474 | 28416 | 40154 | 50418 | 18.4 | `20261030_092359_odirect` |
 | write_only | ext4-ssd990 | off | 180 | 1125 | 2205 | 4176 | 5087 | 36.5 | `20261025_114503_ssd990`, `20261029_082315_ssd990` |
 | write_only | ext4-ssd990 | on | 121 | 663 | 1254 | 1483 | 1048 | 51.5 | `20261028_232948_ssd990`, `20261029_003917_ssd990` |
