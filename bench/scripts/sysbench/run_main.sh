@@ -104,6 +104,7 @@ source "$TAUFS_BENCH/scripts/$DBMS/api.sh"
 # Reference points (EVAL_PLAN §2.2) change one fixed setting. The variant name
 # is added to the result directory and after the FS in every label (ext4-odirect).
 VARIANT="${VARIANT:-}"
+IMAGE_ROWS=""   # set by VARIANT=empty only, not taken from the environment
 case "$VARIANT" in
   "") ;;
   odirect)  # EVAL_PLAN §2.2 reference point: MySQL 8.4's default flush method (O_DIRECT)
@@ -129,6 +130,11 @@ case "$VARIANT" in
     MY_BINLOG=ON ;;
   fullfill)  # SSD sensitivity: the whole device written once after the trim (common.sh)
     TAU_FILL_BEFORE_RESTORE=1 ;;
+  empty)  # EVAL_PLAN DB3 insert-from-empty: oltp_insert into the empty tables of the
+          # t16_r0 images (IMAGE_ROWS=0 create_image.sh), so every write goes to a
+          # growing table; --table-size stays the main one (the range of the k values)
+    [[ "${WORKLOADS[*]}" == oltp_insert ]] || { echo "❌ VARIANT=empty is for oltp_insert"; exit 1; }
+    IMAGE_ROWS=0 ;;
   ssd990)  # consumer SSD (no PLP, volatile cache): the test device is the 990 PRO 4TB
             # (TAU_TARGET_DISK when set_env.sh ran), kept in its steady state: no trim
             # before the restore, no online discard (btrfs nodiscard; common.sh); MySQL's
@@ -166,7 +172,7 @@ fi
 
 TABLE=$MAIN_TABLES
 ROWS=$MAIN_ROWS_PER_TABLE
-IMAGE_KEY=$(main_image_key)
+IMAGE_KEY="t${TABLE}_r${IMAGE_ROWS:-$ROWS}"   # main_image_key, or VARIANT=empty's
 BACKUP_DIR=$TAU_BACKUP_ROOT/sysbench/$DBMS
 
 echo "=== Starting sysbench benchamrk: DBMS=$DBMS, image=$IMAGE_KEY${VARIANT:+, variant=$VARIANT} ==="

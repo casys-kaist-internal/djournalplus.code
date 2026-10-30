@@ -14,6 +14,9 @@ source "$TAUFS_BENCH/scripts/common.sh"
 source "$TAUFS_BENCH/scripts/$MODE/api.sh"
 
 SB_TABLES=($MAIN_TABLES)
+# IMAGE_ROWS=0: empty tables (with the k index), images <fs>_t16_r0.img for
+# run_main.sh VARIANT=empty (EVAL_PLAN DB3 insert-from-empty)
+MAIN_ROWS_PER_TABLE=${IMAGE_ROWS:-$MAIN_ROWS_PER_TABLE}
 
 BACKUP_DIR=$TAU_BACKUP_ROOT/sysbench/$MODE
 

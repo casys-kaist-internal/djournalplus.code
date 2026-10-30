@@ -2,7 +2,8 @@
 """EVAL_PLAN DB2 tables from profiling runs with PROFILE=files (run_main.sh,
 run_tpcc.sh): per measurement (<label>.bpftrace from file_writes.bt and
 <label>.inodes, the files of the mount at the end),
-  (a) the data files: how many the database has, how many were written, and
+  (a) the data files: how many the database has (all, and those of 64 MiB or
+      more: the tables and indexes, not the catalogs), how many were written, and
       how few take 50 / 90 / 99% of the data-file write bytes (and 90% of the
       write calls); the largest file's share; log and doublewrite bytes;
   (b) sync latency per file type (log, data, dwb): syncs, files synced, the
@@ -133,6 +134,7 @@ def run_rows(label, bt, inodes):
     a = {
         "run": label,
         "data files": len(data_files),
+        ">=64MiB": sum(1 for i in data_files if files[i][0] >= 64 << 20),
         "data GiB": sum(files[i][0] for i in data_files) / 2**30,
         "written": len(data_bytes),
         "50% B": cover(data_bytes, 0.5),
@@ -185,7 +187,7 @@ def main():
             A.append(a)
             B.extend(b)
     print("## (a) Data files written\n")
-    print("\n".join(table(A, ["run", "data files", "data GiB", "written", "50% B", "90% B", "99% B",
+    print("\n".join(table(A, ["run", "data files", ">=64MiB", "data GiB", "written", "50% B", "90% B", "99% B",
                               "90% calls", "top file %", "data GB", "log GB", "dwb GB",
                               "data KiB/write"])))
     print("\n## (b) Sync latency per file type (µs)\n")
