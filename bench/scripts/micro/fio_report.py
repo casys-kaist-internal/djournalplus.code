@@ -15,7 +15,10 @@ commit_p99_us: the batch commit, see atomicw.c), then tool, commit_p999_us, sync
 elapsed_total_s (to after syncfs + umount), dev_write_bytes (start to after
 umount), io_bytes, tau_fds (fio's open files under the mount with
 O_TAU_UNTORN, mid-run), tau_used_max_mb and tau_running_max (the kernel's
-Tau_Daemon lines, every 15 s).
+Tau_Daemon lines, every 15 s), then from atomicw (2026-10-30 on): write_files
+(files written; the rest stay open), cpu_proc_us_per_page and
+cpu_host_us_per_page (CPU over the window, the process and the whole host, per
+16 KiB page), host_busy_pct, slab_mb and sunreclaim_mb (at the window's end).
 
 dev_write_gb_s is the device's written bytes from the start of fio to after
 syncfs + umount over that time (GB = 10^9 bytes); dev_bytes_per_16k is KiB
@@ -37,9 +40,11 @@ COLS = ["exp", "config", "op", "threads", "files", "fdatasync_n", "dist", "rep",
         "dev_write_gb_s", "dev_bytes_per_16k", "kernel", "notes",
         "wmode", "batch_n", "commit_mean_us", "commit_p99_us", "tool", "commit_p999_us",
         "sync_n", "elapsed_s", "elapsed_total_s", "dev_write_bytes", "io_bytes", "tau_fds",
-        "tau_used_max_mb", "tau_running_max"]
+        "tau_used_max_mb", "tau_running_max",
+        "write_files", "cpu_proc_us_per_page", "cpu_host_us_per_page", "host_busy_pct", "slab_mb",
+        "sunreclaim_mb"]
 ORDER = ["EXT4_Raw", "XFS_Raw", "EXT4_App", "XFS_App", "EXT4_Data", "ZFS", "tau-EXT4", "tau-XFS"]
-EXPS = ["e1", "e2", "sync1", "zoned", "bytes", "gate", "kcheck"]
+EXPS = ["e1", "e2", "sync1", "zoned", "bytes", "gate", "kcheck", "r1"]
 OPS = ["overwrite", "prealloc", "hole", "append"]
 TAU_LINE = re.compile(r"^\[ *([\d.]+)\] Tau_Daemon: Used journal (\d+)MB / \(Total\) (\d+)MB, running tau: (\d+)")
 MARK = re.compile(r"^\[ *([\d.]+)\] fio-run-")
@@ -93,6 +98,9 @@ def aw_row(prefix, r):
     r["sync_mean_us"], r["sync_p99_us"] = a["sync_mean_us"], a["sync_p99_us"]
     r["write_p999_us"], r["write_max_us"] = a["write_p999_us"], a["write_max_us"]
     r["sync_n"] = a["batches"]
+    for k in ("write_files", "cpu_proc_us_per_page", "cpu_host_us_per_page", "host_busy_pct", "slab_mb",
+              "sunreclaim_mb"):    # atomicw 2026-10-30 and later
+        r[k] = a.get(k, "")
     return int(a["pages"]) * unit, [a["notes"]] if a.get("notes") else [], None
 
 

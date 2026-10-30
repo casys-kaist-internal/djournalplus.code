@@ -13,6 +13,9 @@
  * Files: <dir>/<--file-fmt, default f%03d> (--files F, --total split
  * evenly). With F >= T thread t owns files t, t+T, ...; with F < T (T a
  * multiple of F) T/F threads share a file, each a disjoint range of it.
+ * --write-files N: the threads write only the first N files (the rules
+ * above with N for F); the other F - N stay open, written by nobody (the
+ * "many files open, few written" case of EVAL_PLAN R1).
  *
  * Patterns:
  *   overwrite  files prepared beforehand (--prepare, or another tool with
@@ -36,7 +39,10 @@
  * fdatasync); sync = the data-file fdatasync; write = one in-place page
  * pwrite. Percentiles from a log-linear histogram (<1.6% bucket width).
  * Device bytes: change of sectors written (field 7 of /sys/block/<dev>/stat)
- * over the window. Output: one CSV line (--csv-header prints the header);
+ * over the window. CPU over the window: this process (getrusage) and the
+ * whole host (/proc/stat busy jiffies), each per data page; Slab and
+ * SUnreclaim (/proc/meminfo) at the window's end. Output: one CSV line
+ * (--csv-header prints the header);
  * --timeline writes pages per second.
  *
  * --mode tau (or --tau) refuses to run, unless --no-tau-check, if the kernel
@@ -54,6 +60,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <time.h>
@@ -126,7 +133,7 @@ static struct {
 	const char *dir, *dev, *hist_path, *tl_path, *label, *fmt;
 	enum pattern pattern;
 	enum wmode mode;
-	int threads, files, warmup, duration, tau_check, use_fsync, prepare, zoned, time_based, batch;
+	int threads, files, write_files, warmup, duration, tau_check, use_fsync, prepare, zoned, time_based, batch;
 	uint64_t total, unit, file_size, file_units, seed;
 } o = {
 	.threads = 1, .files = 64, .warmup = 10, .duration = 180, .tau_check = 1, .batch = 64,
@@ -347,7 +354,7 @@ static void tau_check(void)
 static void setup_thread(struct thr *t)
 {
 	char p[4096];
-	int T = o.threads, F = o.files;
+	int T = o.threads, F = o.write_files ? o.write_files : o.files;
 	if (F >= T) {
 		t->nsegs = (F - t->id + T - 1) / T;
 		t->segs = calloc((size_t)t->nsegs, sizeof(*t->segs));
@@ -551,7 +558,7 @@ static void usage(void)
 {
 	fprintf(stderr,
 		"usage: atomicw --dir DIR --pattern overwrite|prealloc|hole|append [--mode raw|tau|app]\n"
-		"  [--threads T] [--files F] [--file-fmt f%%03d] [--total 128G] [--unit 16384]\n"
+		"  [--threads T] [--files F] [--write-files N] [--file-fmt f%%03d] [--total 128G] [--unit 16384]\n"
 		"  [--batch 64] [--dist uniform|zoned] [--warmup 10] [--duration 180] [--time-based]\n"
 		"  [--seed 1] [--dev nvme0c0n1] [--fsync] [--no-tau-check]\n"
 		"  [--hist FILE] [--timeline FILE] [--label TEXT] [--prepare] [--csv-header]\n");
@@ -561,7 +568,45 @@ static void usage(void)
 static const char *csv_header =
 	"wmode,pattern,threads,files,batch,unit,dist,run,pages,batches,duration_s,iops,"
 	"commit_mean_us,commit_p99_us,commit_p999_us,commit_max_us,sync_mean_us,sync_p99_us,"
-	"write_p999_us,write_max_us,dev_bytes_per_page,dev_flushes_per_batch,exhausted,notes";
+	"write_p999_us,write_max_us,dev_bytes_per_page,dev_flushes_per_batch,exhausted,"
+	"write_files,cpu_proc_us_per_page,cpu_host_us_per_page,host_busy_pct,slab_mb,sunreclaim_mb,notes";
+
+/* CPU seconds of this process, and the host's busy and total jiffies */
+static void cpu_sample(double *proc_s, uint64_t *busy, uint64_t *total)
+{
+	struct rusage ru;
+	unsigned long long v[8] = { 0 };
+	getrusage(RUSAGE_SELF, &ru);
+	*proc_s = (double)ru.ru_utime.tv_sec + ru.ru_utime.tv_usec / 1e6 +
+		  (double)ru.ru_stime.tv_sec + ru.ru_stime.tv_usec / 1e6;
+	*busy = *total = 0;
+	FILE *f = fopen("/proc/stat", "r");
+	if (!f)
+		return;
+	if (fscanf(f, "cpu %llu %llu %llu %llu %llu %llu %llu %llu", &v[0], &v[1], &v[2], &v[3],
+		   &v[4], &v[5], &v[6], &v[7]) == 8) {
+		*busy = v[0] + v[1] + v[2] + v[5] + v[6] + v[7];	/* user nice system irq softirq steal */
+		*total = *busy + v[3] + v[4];				/* + idle iowait */
+	}
+	fclose(f);
+}
+
+static double meminfo_mb(const char *key)
+{
+	char line[256];
+	size_t n = strlen(key);
+	double kb = -1;
+	FILE *f = fopen("/proc/meminfo", "r");
+	if (!f)
+		return -1;
+	while (fgets(line, sizeof(line), f))
+		if (!strncmp(line, key, n) && line[n] == ':') {
+			kb = strtod(line + n + 1, NULL);
+			break;
+		}
+	fclose(f);
+	return kb < 0 ? -1 : kb / 1024;
+}
 
 static double pctl(uint64_t *hist, uint64_t n, double q)
 {
@@ -594,7 +639,7 @@ int main(int argc, char **argv)
 		{ "no-tau-check", 0, 0, 'N' }, { "hist", 1, 0, 'H' }, { "timeline", 1, 0, 'L' },
 		{ "label", 1, 0, 'l' }, { "prepare", 0, 0, 'P' }, { "csv-header", 0, 0, 'C' },
 		{ "mode", 1, 0, 'm' }, { "batch", 1, 0, 'b' }, { "dist", 1, 0, 'z' },
-		{ "time-based", 0, 0, 'B' }, { "file-fmt", 1, 0, 'n' },
+		{ "time-based", 0, 0, 'B' }, { "file-fmt", 1, 0, 'n' }, { "write-files", 1, 0, 'W' },
 		{ 0, 0, 0, 0 }
 	};
 	const char *pat = NULL;
@@ -605,6 +650,7 @@ int main(int argc, char **argv)
 		case 'p': pat = optarg; break;
 		case 't': o.threads = atoi(optarg); break;
 		case 'f': o.files = atoi(optarg); break;
+		case 'W': o.write_files = atoi(optarg); break;
 		case 'S': o.total = parse_size(optarg); break;
 		case 'u': o.unit = parse_size(optarg); break;
 		case 'w': o.warmup = atoi(optarg); break;
@@ -637,8 +683,11 @@ int main(int argc, char **argv)
 	}
 	if (!o.dir)
 		usage();
-	if (o.files < 1 || o.files > 4096 || o.threads < 1 || o.unit % 4096 || o.unit == 0 || o.batch < 1)
+	if (o.files < 1 || o.files > 1048576 || o.threads < 1 || o.unit % 4096 || o.unit == 0 || o.batch < 1 ||
+	    o.write_files < 0 || o.write_files > o.files)
 		usage();
+	if (o.write_files == o.files)
+		o.write_files = 0;
 	o.file_size = o.total / (uint64_t)o.files / o.unit * o.unit;
 	o.file_units = o.file_size / o.unit;
 	if (o.prepare) {
@@ -655,7 +704,8 @@ int main(int argc, char **argv)
 		}
 	if (!found)
 		usage();
-	if (o.files < o.threads && (o.threads % o.files || o.pattern == P_APPEND))
+	int fw = o.write_files ? o.write_files : o.files;
+	if (fw < o.threads && (o.threads % fw || o.pattern == P_APPEND))
 		die("with fewer files than threads, threads must be a multiple of files (not append)");
 	if (o.mode == M_TAU && o.tau_check)
 		tau_check();
@@ -671,21 +721,35 @@ int main(int argc, char **argv)
 		th[i].id = i;
 		setup_thread(&th[i]);
 	}
+	int *idle_fds = NULL;	/* --write-files: the files nobody writes, kept open */
+	if (o.write_files) {
+		char p[4096];
+		idle_fds = malloc((size_t)(o.files - o.write_files) * sizeof(int));
+		for (int f = o.write_files; f < o.files; f++) {
+			file_path(p, sizeof(p), f);
+			idle_fds[f - o.write_files] = open(p, open_flags());
+			if (idle_fds[f - o.write_files] < 0)
+				die("open %s: %s", p, strerror(errno));
+		}
+	}
 	sync();
 	pthread_barrier_init(&barrier, NULL, (unsigned)o.threads + 1);
 	for (int i = 0; i < o.threads; i++)
 		pthread_create(&th[i].tid, NULL, worker, &th[i]);
 
-	uint64_t d0[17], d1[17];
+	uint64_t d0[17], d1[17], cb0, cb1, ct0, ct1;
+	double cp0, cp1;
 	int have_dev, warm_exhausted = 0;
 	t_start = now_ns();
 	if (size_based) {
 		atomic_store(&m_start, t_start);
 		have_dev = read_devstat(d0) == 0;
+		cpu_sample(&cp0, &cb0, &ct0);
 		pthread_barrier_wait(&barrier);
 		for (int i = 0; i < o.threads; i++)
 			pthread_join(th[i].tid, NULL);
 		read_devstat(d1);
+		cpu_sample(&cp1, &cb1, &ct1);
 		uint64_t last = t_start;
 		for (int i = 0; i < o.threads; i++)
 			if (th[i].finish > last)
@@ -699,8 +763,10 @@ int main(int argc, char **argv)
 		sleep_until(ms);
 		warm_exhausted = atomic_load(&exhaust_ns) <= ms;
 		have_dev = read_devstat(d0) == 0;
+		cpu_sample(&cp0, &cb0, &ct0);
 		sleep_until(atomic_load(&m_end));
 		read_devstat(d1);
+		cpu_sample(&cp1, &cb1, &ct1);
 		atomic_store(&stop_flag, 1);
 		for (int i = 0; i < o.threads; i++)
 			pthread_join(th[i].tid, NULL);
@@ -747,15 +813,19 @@ int main(int argc, char **argv)
 	if (!have_dev)
 		strncat(notes, notes[0] ? "; no devstat" : "no devstat", sizeof(notes) - strlen(notes) - 1);
 	double nb = lc.n ? (double)lc.n : 1;
+	double np = pages ? (double)pages : 1, tck = (double)sysconf(_SC_CLK_TCK);
+	double cpu_proc = (cp1 - cp0) * 1e6 / np, cpu_host = (double)(cb1 - cb0) / tck * 1e6 / np;
+	double busy_pct = ct1 > ct0 ? 100.0 * (double)(cb1 - cb0) / (double)(ct1 - ct0) : 0;
 	printf("%s,%s,%d,%d,%d,%" PRIu64 ",%s,%s,%" PRIu64 ",%" PRIu64 ",%.3f,%.1f,"
-	       "%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.0f,%.3f,%d,%s\n",
+	       "%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.0f,%.3f,%d,%d,%.2f,%.2f,%.1f,%.0f,%.0f,%s\n",
 	       mode_names[o.mode], pattern_names[o.pattern], o.threads, o.files, o.batch, o.unit,
 	       o.zoned ? "zoned:75/1:25/99" : "uniform", size_based ? "size" : "time",
 	       pages, batches, dur, dur > 0 ? pages / dur : 0,
 	       lc.sum / nb / 1e3, pctl(lc.hist, lc.n, 0.99) / 1e3, pctl(lc.hist, lc.n, 0.999) / 1e3,
 	       lc.max / 1e3, ls.sum / nb / 1e3, pctl(ls.hist, ls.n, 0.99) / 1e3,
 	       pctl(lw.hist, lw.n, 0.999) / 1e3, lw.max / 1e3, dev_bytes, dev_flush,
-	       ex != UINT64_MAX, notes);
+	       ex != UINT64_MAX, fw, cpu_proc, cpu_host, busy_pct, meminfo_mb("Slab"),
+	       meminfo_mb("SUnreclaim"), notes);
 	if (o.hist_path) {
 		FILE *f = fopen(o.hist_path, "w");
 		if (f) {

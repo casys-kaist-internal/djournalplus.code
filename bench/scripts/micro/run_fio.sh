@@ -40,7 +40,11 @@
 #          1 s and, after the journal fills, the last 60 s run within 5% of the
 #          middle 60 s (fio_report.py gate)
 #   kcheck EXT4_Raw e1 overwrite at TOP_T jobs on the tau kernel, against base+
-# Runs: REPS_TOP at TOP_T (e1) and for e2, sync1, zoned, kcheck; REPS at the
+#   r1     EVAL_PLAN R1, atomicw only: overwrite at TOP_T threads on R1_FILES
+#          files (TOTAL_GB split evenly, laid out with atomicw --prepare), an
+#          fdatasync every R1_FSYNC_N (1) writes; then R1_OPEN "F:N" cases, F
+#          files open and only N written (atomicw --write-files)
+# Runs: REPS_TOP at TOP_T (e1) and for e2, sync1, zoned, kcheck, r1; REPS at the
 # other thread counts; bytes and gate once.
 #
 # Per configuration: trim the SSD, mkfs, lay out the overwrite files of every
@@ -71,6 +75,7 @@ else
 fi
 EXPS=${EXPS:-e1 e2 sync1 zoned bytes}
 TOOL=${TOOL:-atomicw}
+[[ $TOOL == atomicw || " $EXPS " != *" r1 "* ]] || { echo "❌ EXPS r1 needs TOOL=atomicw"; exit 1; }
 [[ $TOOL == atomicw || $TOOL == fio ]] || { echo "❌ TOOL is atomicw or fio"; exit 1; }
 OPS=${OPS:-overwrite prealloc hole append}
 THREADS_LIST=${THREADS_LIST:-1 8 16 32 64}
@@ -90,6 +95,9 @@ TOP_T=${TOP_T:-64}
 NO_DISCARD=${NO_DISCARD:-0}  # 1: no blkdiscard and no mkfs discard (a preconditioned consumer SSD)
 ZONED_CONFIGS=${ZONED_CONFIGS:-EXT4_Raw EXT4_Data tau-EXT4}
 ZONED_DIST=${ZONED_DIST:-zoned:75/1:25/99}
+R1_FILES=${R1_FILES:-1000 10000 100000}
+R1_OPEN=${R1_OPEN:-100000:100}
+R1_FSYNC_N=${R1_FSYNC_N:-1}
 
 has() { [[ " $1 " == *" $2 "* ]]; }
 
@@ -284,8 +292,19 @@ layout_e2() {  # <dir> <files>
   fio --output-format=terse "$RESULT_DIR/runs/layout.fio" > /dev/null
 }
 
-# fresh file system with the overwrite layouts of the given "t<T>" / "f<F>"
-# directories, then idle
+layout_r1() {  # <dir> <files>: atomicw's own layout (fio cannot run 10^5 jobs)
+  mkdir -p "$1"
+  "$AW" --prepare --dir "$1" --files "$2" --total "${TOTAL_GB}g" --file-fmt 'r1.%d' > /dev/null
+}
+
+# the r1 run as a job text for the record; aw_args turns it into atomicw's options
+job_r1() {  # <dir> <files> <files written>
+  printf '# r1: atomicw only\n[r1]\ndirectory=%s\nfiles=%s\nwrite_files=%s\ntotal=%sg\nnumjobs=%s\nfdatasync=%s\nramp_time=%s\nruntime=%s\n' \
+    "$1" "$2" "$3" "$TOTAL_GB" "$TOP_T" "$R1_FSYNC_N" "$RAMP" "$RUNTIME"
+}
+
+# fresh file system with the overwrite layouts of the given "t<T>" / "f<F>" /
+# "r<F>" directories, then idle
 fresh_fs() {  # <config> <what> <layouts...>
   local cfg=$1 what=$2 l t0
   shift 2
@@ -297,6 +316,7 @@ fresh_fs() {  # <config> <what> <layouts...>
     case $l in
       t*) layout_e1 "$MOUNT_DIR/$l" "${l#t}" ;;
       f*) layout_e2 "$MOUNT_DIR/$l" "${l#f}" ;;
+      r*) layout_r1 "$MOUNT_DIR/$l" "${l#r}" ;;
     esac
     echo "--> $cfg: laid out $l (${TOTAL_GB} GiB) in $(( $(date +%s) - t0 )) s"
   done
@@ -307,10 +327,18 @@ fresh_fs() {  # <config> <what> <layouts...>
 # the atomicw run of a fio job (AWARGS): same directory, files, sizes, batch,
 # ramp, run time, distribution
 aw_args() {  # <config> <job text> <out prefix> <mode time|size>
-  local job=$2 op dir files t total fsize fmt n ramp=0 run
+  local job=$2 op dir files t total fsize fmt n ramp=0 run wf=""
   op=$(grep -m1 -oE '^\[(overwrite|prealloc|hole|append)\]' <<< "$job" | tr -d '[]')
   n=$(grep -m1 '^fdatasync=' <<< "$job" | cut -d= -f2)
-  if [[ -n $op ]]; then                                        # e1: one file per job
+  if grep -q '^\[r1\]' <<< "$job"; then                         # r1: atomicw's options as written
+    op=overwrite
+    dir=$(grep -m1 '^directory=' <<< "$job" | cut -d= -f2)
+    files=$(grep -m1 '^files=' <<< "$job" | cut -d= -f2)
+    wf=$(grep -m1 '^write_files=' <<< "$job" | cut -d= -f2)
+    t=$(grep -m1 '^numjobs=' <<< "$job" | cut -d= -f2)
+    fsize=0; total=$(grep -m1 '^total=' <<< "$job" | cut -d= -f2 | tr -d g)
+    fmt='r1.%d'
+  elif [[ -n $op ]]; then                                      # e1: one file per job
     dir=$(grep -m1 '^directory=' <<< "$job" | cut -d= -f2)
     t=$(grep -m1 '^numjobs=' <<< "$job" | cut -d= -f2); files=$t
     fsize=$(grep -m1 '^filesize=' <<< "$job" | cut -d= -f2 | tr -d g)
@@ -323,7 +351,7 @@ aw_args() {  # <config> <job text> <out prefix> <mode time|size>
     fsize=$(grep -m1 '^filesize=' <<< "$job" | cut -d= -f2 | tr -d g)
     fmt='e2.%d'
   fi
-  total=$(( fsize * files ))
+  [[ $fsize == 0 ]] || total=$(( fsize * files ))
   grep -q '^ramp_time=' <<< "$job" && ramp=$(grep -m1 '^ramp_time=' <<< "$job" | cut -d= -f2)
   run=$(grep -m1 '^runtime=' <<< "$job" | cut -d= -f2)
   local mode=raw
@@ -332,6 +360,7 @@ aw_args() {  # <config> <job text> <out prefix> <mode time|size>
           --file-fmt "$fmt" --batch "$n" --warmup "$ramp" --dev "$STATDEV"
           --timeline "$3.tl" --hist "$3.hist" --label "${3##*/}")
   [[ -z $run ]] || AWARGS+=(--duration "$run")
+  [[ -z $wf || $wf == "$files" ]] || AWARGS+=(--write-files "$wf")
   [[ $op == overwrite || $4 == size ]] || AWARGS+=(--time-based)
   grep -q '^random_distribution=zoned' <<< "$job" && AWARGS+=(--dist zoned)
   return 0
@@ -455,6 +484,18 @@ e2_runs() {  # <config> <F>
   done
 }
 
+r1_runs() {  # <config>: R1_FILES files written, then the R1_OPEN "F:N" cases
+  local cfg=$1 f n c rep
+  for c in $(for f in $R1_FILES; do echo "$f:$f"; done) $R1_OPEN; do
+    f=${c%%:*}; n=${c##*:}
+    for (( rep = 1; rep <= REPS_TOP; rep++ )); do
+      LABEL="r1_${cfg}_overwrite_t${TOP_T}_f${f}_w${n}_r${rep}"
+      JOB=$(job_r1 "$MOUNT_DIR/r$f" "$f" "$n")
+      run_fio "$cfg" r1 overwrite "$TOP_T" "$f" "$R1_FSYNC_N" uniform "$rep" time "$MOUNT_DIR/r$f"
+    done
+  done
+}
+
 first_runs() {  # <config> <op> <T>: fresh files every run
   local cfg=$1 op=$2 t=$3 rep
   for (( rep = 1; rep <= $(nreps "$t"); rep++ )); do
@@ -477,17 +518,27 @@ for CONFIG in $CONFIGS; do
   done
   fs=()
   has "$EXPS" e2 && for f in $FILES_LIST; do fs+=("$f"); done
-  if (( ${#ts[@]} + ${#fs[@]} )); then
+  rs=()   # r1 layouts: R1_FILES and the F of every R1_OPEN case
+  if has "$EXPS" r1; then
+    for f in $R1_FILES $(for c in $R1_OPEN; do echo "${c%%:*}"; done); do has "${rs[*]}" "$f" || rs+=("$f"); done
+  fi
+  if (( ${#ts[@]} + ${#fs[@]} + ${#rs[@]} )); then
     if (( per )); then
       for t in "${ts[@]}"; do fresh_fs "$CONFIG" "t$t" "t$t"; overwrite_runs "$CONFIG" "$t"; done
       for f in "${fs[@]}"; do fresh_fs "$CONFIG" "f$f" "f$f"; e2_runs "$CONFIG" "$f"; done
+      if (( ${#rs[@]} )); then
+        lay=(); for f in "${rs[@]}"; do lay+=("r$f"); done
+        fresh_fs "$CONFIG" r1 "${lay[@]}"; r1_runs "$CONFIG"
+      fi
     else
       lay=()
       for t in "${ts[@]}"; do lay+=("t$t"); done
       for f in "${fs[@]}"; do lay+=("f$f"); done
+      for f in "${rs[@]}"; do lay+=("r$f"); done
       fresh_fs "$CONFIG" overwrite "${lay[@]}"
       for t in "${ts[@]}"; do overwrite_runs "$CONFIG" "$t"; done
       for f in "${fs[@]}"; do e2_runs "$CONFIG" "$f"; done
+      (( ${#rs[@]} == 0 )) || r1_runs "$CONFIG"
     fi
   fi
   # first writes
