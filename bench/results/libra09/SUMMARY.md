@@ -23,7 +23,7 @@ Machine (`env.txt` of mysql/20261019_061714; full snapshot in `bench/machines/li
 
 The τ rows (ext4-tau, xfs-tau and their variants) ran on the τ kernel (6.8.0tjournal+).
 
-The ssd990 rows ran on a Samsung 990 PRO 4TB (no PLP, volatile write cache) in its steady state (written once over its capacity, no trim before the restore), the baselines on the base kernel; their 64-thread points are one 40-min run (TPC-C: 64 terminals for 40 min once). The -kcheck rows are baselines run on the τ kernel as a kernel cross-check. The drive's own state shifted between 2026-10-26 and 10-27 (EXT4 Raw 64 threads: PG 8,872 -> 7,600 TPS, MySQL 8,060 -> ~5,000): compare ssd990 rows from runs of the same period only. MySQL runs from 2026-10-29 on pre-write the spare redo files after each start (mysql/api.sh prewrite_spare_redo).
+The ssd990 rows ran on a Samsung 990 PRO 4TB (no PLP, volatile write cache) in its steady state (written once over its capacity, no trim before the restore), the baselines on the base kernel; their 64-thread points are one 40-min run (TPC-C: 64 terminals for 40 min once). The -kcheck rows are baselines run on the τ kernel as a kernel cross-check. The drive settled into a slower steady state between 2026-10-26 and 10-27, its over-provisioning filled up (EXT4 Raw 64 threads: PG 8,872 -> 7,600 TPS, MySQL 8,060 -> ~5,000, stable since): ssd990 runs up to 2026-10-26 are from the earlier, transitional state and compare only among themselves. The steady-state set is the 64-thread/terminal points from 2026-10-29 on; MySQL runs from 2026-10-29 on pre-write the spare redo files after each start (mysql/api.sh prewrite_spare_redo).
 
 Throughput in transactions/s (mean of the runs at a point); protection on = PostgreSQL
 full_page_writes / InnoDB doublewrite; KB/trx = device writes per transaction at the most threads.
@@ -69,7 +69,7 @@ full_page_writes / InnoDB doublewrite; KB/trx = device writes per transaction at
 | write_only | ext4-dj40-uniform | off | 1109 | 5202 | 6921 | 8164 | 9264 | 124.4 | `20261017_202936_uniform` |
 | write_only | ext4-fullfill | off | 2388 | 16662 | 27414 | 38897 | 45597 | 25.7 | `20261009_212738_fullfill` |
 | write_only | ext4-fullfill | on | 2047 | 13091 | 19840 | 26331 | 33192 | 47.5 | `20261009_212738_fullfill` |
-| write_only | ext4-ssd990 | off | 180 | 1125 | 2205 | 4176 | 8060 | 30.7 | `20261025_114503_ssd990`, `20261025_135909_ssd990` |
+| write_only | ext4-ssd990 | off | 180 | 1125 | 2205 | 4176 | 5087 | 36.5 | `20261025_114503_ssd990`, `20261029_082315_ssd990` |
 | write_only | ext4-ssd990 | on | 121 | 663 | 1254 | 1483 | 1048 | 51.5 | `20261028_232948_ssd990`, `20261029_003917_ssd990` |
 | write_only | ext4-ssd990-kcheck | off |  |  |  |  | 7914 | 31.1 | `20261026_064604_ssd990-kcheck` |
 | write_only | ext4-tau | off | 2343 | 15626 | 26191 | 36383 | 43164 | 36.2 | `20261020_204243` |
@@ -132,8 +132,8 @@ full_page_writes / InnoDB doublewrite; KB/trx = device writes per transaction at
 | write_only | ext4-dj40-uniform | off | 1285 | 6151 | 9047 | 11432 | 12170 | 89.4 | `20261017_171541_uniform` |
 | write_only | ext4-fullfill | off | 2977 | 20278 | 35029 | 49947 | 61332 | 17.4 | `20261010_023220_fullfill` |
 | write_only | ext4-fullfill | on | 2724 | 15715 | 23145 | 28174 | 28737 | 50.2 | `20261010_023220_fullfill` |
-| write_only | ext4-ssd990 | off | 304 | 1197 | 2357 | 4562 | 8872 | 12.1 | `20261025_073136_ssd990`, `20261025_093855_ssd990` |
-| write_only | ext4-ssd990 | on | 291 | 1113 | 2195 | 3945 | 6313 | 48.2 | `20261025_073136_ssd990`, `20261025_093855_ssd990` |
+| write_only | ext4-ssd990 | off | 304 | 1197 | 2357 | 4562 | 7519 | 12.3 | `20261025_073136_ssd990`, `20261030_053744_ssd990` |
+| write_only | ext4-ssd990 | on | 291 | 1113 | 2195 | 3945 | 4198 | 46.9 | `20261025_073136_ssd990`, `20261030_022354_ssd990` |
 | write_only | ext4-ssd990-kcheck | off |  |  |  |  | 8867 | 12.0 | `20261026_054259_ssd990-kcheck` |
 | write_only | ext4-tau | off | 2946 | 19512 | 31269 | 42540 | 50690 | 32.3 | `20261020_122600` |
 | write_only | ext4-tau-ssd990 | off | 288 | 1096 | 2135 | 4052 | 7504 | 22.9 | `20261026_012613_ssd990`, `20261026_022929_ssd990` |
@@ -161,7 +161,7 @@ TPC-C (BenchBase, warehouses chosen at random per transaction, no think time): t
 | ext4 | on | 1100 | 7262 | 50009 | 86183 | 118345 | 135912 | 53.5 | 582 | `20261015_011917` |
 | ext4-dj40 | off | 1100 | 6754 | 39806 | 61554 | 82381 | 98184 | 89.5 | 590 | `20261015_100648` |
 | ext4-dj40-ssd990 | off | 1100 | 1317 | 6331 | 10124 | 17455 | 23240 | 261.3 | 626 | `20261029_103456_ssd990`, `20261029_160107_ssd990` |
-| ext4-ssd990 | off | 1100 | 2027 | 10247 | 18178 | 26970 | 70033 | 75.6 | 294 | `20261026_145137_ssd990`, `20261028_035259_ssd990` |
+| ext4-ssd990 | off | 1100 | 2027 | 10247 | 18178 | 26970 | 37380 | 187.5 | 302 | `20261028_035259_ssd990`, `20261029_134822_ssd990` |
 | ext4-ssd990 | on | 1100 | 2129 | 6763 | 10614 | 12690 | 6189 | 2156.2 | 584 | `20261029_092916_ssd990`, `20261029_145440_ssd990` |
 | ext4-tau | off | 1100 | 7362 | 52725 | 93039 | 132443 | 155754 | 43.6 | 421 | `20261021_071529` |
 | ext4-tau-ssd990 | off | 1100 |  |  |  |  | 52084 | 106.4 | 529 | `20261026_101921_ssd990` |
@@ -182,8 +182,8 @@ TPC-C (BenchBase, warehouses chosen at random per transaction, no think time): t
 | ext4 | on | 1100 | 16538 | 115313 | 199450 | 263246 | 305602 | 20.5 | 264 | `20261014_230651` |
 | ext4-dj40 | off | 1100 | 16502 | 109266 | 179957 | 243801 | 297181 | 57.6 | 196 | `20261015_045502` |
 | ext4-dj40-ssd990 | off | 1100 | 2165 | 8919 | 17567 | 28483 | 46695 | 220.6 | 229 | `20261027_070025_ssd990`, `20261027_234531_ssd990` |
-| ext4-ssd990 | off | 1100 | 6194 | 18795 | 34630 | 61389 | 139655 | 38.3 | 92 | `20261026_124236_ssd990`, `20261027_213557_ssd990` |
-| ext4-ssd990 | on | 1100 | 5666 | 15746 | 26498 | 38798 | 86108 | 66.2 | 282 | `20261026_124236_ssd990`, `20261027_213557_ssd990` |
+| ext4-ssd990 | off | 1100 | 6194 | 18795 | 34630 | 61389 | 92841 | 67.5 | 98 | `20261027_213557_ssd990`, `20261030_032809_ssd990` |
+| ext4-ssd990 | on | 1100 | 5666 | 15746 | 26498 | 38798 | 47713 | 126.9 | 300 | `20261027_213557_ssd990`, `20261030_032809_ssd990` |
 | ext4-tau | off | 1100 | 18704 | 136535 | 249175 | 352011 | 419372 | 14.3 | 179 | `20261021_050528` |
 | ext4-tau-ssd990 | off | 1100 |  |  |  |  | 110911 | 48.6 | 171 | `20261026_091450_ssd990` |
 | xfs | off | 1100 | 18792 | 140484 | 262619 | 377616 | 449526 | 14.3 | 99 | `20261015_045502` |

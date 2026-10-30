@@ -179,12 +179,14 @@ def summary_md(raw, runs, tpcc=None):
                   " in its steady state (written once over its capacity, no trim before the"
                   " restore), the baselines on the base kernel; their 64-thread points are one"
                   " 40-min run (TPC-C: 64 terminals for 40 min once). The -kcheck rows are"
-                  " baselines run on the τ kernel as a kernel cross-check. The drive's own"
-                  " state shifted between 2026-10-26 and 10-27 (EXT4 Raw 64 threads: PG"
-                  " 8,872 -> 7,600 TPS, MySQL 8,060 -> ~5,000): compare ssd990 rows from"
-                  " runs of the same period only. MySQL runs from 2026-10-29 on pre-write"
-                  " the spare redo files after each start (mysql/api.sh prewrite_spare_redo).",
-                  ""]
+                  " baselines run on the τ kernel as a kernel cross-check. The drive settled"
+                  " into a slower steady state between 2026-10-26 and 10-27, its"
+                  " over-provisioning filled up (EXT4 Raw 64 threads: PG 8,872 -> 7,600 TPS,"
+                  " MySQL 8,060 -> ~5,000, stable since): ssd990 runs up to 2026-10-26 are"
+                  " from the earlier, transitional state and compare only among themselves."
+                  " The steady-state set is the 64-thread/terminal points from 2026-10-29"
+                  " on; MySQL runs from 2026-10-29 on pre-write the spare redo files after"
+                  " each start (mysql/api.sh prewrite_spare_redo).", ""]
     lines += ["Throughput in transactions/s (mean of the runs at a point);"
               " protection on = PostgreSQL",
               "full_page_writes / InnoDB doublewrite; KB/trx = device writes per"
