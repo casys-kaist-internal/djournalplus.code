@@ -1,0 +1,98 @@
+#!/usr/bin/env bpftrace
+/*
+ * EVAL_PLAN M3: where one process's fsync time goes (run_fio.sh M3_TRACE=1
+ * attaches it to atomicw after the ramp; ends with SIGINT). Needs kernel BTF.
+ *
+ * $1  pid (atomicw)
+ * $2  dev_t of the test device (major << 20 | minor), for the jbd2 tracepoint
+ *
+ * Per vfs_fsync_range of the process (fdatasync or fsync: @sync_ds counts the
+ * fdatasyncs), the time nested in it, summed over all syncs:
+ *   D   file_write_and_wait_range   data writeback and its wait
+ *   JC  jbd2_log_wait_commit        ext4: waiting for the journal commit
+ *   LF  xfs_log_force_seq           XFS: the log force
+ *   FL  blkdev_issue_flush          the cache flush (none sent to a
+ *                                   write-through device)
+ * and the jbd2 commits of the device (all of them, not only the process's):
+ * request delay, running, locked (waiting for handles), flushing (ordered
+ * data), logging (journal blocks and the commit block) in jiffies (HZ 1000 on
+ * the base kernel: ms), handles and blocks. Times in microseconds.
+ */
+
+kprobe:vfs_fsync_range /pid == $1/
+{
+	@s[tid] = nsecs;
+	@ds[tid] = arg3;
+}
+
+kretprobe:vfs_fsync_range /pid == $1 && @s[tid]/
+{
+	$us = (nsecs - @s[tid]) / 1000;
+	@sync_n = count();
+	@sync_us = sum($us);
+	@sync_ds = sum(@ds[tid] != 0 ? 1 : 0);
+	@sync_hist = hist($us);
+	delete(@s[tid]);
+	delete(@ds[tid]);
+}
+
+kprobe:file_write_and_wait_range /pid == $1 && @s[tid]/ { @d0[tid] = nsecs; }
+kretprobe:file_write_and_wait_range /pid == $1 && @d0[tid]/
+{
+	@D_n = count();
+	@D_us = sum((nsecs - @d0[tid]) / 1000);
+	delete(@d0[tid]);
+}
+
+kprobe:jbd2_log_wait_commit /pid == $1 && @s[tid]/ { @j0[tid] = nsecs; }
+kretprobe:jbd2_log_wait_commit /pid == $1 && @j0[tid]/
+{
+	@JC_n = count();
+	@JC_us = sum((nsecs - @j0[tid]) / 1000);
+	delete(@j0[tid]);
+}
+
+kprobe:xfs_log_force_seq /pid == $1 && @s[tid]/ { @x0[tid] = nsecs; }
+kretprobe:xfs_log_force_seq /pid == $1 && @x0[tid]/
+{
+	@LF_n = count();
+	@LF_us = sum((nsecs - @x0[tid]) / 1000);
+	delete(@x0[tid]);
+}
+
+kprobe:blkdev_issue_flush /pid == $1 && @s[tid]/ { @f0[tid] = nsecs; }
+kretprobe:blkdev_issue_flush /pid == $1 && @f0[tid]/
+{
+	@FL_n = count();
+	@FL_us = sum((nsecs - @f0[tid]) / 1000);
+	delete(@f0[tid]);
+}
+
+tracepoint:jbd2:jbd2_run_stats /args.dev == $2/
+{
+	@jc_n = count();
+	@jc_request_delay = sum(args.request_delay);
+	@jc_running = sum(args.running);
+	@jc_locked = sum(args.locked);
+	@jc_flushing = sum(args.flushing);
+	@jc_logging = sum(args.logging);
+	@jc_handles = sum(args.handle_count);
+	@jc_blocks = sum(args.blocks);
+	@jc_blocks_logged = sum(args.blocks_logged);
+}
+
+BEGIN
+{
+	printf("window_begin_ns %llu\n", nsecs);
+}
+
+END
+{
+	printf("window_end_ns %llu\n", nsecs);
+	clear(@s);
+	clear(@ds);
+	clear(@d0);
+	clear(@j0);
+	clear(@x0);
+	clear(@f0);
+}

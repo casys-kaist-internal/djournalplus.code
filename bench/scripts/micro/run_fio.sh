@@ -59,6 +59,8 @@
 # Usage: [CONFIGS=...] [EXPS="e1 e2 sync1 zoned bytes"] [OPS=...] [THREADS_LIST="1 8 16 32 64"]
 #        [FILES_LIST="1 4 16"] [REPS=1] [REPS_TOP=3] [RAMP=10] [RUNTIME=180] run_fio.sh <tag>
 #        CHECK_ONLY=1: stop after the kernel and experiment checks
+#        M3_TRACE=1: trace every run's fsync phases after the ramp (m3_phases.bt,
+#        <run>.m3; m3_report.py tables), EVAL_PLAN M3
 set -e
 [ -n "$TAUFS_ENV_SOURCED" ] || { echo "Do source set_env.sh first."; exit 1; }
 source "$TAUFS_BENCH/scripts/common.sh"
@@ -129,10 +131,11 @@ PRE=$TAUFS_BENCH_WS/micro/tau_preload.so
 mkdir -p "$(dirname "$PRE")"
 gcc -O2 -Wall -shared -fPIC -o "$PRE" "$HERE/tau_preload.c" -ldl
 STATDEV=$(tau_stat_devs)
+DEVT=$(( (0x$(stat -c %t "$DEVICE") << 20) | 0x$(stat -c %T "$DEVICE") ))   # dev_t as the jbd2 tracepoints give it
 
 RESULT_DIR=$TAU_RESULTS/micro/$(date +%Y%m%d_%H%M%S)_fio_$TAG
 mkdir -p "$RESULT_DIR/runs"
-cp "$0" "$HERE/tau_preload.c" "$HERE/atomicw.c" "$HERE/fio_report.py" "$RESULT_DIR/"
+cp "$0" "$HERE/tau_preload.c" "$HERE/atomicw.c" "$HERE/fio_report.py" "$HERE/m3_phases.bt" "$HERE/m3_report.py" "$RESULT_DIR/"
 CSV=$RESULT_DIR/results.csv
 python3 "$HERE/fio_report.py" header > "$CSV"
 log_env "$RESULT_DIR/env.txt"
@@ -144,7 +147,7 @@ log_env "$RESULT_DIR/env.txt"
   sysctl vm.dirty_ratio vm.dirty_background_ratio vm.dirty_bytes vm.dirty_background_bytes \
     vm.dirty_expire_centisecs vm.dirty_writeback_centisecs
   echo "zfs_arc_max: $(cat /sys/module/zfs/parameters/zfs_arc_max 2>/dev/null)"
-  echo "TOOL=$TOOL CONFIGS=$CONFIGS EXPS=$EXPS OPS=$OPS THREADS_LIST=$THREADS_LIST FILES_LIST=$FILES_LIST REPS=$REPS REPS_TOP=$REPS_TOP RAMP=$RAMP RUNTIME=$RUNTIME TOTAL_GB=$TOTAL_GB SETTLE=$SETTLE FSYNC_N=$FSYNC_N FIRST_MODE=$FIRST_MODE FRESH_PER=$FRESH_PER TAU_JOURNAL_GB=$TAU_JOURNAL_GB BW_LOG=$BW_LOG TOP_T=$TOP_T ZONED_CONFIGS=$ZONED_CONFIGS ZONED_DIST=$ZONED_DIST"
+  echo "TOOL=$TOOL CONFIGS=$CONFIGS EXPS=$EXPS OPS=$OPS THREADS_LIST=$THREADS_LIST FILES_LIST=$FILES_LIST REPS=$REPS REPS_TOP=$REPS_TOP RAMP=$RAMP RUNTIME=$RUNTIME TOTAL_GB=$TOTAL_GB SETTLE=$SETTLE FSYNC_N=$FSYNC_N FIRST_MODE=$FIRST_MODE FRESH_PER=$FRESH_PER TAU_JOURNAL_GB=$TAU_JOURNAL_GB BW_LOG=$BW_LOG TOP_T=$TOP_T ZONED_CONFIGS=$ZONED_CONFIGS ZONED_DIST=$ZONED_DIST R1_FILES=$R1_FILES R1_OPEN=$R1_OPEN R1_FSYNC_N=$R1_FSYNC_N M3_TRACE=${M3_TRACE:-0}"
 } >> "$RESULT_DIR/env.txt"
 echo "=== fio: $RESULT_DIR ($CONFIGS | $EXPS | $OPS | threads $THREADS_LIST | files $FILES_LIST | $KERNEL) $(date -u --rfc-3339=seconds)"
 
@@ -393,6 +396,12 @@ run_fio() {  # <config> <exp> <op> <threads> <files> <fdatasync n> <dist> <rep> 
     fio --output-format=json --output="$out.json" "$out.fio" 2> "$out.err" &
   fi
   pid=$!
+  local trp=""
+  if [[ "${M3_TRACE:-0}" == 1 ]]; then   # EVAL_PLAN M3: the run's fsync phases, after the ramp
+    ( sleep "$ramp"; exec sudo env BPFTRACE_MAX_MAP_KEYS=100000 bpftrace "$HERE/m3_phases.bt" "$pid" "$DEVT" ) \
+      > "$out.m3" 2>&1 &
+    trp=$!
+  fi
   (( ramp == 0 )) || ( sleep "$ramp"; devstat > "$out.dramp" ) &
   if [[ $cfg == tau-* ]]; then   # which of fio's open files carry O_TAU_UNTORN
     ( sleep $(( ramp + 5 )); sudo env MNT="$MOUNT_DIR" P="$pid" bash -c '
@@ -406,6 +415,7 @@ run_fio() {  # <config> <exp> <op> <threads> <files> <fdatasync n> <dist> <rep> 
         echo "tau_fds=$tau/$n"' > "$out.fds" 2>/dev/null ) &
   fi
   wait "$pid"
+  [[ -z $trp ]] || sudo kill -INT "$trp" 2>/dev/null || true
   t1=$(date +%s.%N); d1=$(devstat)
   wait
   sync -f "${10}"
