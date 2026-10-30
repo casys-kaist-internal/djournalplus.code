@@ -3,9 +3,10 @@
 # can leave, rebuilt from a dm-log-writes log and recovered (guest/flushorder.sh).
 #   usage: flushorder-test.sh [xfs|ext4|both] [cases, comma list] [fsyncs]
 # cases: append falloc subappend overwrite cpappend cpsub fsoverwrite fscpover
-# reuse unlink truncate mapsplit maplog (default: all; fs* sync with fsync(2),
-# the rest with fdatasync; mapsplit and maplog need the segment map log, kernel
-# plan.md §15 -- before it mapsplit fails).
+# reuse unlink truncate mapsplit maplog inoreuse (default: all; fs* sync with
+# fsync(2), the rest with fdatasync; mapsplit and maplog need the segment map
+# log, kernel plan.md §15 -- before it mapsplit fails; inoreuse fails before
+# the files of one ino are told apart, plan.md §16).
 # CONTROL=0 skips the control runs (records FUA without PREFLUSH, and the segment
 # map FUA without PREFLUSH: overwrite must FAIL in both; a freed segment reused
 # while the disk map still names it: reuse must FAIL; an unlinked file's segments
@@ -16,7 +17,8 @@
 # commit that still sets a floor: reuse must FAIL; an fsync(2) commit that
 # leaves the inode out: fsoverwrite must FAIL; a commit's claims split over map
 # log blocks: mapsplit must FAIL; the base moved before the map blocks are
-# written: maplog must FAIL).
+# written: maplog must FAIL; recovery that does not tell apart the files a mount
+# gave one ino: inoreuse must FAIL).
 # Loop devices on the guest's /dev/shm: no real disk is written.
 
 set -u
@@ -24,7 +26,7 @@ cd "$(dirname "$0")" || exit 1
 . ./vm.sh
 
 FSLIST=${1:-both}
-CASES=${2:-append,falloc,subappend,overwrite,cpappend,cpsub,fsoverwrite,fscpover,reuse,unlink,truncate,mapsplit,maplog}
+CASES=${2:-append,falloc,subappend,overwrite,cpappend,cpsub,fsoverwrite,fscpover,reuse,unlink,truncate,mapsplit,maplog,inoreuse}
 N=${3:-24}
 [ "$FSLIST" = both ] && FSLIST="xfs ext4"
 CASES=${CASES//,/ }
@@ -124,6 +126,13 @@ if [ "${CONTROL:-1}" = 1 ]; then
 		case "$out" in
 		*"RESULT: FAIL"*) summary+="$fs control (MAPLOG_EARLY_BASE, maplog): FAIL, as it must\n" ;;
 		*) summary+="$fs maplog control MAPLOG_EARLY_BASE: did not fail -- the maplog case does not see it\n"; rc=1 ;;
+		esac
+		echo; echo "############ $fs control: files of one ino not told apart ############"
+		out=$(vm_ssh "SERIAL_IGNORE=1 ~/tautest/guest/flushorder.sh $fs inoreuse" 2>&1)
+		echo "$out"
+		case "$out" in
+		*"RESULT: FAIL"*) summary+="$fs control (SERIAL_IGNORE, inoreuse): FAIL, as it must\n" ;;
+		*) summary+="$fs inoreuse control SERIAL_IGNORE: did not fail -- the inoreuse case does not see it\n"; rc=1 ;;
 		esac
 	done
 fi

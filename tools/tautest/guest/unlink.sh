@@ -3,7 +3,7 @@
 # and its blocks back to the FS at once, nothing written home -- while its
 # journal segments wait for the host to have the unlink (#24, plan.md §12.3).
 # Layout: README.
-# usage: unlink.sh <xfs|ext4> live|write|verify|gate-write|gate-verify|reuse-write|reuse-verify
+# usage: unlink.sh <xfs|ext4> live|write|verify|gate-write|gate-verify|reuse-write|reuse-verify|stale-write|stale-verify|gencol-write|gencol-verify
 cd ~/tautest/guest || exit 1
 . ./common.sh
 FS=$1; MODE=$2
@@ -353,7 +353,126 @@ reuse-verify)
 	[ $rc -eq 0 ] && echo "RESULT: PASS" || echo "RESULT: FAIL"
 	exit $rc
 	;;
+stale-write)
+	# a new tau file under the dead one's ino writes the dead one's segment over
+	# in part: the dead one's txs stay behind its last record (#72)
+	echo 120 | sudo tee $P/tau_max_transaction_age >/dev/null
+	echo 0 | sudo tee $P/tau_cp_small_tx >/dev/null
+	slow_host
+	mkfs_mount "$FS"
+	echo "== A: 1 MiB of 0xA0, then 64 pages of 0xA1, one fdatasync each =="
+	sudo "$TAUWRITE" "$A" $MB $((0xA0)) 0 1 >/dev/null || die "write A"
+	for i in $(seq 0 63); do
+		sudo "$TAUWRITE" "$A" 8192 $((0xA1)) $((i * 8192)) 1 >/dev/null || die "page A $i"
+	done
+	ino=$(stat -c %i "$A")
+	d0=$(probe dead_held); f0=$(probe dead_forced); u0=$(probe seg_reused)
+	sudo rm "$A"
+	[ $(( $(probe dead_held) - d0 )) = 1 ] || fail "A's segments not held"
+	sleep 1	# XFS frees the inode in the background (inodegc)
+	echo "== B: the same, 32 pages of 0xB1 =="
+	sudo "$TAUWRITE" "$B" $MB $((0xB0)) 0 1 >/dev/null || die "write B"
+	for i in $(seq 0 31); do
+		sudo "$TAUWRITE" "$B" 8192 $((0xB1)) $((i * 8192)) 1 >/dev/null || die "page B $i"
+	done
+	logforce	# B's name, whatever the commits forced
+	bino=$(stat -c %i "$B")
+	echo "  A was ino $ino, B is ino $bino; host commits forced for A: $(( $(probe dead_forced) - f0 )), freed segments given out again: $(( $(probe seg_reused) - u0 ))"
+	if [ "$bino" != "$ino" ]; then
+		echo "INCONCLUSIVE: B did not get A's inode"
+		exit 3
+	fi
+	[ $rc -eq 0 ] || exit $rc
+	echo WRITTEN
+	;;
+stale-verify)
+	# the control: recovery does not tell the two files apart
+	[ -n "${SERIAL_IGNORE:-}" ] && echo 1 | sudo tee $P/tau_serial_ignore >/dev/null
+	mount_tau "$FS"
+	sudo dmesg | grep -E 'TAU: (ino [0-9]+: replaying|ino [0-9]+ reallocated|replay done|.*tail [0-9]+ not in|.*descriptor of file|.*commit block of file|.*files of this mount)' | sed 's/^/  /'
+	# A's txs behind B's: turned away, or taken for B's
+	if ! sudo dmesg | grep -qE 'TAU: (.*descriptor of file|.*commit block of file|ino [0-9]+ reallocated)'; then
+		echo "INCONCLUSIVE: recovery met no tx of A's"
+		sudo umount "$TAU_MNT"
+		exit 3
+	fi
+	[ -e "$A" ] && fail "A is back"
+	sudo python3 - "$B" <<-'EOF' || rc=1
+		import sys, collections
+		d = open(sys.argv[1], 'rb').read(); K = 4096
+		want = bytes([0xB1]) * (32 * 8192) + bytes([0xB0]) * ((1 << 20) - 32 * 8192)
+		if d == want:
+		    print("  B: 32 pages of 0xb1, the rest 0xb0")
+		    sys.exit(0)
+		bad = collections.Counter((i // 8192 < 32, d[i]) for i in range(0, min(len(d), len(want)), K)
+		                          if d[i:i + K] != want[i:i + K])
+		print("  B: %d bytes; blocks not as written (in the fsync'd pages?, byte): %s" % (len(d),
+		      " ".join("%s/%#04x:%d" % (k[0], k[1], v) for k, v in sorted(bad.items()))))
+		sys.exit(1)
+	EOF
+	[ "$(kernel_faults)" = "0" ] || { show_kernel_faults; rc=1; }
+	sudo umount "$TAU_MNT" || rc=1
+	[ $rc -eq 0 ] && echo "RESULT: PASS" || echo "RESULT: FAIL"
+	exit $rc
+	;;
+gencol-write)
+	# a plain file under the dead one's ino, given the dead one's generation,
+	# while the dead one's segments are still on the map (journald holds the
+	# frees): only the creation time tells the two apart (#72, plan.md §16.2)
+	[ "$FS" = ext4 ] || die "gencol: ext4 only (chattr -v)"
+	[ -e $P/tau_maplog_hold_free ] || die "no tau_maplog_hold_free in this kernel"
+	echo 120 | sudo tee $P/tau_max_transaction_age >/dev/null
+	echo 0 | sudo tee $P/tau_cp_small_tx >/dev/null
+	echo 1 | sudo tee $P/tau_maplog_hold_free >/dev/null
+	# a generation can be set only without metadata_csum
+	TAU_MKE2FS_OPTS="${TAU_MKE2FS_OPTS:-} -O ^metadata_csum" mkfs_mount "$FS"
+	echo "== A: 1 MiB of 0xA0, then 64 pages of 0xA1, one fdatasync each =="
+	sudo "$TAUWRITE" "$A" $MB $((0xA0)) 0 1 >/dev/null || die "write A"
+	for i in $(seq 0 63); do
+		sudo "$TAUWRITE" "$A" 8192 $((0xA1)) $((i * 8192)) 1 >/dev/null || die "page A $i"
+	done
+	ino=$(stat -c %i "$A")
+	gen=$(sudo lsattr -v "$A" | awk '{print $1}')
+	ablk=$(pblocks "$A" 0 256 | sort)
+	sudo rm "$A"
+	sync		# the unlink and the free on disk: A's blocks can go to B
+	echo "== B: a plain file with A's generation, 1 MiB of 0xB0 =="
+	plain "$B" 1 $((0xB0))
+	sudo chattr -v "$gen" "$B" || die "chattr -v"
+	sudo python3 -c 'import os, sys; os.fsync(os.open(sys.argv[1], os.O_RDONLY))' "$B" ||
+		die "fsync B"
+	bino=$(stat -c %i "$B")
+	bgen=$(sudo lsattr -v "$B" | awk '{print $1}')
+	shared=$(comm -12 <(echo "$ablk") <(pblocks "$B" 0 256 | sort) | wc -l)
+	echo "  A was ino $ino gen $gen, B is ino $bino gen $bgen; of A's blocks B has $shared"
+	[ "$bino" = "$ino" ] || { echo "INCONCLUSIVE: B did not get A's inode"; exit 3; }
+	[ "$bgen" = "$gen" ] || die "B's generation is not A's"
+	echo WRITTEN
+	;;
+gencol-verify)
+	# the control: the generation alone
+	[ -n "${CRTIME_IGNORE:-}" ] && echo 1 | sudo tee $P/tau_crtime_ignore >/dev/null
+	mount_tau "$FS"
+	bino=$(stat -c %i "$B")
+	sudo dmesg | grep -E "TAU: (ino $bino[: ]|replay done for ino $bino,)" | sed 's/^/  /'
+	if ! sudo dmesg | grep -qE "TAU: ino $bino(: replaying| reallocated)"; then
+		echo "INCONCLUSIVE: recovery found no tx of A's"
+		sudo umount "$TAU_MNT"
+		exit 3
+	fi
+	# B is no tau file: whatever recovery replays under its ino is A's
+	if sudo dmesg | grep -qE "TAU: replay done for ino $bino, replayed [1-9]"; then
+		echo "  A's txs replayed under the inode B now is"
+		rc=1
+	fi
+	[ -e "$A" ] && fail "A is back"
+	check "$B" 1 $((0xB0)) || rc=1
+	[ "$(kernel_faults)" = "0" ] || { show_kernel_faults; rc=1; }
+	sudo umount "$TAU_MNT" || rc=1
+	[ $rc -eq 0 ] && echo "RESULT: PASS" || echo "RESULT: FAIL"
+	exit $rc
+	;;
 *)
-	die "usage: $0 <xfs|ext4> live|write|verify|gate-write|gate-verify|reuse-write|reuse-verify"
+	die "usage: $0 <xfs|ext4> live|write|verify|gate-write|gate-verify|reuse-write|reuse-verify|stale-write|stale-verify|gencol-write|gencol-verify"
 	;;
 esac

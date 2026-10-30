@@ -55,6 +55,12 @@
 #              blocks are written during the run, by a commit that finds the
 #              log full (the first half) and by journald (the second, with the
 #              pause); every fsync'd rewrite must stay (kernel plan.md §15)
+#   inoreuse   file 1's twenty 128 KiB writes, never checkpointed, then it is
+#              unlinked; file 2, created after it with its ino, is given its
+#              segment and writes ten 128 KiB pages the same way: file 1's txs
+#              stay right behind file 2's (kernel plan.md §16, bug.md #72) --
+#              file 2 must keep every fsync'd write, each whole, and file 1, if
+#              it comes back, all twenty
 #
 # Needs ~/tautest/dm-log-writes.ko built for the running kernel.  Loop devices
 # on /dev/shm only: no real disk is touched.  RECORD_FUA_ONLY=1 is the control
@@ -81,15 +87,18 @@
 # (tau_maplog_split: a commit's claims one per log block, its record vouching
 # for the last) must FAIL in mapsplit; MAPLOG_EARLY_BASE=1
 # (tau_maplog_early_base: the superblock's base moved before the map blocks are
-# written) must FAIL in maplog.
+# written) must FAIL in maplog.  SERIAL_IGNORE=1 (tau_serial_ignore: recovery
+# does not tell apart the files a mount gave one ino) must FAIL in inoreuse; it
+# acts on the recovery of the rebuilt disks.
 
 cd "$(dirname "$0")" || exit 1
 . ./common.sh
 
 FS=${1:-}; CASE=${2:-}; N=${3:-24}
 case "$FS" in ext4|xfs) ;; *) die "usage: $0 <ext4|xfs> <case> [fsyncs]" ;; esac
-case "$CASE" in append|falloc|subappend|overwrite|reuse|unlink|truncate|cpappend|cpsub|fsoverwrite|fscpover|mapsplit|maplog) ;; *) die "unknown case '$CASE'" ;; esac
+case "$CASE" in append|falloc|subappend|overwrite|reuse|unlink|truncate|cpappend|cpsub|fsoverwrite|fscpover|mapsplit|maplog|inoreuse) ;; *) die "unknown case '$CASE'" ;; esac
 [ "$CASE" = mapsplit ] && N=1
+[ "$CASE" = inoreuse ] && N=10	# file 1 writes twenty
 W=/dev/shm/flushorder
 SIZE=${FO_SIZE:-4G}
 case "$CASE" in mapsplit|maplog) SIZE=${FO_SIZE:-8G} ;; esac	# ext4: a tenth of it is two map blocks
@@ -153,6 +162,11 @@ if [ -e $P/tau_fsync_noinode ]; then
 elif [ "${FSYNC_NOINODE:-0}" = 1 ]; then
 	die "no tau_fsync_noinode in this kernel"
 fi
+if [ -e $P/tau_serial_ignore ]; then
+	echo 0 | sudo tee $P/tau_serial_ignore >/dev/null
+elif [ -n "${SERIAL_IGNORE:-}" ]; then
+	die "no tau_serial_ignore in this kernel"
+fi
 if [ -e $P/tau_maplog_len ]; then
 	echo "${MAPLOG_SPLIT:-0}" | sudo tee $P/tau_maplog_split >/dev/null
 	echo "${MAPLOG_EARLY_BASE:-0}" | sudo tee $P/tau_maplog_early_base >/dev/null
@@ -180,13 +194,14 @@ if [ "$CASE" = mapsplit ] || [ "$CASE" = maplog ]; then
 	export TAU_MOUNT_OPTS=tjournal,tjournal_size=1
 	DROP=${FO_DROP:-0}
 fi
-if [ "$CASE" = unlink ] || [ "$CASE" = truncate ] || [ "$CASE" = mapsplit ] || [ "$CASE" = maplog ]; then
+if [ "$CASE" = unlink ] || [ "$CASE" = truncate ] || [ "$CASE" = mapsplit ] || [ "$CASE" = maplog ] ||
+   [ "$CASE" = inoreuse ]; then
 	# file 1's copies stay in the journal only: never checkpointed
 	small_tx=$(cat $P/tau_cp_small_tx); tx_age=$(cat $P/tau_max_transaction_age)
 	echo 0 | sudo tee $P/tau_cp_small_tx >/dev/null
 	echo 120 | sudo tee $P/tau_max_transaction_age >/dev/null
 fi
-case "$CASE" in reuse|unlink|truncate|cpappend)	# file 1 journaled, not written home
+case "$CASE" in reuse|unlink|truncate|cpappend|inoreuse)	# file 1 journaled, not written home
 	home=$(cat $P/tau_home 2>/dev/null || echo 1); tau_home 0 ;;
 esac
 sudo sh -c "echo 0 > $P/tau_probe_seg_reuse_flush" 2>/dev/null
@@ -318,6 +333,27 @@ if case == 'unlink':
         mark('fsync-%d' % k)
     mark('end')
     sys.exit()
+if case == 'inoreuse':
+    import time
+    def blk(k, tag, size):
+        return struct.pack('<II', k, tag) * (size // 8)
+    for k in range(1, 21):
+        os.pwrite(fd, blk(k, 0xF1, 131072), (k - 1) * 131072)
+        sync(fd)
+    ino = os.fstat(fd).st_ino
+    os.close(fd)
+    mark('f1-done')
+    os.unlink(path)		# evicted here: its txs stay in its segment
+    time.sleep(2)		# XFS frees the inode in the background
+    fd2 = os.open(path + '2', os.O_RDWR | os.O_CREAT | os.O_EXCL | 0o40000000, 0o644)
+    with open('/tmp/fo-inoreuse', 'w') as f:
+        f.write('%d %d\n' % (ino, os.fstat(fd2).st_ino))
+    for k in range(1, n + 1):	# the same shape: its txs line up with file 1's
+        os.pwrite(fd2, blk(k, 0xF2, 131072), (k - 1) * 131072)
+        sync(fd2)
+        mark('fsync-%d' % k)
+    mark('end')
+    sys.exit()
 if case == 'truncate':
     import time
     def blk(k, tag, size):
@@ -427,8 +463,9 @@ if [ -e $P/tau_maplog_len ]; then
 	echo 0 | sudo tee $P/tau_maplog_split $P/tau_maplog_early_base >/dev/null
 	echo "$mllen" | sudo tee $P/tau_maplog_len >/dev/null
 fi
-case "$CASE" in reuse|unlink|truncate|cpappend) tau_home "$home" ;; esac
-if [ "$CASE" = unlink ] || [ "$CASE" = truncate ] || [ "$CASE" = mapsplit ] || [ "$CASE" = maplog ]; then
+case "$CASE" in reuse|unlink|truncate|cpappend|inoreuse) tau_home "$home" ;; esac
+if [ "$CASE" = unlink ] || [ "$CASE" = truncate ] || [ "$CASE" = mapsplit ] || [ "$CASE" = maplog ] ||
+   [ "$CASE" = inoreuse ]; then
 	echo "$small_tx" | sudo tee $P/tau_cp_small_tx >/dev/null
 	echo "$tx_age" | sudo tee $P/tau_max_transaction_age >/dev/null
 fi
@@ -439,6 +476,15 @@ if [ "$CASE" = mapsplit ]; then
 		cleanup
 		exit 3 ;;
 	esac
+fi
+if [ "$CASE" = inoreuse ]; then
+	read -r ino1 ino2 < /tmp/fo-inoreuse
+	echo "== inoreuse: file 1 was ino $ino1, file 2 is ino $ino2 =="
+	if [ "$ino1" != "$ino2" ]; then
+		echo "RESULT: INCONCLUSIVE (file 2 did not get file 1's ino)"
+		cleanup
+		exit 3
+	fi
 fi
 if [ "$CASE" = maplog ]; then
 	echo "== maplog: map blocks written in the run: ${snaps:-?}, commits that waited for them: ${mlwait:-?} =="
@@ -458,11 +504,12 @@ if [ "$CASE" = reuse ]; then
 		exit 3
 	fi
 fi
-echo "== $FS $CASE: $N fsyncs logged${RECORD_FUA_ONLY:+ (control: records FUA only)}${SEGMAP_FUA_ONLY:+ (control: segment map FUA only)}${REUSE_FLUSH_ONLY:+ (control: reuse without the map write)}${DEAD_NOGATE:+ (control: dead segments back at once)}${FREE_UNCOND:+ (control: unconditional free tags)}${FREE_NOHOLD:+ (control: free not held)}${NOFLUSH_OLD_EPOCH:+ (control: allocation epoch on records without a flush)}${NOFLUSH_NOMARK:+ (control: iclog not marked)}${GATE_TAIL:+ (control: recovery takes the tail of a refused record)}${GATE_FLOOR:+ (control: a refused orphan sets a floor)}${FSYNC_NOINODE:+ (control: fsync(2) without the inode)}${MAPLOG_SPLIT:+ (control: claims split over log blocks)}${MAPLOG_EARLY_BASE:+ (control: the base before the map blocks)} =="
+echo "== $FS $CASE: $N fsyncs logged${RECORD_FUA_ONLY:+ (control: records FUA only)}${SEGMAP_FUA_ONLY:+ (control: segment map FUA only)}${REUSE_FLUSH_ONLY:+ (control: reuse without the map write)}${DEAD_NOGATE:+ (control: dead segments back at once)}${FREE_UNCOND:+ (control: unconditional free tags)}${FREE_NOHOLD:+ (control: free not held)}${NOFLUSH_OLD_EPOCH:+ (control: allocation epoch on records without a flush)}${NOFLUSH_NOMARK:+ (control: iclog not marked)}${GATE_TAIL:+ (control: recovery takes the tail of a refused record)}${GATE_FLOOR:+ (control: a refused orphan sets a floor)}${FSYNC_NOINODE:+ (control: fsync(2) without the inode)}${MAPLOG_SPLIT:+ (control: claims split over log blocks)}${MAPLOG_EARLY_BASE:+ (control: the base before the map blocks)}${SERIAL_IGNORE:+ (control: files of one ino not told apart)} =="
 echo "== records: ${records:-?}, of them without a flush: ${noflush:-?} =="
 # recovery-side controls: the mounts below recover the rebuilt disks
 [ -e $P/tau_gate_tail ] && echo "${GATE_TAIL:-0}" | sudo tee $P/tau_gate_tail >/dev/null
 [ -e $P/tau_gate_floor ] && echo "${GATE_FLOOR:-0}" | sudo tee $P/tau_gate_floor >/dev/null
+[ -e $P/tau_serial_ignore ] && echo "${SERIAL_IGNORE:-0}" | sudo tee $P/tau_serial_ignore >/dev/null
 
 # check one rebuilt disk: mount it (tau recovery runs) and judge the file
 cat > /tmp/fo-check.sh <<EOF
@@ -601,6 +648,40 @@ if case == 'truncate':
         print("BAD file 2: %d of %d fsync'd rewrites there" % (m2, durable))
     else:
         print("OK file 1 %d writes, file 2 %d rewrites (durable %d)" % (m1, m2, durable))
+    sys.exit()
+if case == 'inoreuse':
+    def blk(k, tag, size):
+        return struct.pack('<II', k, tag) * (size // 8)
+    def whole(data, tag, size):
+        m = len(data) // size
+        bad = [i + 1 for i in range(m) if data[i*size:(i+1)*size] != blk(i + 1, tag, size)]
+        return m, len(data) % size == 0 and not bad, bad
+    def read(p):
+        try:
+            return open(p, 'rb').read()
+        except FileNotFoundError:
+            return None
+    d1, d2 = read(path), read(path + '2')
+    if d1 is None:
+        if not f1done:
+            print("BAD file 1 missing before its unlink"); sys.exit()
+        m1 = -1
+    else:
+        m1, ok1, bad1 = whole(d1, 0xF1, 131072)
+        if not ok1 or (f1done and m1 != 20):
+            print("BAD file 1 back: size %d, writes %s wrong" % (len(d1), bad1)); sys.exit()
+    m2 = 0
+    if d2 is not None:
+        m2, ok2, bad2 = whole(d2, 0xF2, 131072)
+        if not ok2:
+            foreign = [i for i in bad2 if struct.pack('<I', 0xF1) in d2[(i-1)*131072:i*131072]]
+            print("BAD file 2: size %d, writes %s wrong%s" % (len(d2), bad2,
+                  ", %s hold file 1's data" % foreign if foreign else "")); sys.exit()
+    if m2 < durable:
+        print("BAD file 2: %d of %d fsync'd writes there" % (m2, durable))
+    else:
+        print("OK file 1 %s, file 2 %d writes (durable %d)" %
+              ("gone" if m1 < 0 else "%d" % m1, m2, durable))
     sys.exit()
 if case == 'unlink':
     def blk(k, tag, size):
@@ -752,6 +833,7 @@ sys.exit(0 if ok else 1)
 EOF
 rc=$?
 [ -e $P/tau_gate_tail ] && echo 0 | sudo tee $P/tau_gate_tail $P/tau_gate_floor >/dev/null
+[ -e $P/tau_serial_ignore ] && echo 0 | sudo tee $P/tau_serial_ignore >/dev/null
 # FO_KEEP=1 keeps the log for a look at the entries a failure names
 [ "${FO_KEEP:-0}" = 1 ] && sudo cp --sparse=always "$W/log.img" /dev/shm/fo-keep-log.img
 cleanup

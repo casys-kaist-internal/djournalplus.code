@@ -5,7 +5,14 @@
 #   gate    the unlink lost in a power cut: the file is back with its last fsync
 #   nogate  the control: segments given back at once, the same run must fail
 #   reuse   a new tau file under the dead one's ino: the host commit is forced
-#   usage: unlink-test.sh [xfs|ext4|both] [live|crash|gate|nogate|reuse|all]
+#   stale   the same, writing less than the dead one into its segment: the dead
+#           one's txs behind the new one's are not taken for it (#72)
+#   stale-ctl  the control: recovery does not tell the two apart, must fail
+#   gencol  ext4: a plain file under the dead one's ino, given its generation,
+#           the dead one's segments still on the map: its creation time tells
+#           them apart (#72)
+#   gencol-ctl  the control: the generation alone, must fail
+#   usage: unlink-test.sh [xfs|ext4|both] [live|crash|gate|nogate|reuse|stale|stale-ctl|gencol|gencol-ctl|all]
 # WARNING: runs mkfs on $TAU_DEV inside the guest.
 
 set -u
@@ -17,15 +24,18 @@ CASES=${2:-all}
 case "$FSLIST" in
 both) FSLIST="xfs ext4" ;;
 xfs|ext4) ;;
-*) echo "usage: $0 [xfs|ext4|both] [live|crash|gate|nogate|reuse|all]" >&2; exit 2 ;;
+*) echo "usage: $0 [xfs|ext4|both] [live|crash|gate|nogate|reuse|stale|stale-ctl|gencol|gencol-ctl|all]" >&2; exit 2 ;;
 esac
-[ "$CASES" = all ] && CASES="live crash gate nogate reuse"
+[ "$CASES" = all ] && CASES="live crash gate nogate reuse stale stale-ctl gencol gencol-ctl"
 
 rc=0
 summary=""
 for fs in $FSLIST; do
 	for c in $CASES; do
 		tag="$fs $c"
+		case "$fs $c" in
+		"xfs gencol"*) summary+="$tag: n/a (an XFS generation cannot be set)\n"; continue ;;
+		esac
 		echo
 		echo "############ $tag ############"
 		vm_boot_tested || { rc=1; break 2; }
@@ -47,6 +57,14 @@ for fs in $FSLIST; do
 			verify="~/tautest/guest/unlink.sh $fs gate-verify" ;;
 		reuse) write="~/tautest/guest/unlink.sh $fs reuse-write"
 		       verify="~/tautest/guest/unlink.sh $fs reuse-verify" ;;
+		stale) write="~/tautest/guest/unlink.sh $fs stale-write"
+		       verify="~/tautest/guest/unlink.sh $fs stale-verify" ;;
+		stale-ctl) write="~/tautest/guest/unlink.sh $fs stale-write"
+			   verify="SERIAL_IGNORE=1 ~/tautest/guest/unlink.sh $fs stale-verify" ;;
+		gencol) write="~/tautest/guest/unlink.sh $fs gencol-write"
+			verify="~/tautest/guest/unlink.sh $fs gencol-verify" ;;
+		gencol-ctl) write="~/tautest/guest/unlink.sh $fs gencol-write"
+			    verify="CRTIME_IGNORE=1 ~/tautest/guest/unlink.sh $fs gencol-verify" ;;
 		*) echo "unknown case $c" >&2; rc=1; continue ;;
 		esac
 		vm_ssh "$write"
@@ -60,8 +78,8 @@ for fs in $FSLIST; do
 		vm_boot || { rc=1; break 2; }
 		vm_ssh "$verify"
 		v=$?
-		if [ "$c" = nogate ]; then
-			# the control: without the gate the file must come back wrong
+		if [ "$c" = nogate ] || [ "$c" = stale-ctl ] || [ "$c" = gencol-ctl ]; then
+			# a control: without what it switches off the file must come back wrong
 			case $v in
 			1) summary+="$tag: PASS (the control failed, as it must)\n" ;;
 			3) summary+="$tag: INCONCLUSIVE\n" ;;

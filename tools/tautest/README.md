@@ -1072,8 +1072,8 @@ fsck or mkfs.
 
 ### An unlinked file is let go without an unmount
 
-`unlink-test.sh [xfs|ext4|both] [live|crash|gate|nogate|reuse|all]` (bug.md
-#24, kernel `taudocs/plan.md` §12.3). tau used to hold every tau file's inode
+`unlink-test.sh [xfs|ext4|both] [live|crash|gate|nogate|reuse|stale|stale-ctl|gencol|gencol-ctl|all]`
+(bug.md #24, kernel `taudocs/plan.md` §12.3). tau used to hold every tau file's inode
 until unmount, so an unlinked one kept its blocks and its `tau_t`; #319 let
 tau_journald commit, drain and release it in the background. From #369 the last
 name drops tau's pin and whoever holds the inode last evicts it: the running tx
@@ -1104,12 +1104,28 @@ wait until the host has the unlink on disk. Needs `CONFIG_TAU_PROBE_TORN`:
   A's inode number (INCONCLUSIVE if it got another): `alloc_tau()` must force the
   host commit (`dead_forced`) and give A's segments back before B publishes;
   after a power cut B must be intact and A gone.
+- `stale` (bug.md #72, kernel `taudocs/plan.md` §16): A -- 1 MiB of 0xA0, then
+  64 pages of 0xA1, one fdatasync each -- unlinked; B, made tau under A's inode
+  number (INCONCLUSIVE if it got another), writes the same 1 MiB of 0xB0 and only
+  32 pages of 0xB1 into A's segment, so A's txs stay right behind B's last
+  record; power cut. B must come back with its 32 pages: recovery must not take
+  A's txs for B's (INCONCLUSIVE if it met none of A's). `stale-ctl`: the same,
+  recovered with `tau_serial_ignore=1` -- the control, which must fail.
+- `gencol` (ext4 only: mkfs `-O ^metadata_csum`, so `chattr -v` can set a
+  generation): A as in `stale`, unlinked and synced; B, a plain file under A's
+  inode number given A's generation (it gets A's freed blocks; the count is
+  printed), while `tau_maplog_hold_free=1` keeps A's segments on the map;
+  power cut. Recovery must replay nothing under the inode B now is, and B must
+  stay all 0xB0: only the creation time in A's records tells them apart.
+  `gencol-ctl`: recovered with `tau_crtime_ignore=1` -- must fail.
 
 | kernel | XFS | ext4 |
 |---|---|---|
 | #318 | live FAIL: the `tau_t` was freed only when background reclaim freed the `xfs_inode`, so the held count lagged by tens of seconds -- and an `xfs_inode` recycled before that kept the stale `i_tau` | -- |
 | #319 | live PASS (every file let go within 1 s, 203 released, 0 put back); crash PASS (B reused all 32768 of A's blocks, all 69680 blocks 0xBB after the power cut) | live PASS (same); crash PASS (32768 reused, all 141931 blocks 0xBB) |
 | #377 | gate, nogate INCONCLUSIVE while H was fsync'd: its fsync(2) logged the inode, and the host commit took A's unlink with it. H fdatasync'd: gate PASS (A back, all 16384 blocks 0xA1), nogate FAIL as it must (A all zeros) | the same |
+| #382 | stale FAIL: recovery took A's txs 33-64 for B's, and the newest, A's, has a generation the inode does not -- "reallocated ..., discarding replay": B's 32 fsync'd pages back at 0xB0 (bug.md #72) | the same |
+| #385 | stale PASS: the new file's run ends at the dead one's descriptor ("the run of file 2 ends at a descriptor of file 1"), B's 64 blocks replayed; stale-ctl FAIL as it must; gencol n/a | stale PASS, stale-ctl FAIL; gencol PASS (B held all 256 of A's blocks; the same generation, another creation time: A's txs dropped), gencol-ctl FAIL (A's txs 1-64 replayed, 128 of B's blocks 0xA1) |
 
 ### New blocks go home, not to the journal
 
@@ -1346,9 +1362,15 @@ take entries 0-254, then each fsync is one more file's first tau rewrite, a new
 segment each, so the log wraps and the map blocks are written during the run --
 by a commit that finds the log full in the first half, by journald in the
 second, which pauses after each fsync; every fsync'd rewrite must stay;
-INCONCLUSIVE unless the map blocks were written twice in the run). `mapsplit`
-and `maplog` need the segment map log (kernel plan.md §15); before it `mapsplit`
-fails. The control (`RECORD_FUA_ONLY=1`, kernel knob
+INCONCLUSIVE unless the map blocks were written twice in the run) and `inoreuse`
+(file 1's twenty 128 KiB writes, never checkpointed, then unlinked; file 2,
+created after it with its ino, gets its segment and writes ten 128 KiB pages
+the same way, so file 1's txs stay right behind file 2's -- kernel plan.md §16,
+taudocs/bug.md #72: file 2 must keep every fsync'd write, each whole, and file 1,
+if it comes back, all twenty; INCONCLUSIVE unless file 2 got file 1's ino).
+`mapsplit` and `maplog` need the segment map log (kernel plan.md §15); before it
+`mapsplit` fails. `inoreuse` fails before the files a mount gives one ino are
+told apart (#385). The control (`RECORD_FUA_ONLY=1`, kernel knob
 `tau_record_fua_only`) sends every record FUA without PREFLUSH -- durable
 before its data -- and `overwrite` must FAIL. A second control
 (`SEGMAP_FUA_ONLY=1`, `tau_segmap_fua_only`) writes the segment map FUA without
@@ -1379,7 +1401,9 @@ With the segment map log two more: `MAPLOG_SPLIT=1` (`tau_maplog_split`: a
 commit's claims one per log block, its record vouching for the last only) must
 FAIL in `mapsplit`, and `MAPLOG_EARLY_BASE=1` (`tau_maplog_early_base`: the
 superblock's base moved before the map blocks are written) must FAIL in
-`maplog`. `SEGMAP_FUA_ONLY` then drops the PREFLUSH of the map blocks and of the
+`maplog`. From #385 one more: `SERIAL_IGNORE=1` (`tau_serial_ignore`: recovery
+does not tell apart the files a mount gave one ino) must FAIL in `inoreuse`; like
+the `GATE_*` knobs it acts on the recovery of the rebuilt disks. `SEGMAP_FUA_ONLY` then drops the PREFLUSH of the map blocks and of the
 log's free blocks, and `REUSE_FLUSH_ONLY` reuses a segment after a bare flush
 with its free kept off the log (journald writes none either). There the new
 owner's claim goes out with its first writes into the segment and hides the old
@@ -1425,6 +1449,10 @@ copies it in.
 | #382, controls: claims split (mapsplit) / base first (maplog) | FAIL 3 of 25 / 13 of 109 | FAIL 3 of 36 / 13 of 120 |
 | #382, all thirteen cases (lockdep run and suite alike) | PASS: prefix 1349, single-drop 5355 (lockdep run 5358) | PASS: prefix 1421, single-drop 6340 (6345) |
 | #382, the twelve controls | each FAILs; the refused orphan floor (reuse) by one prefix state now, no single-drop one (#377: 2 and 1) | each FAILs; the floor by 1 prefix state and 4 single-drop |
+| #382, inoreuse | FAIL 30 of 93 states, single-drop 626 of 1356: file 2's fsync'd writes wrong (taudocs/bug.md #72) | FAIL 30 of 100, 662 of 1500 |
+| #385, inoreuse | PASS: prefix 93, single-drop 1356; 30 records, all without a flush | PASS: 100, 1500 |
+| #385, control: files of one ino not told apart (inoreuse) | FAIL single-drop 626 of 1356, as #382 | FAIL 662 of 1500 |
+| #385, mapsplit / maplog / reuse / unlink | PASS with #382's state counts | PASS, the same |
 
 ### One fsync, request by request
 
