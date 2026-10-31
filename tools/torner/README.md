@@ -546,9 +546,13 @@ Three things the harness learned the hard way and now handles:
   fails with EBUSY (a reference on the mount or on a copy propagated into
   another mount namespace: the VFS refuses, the filesystem is never asked).
   Until 2026-10-31 its rc was dropped and fsck then ran on a mounted XFS:
-  every τ-XFS P3 of kernels #365, #385 and #388 was that. `explore.sh` now
-  retries once after 1 s; a state still mounted then is recorded with P3
-  `n/a` (the summary line's "not judged") and detached lazily. What held it
+  every τ-XFS P3 of kernels #365, #385 and #388 was that. The reference was
+  another slot's `xfs_repair -n`, which looks for its device among the mounts
+  and stat()s every mount point on the way; XFS is now checked on the image
+  file (`xfs_repair -n -f`: the baseline on capture's backing file, a state on
+  its image), where it does not look. `explore.sh` also retries once after
+  1 s; a state still mounted then is recorded with P3 `n/a` (the summary
+  line's "not judged", `p3_na` in table.csv) and detached lazily. What held it
   (mountinfo, the tasks with a cwd, open file or mapping on it, the mount
   namespaces with a copy, D-state stacks) is in
   `CAPTURE/p3-STRATEGY/STATE.umount`, and a P3 fail's fsck report in

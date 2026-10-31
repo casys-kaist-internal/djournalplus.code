@@ -13,6 +13,8 @@ capture.json, atoms.json, states-<strategy>.jsonl -- and says, for that
   viol_content    states with a content tear (P1 other than the size rule)
   viol_size       states with a size violation (check --append, one writer)
   viol_durability states with a lost fsync'd write (P2)
+  p3_dirty        states whose fsck says something the fresh file system's did not
+  p3_na           states fsck did not judge: the file system would not unmount
   writes_*        the application writes the atom-* states aimed at, and how
                   many of them some state left torn, overall and per crash
                   model (O in-order prefix, R reordered cache, T torn bio)
@@ -35,7 +37,7 @@ FIELDS = ("config", "row", "profile", "tag", "kernel", "mount_opts", "mkfs_opts"
           "mode", "unit", "sector", "threads", "fsync_every", "gen_args",
           "writes", "one_bio", "split_window", "split_flush", "partial",
           "states", "unmountable", "unjudged",
-          "viol_content", "viol_size", "viol_durability", "p3_dirty",
+          "viol_content", "viol_size", "viol_durability", "p3_dirty", "p3_na",
           "writes_targeted", "writes_torn", "torn_O", "torn_R", "torn_T",
           "upper95", "kinds", "witness", "capture")
 
@@ -112,7 +114,7 @@ def summarize(cap, row, profile):
     for k in ("one_bio", "split_window", "split_flush", "partial"):
         out[k] = aj.get("shape", {}).get(k, "")
 
-    states = unmount = unjudged = vc = vs = vd = p3 = 0
+    states = unmount = unjudged = vc = vs = vd = p3 = p3na = 0
     targeted, torn = set(), set()
     vpages = set()      # pages any state's violation names, every strategy
     by_model = {"O": set(), "R": set(), "T": set()}
@@ -140,6 +142,8 @@ def summarize(cap, row, profile):
             bad = True
         if o.get("p3") == "fail":
             p3 += 1
+        elif o.get("p3") == "n/a":
+            p3na += 1
         for v in r.get("violations", []):
             kinds[v.get("kind", "?")] = kinds.get(v.get("kind", "?"), 0) + 1
             if "page_id" in v:
@@ -159,7 +163,7 @@ def summarize(cap, row, profile):
                                      r.get("state_spec", "?"), violation_text(r))
     out.update(states=states, unmountable=unmount, unjudged=unjudged,
                viol_content=vc, viol_size=vs, viol_durability=vd, p3_dirty=p3,
-               writes_targeted=len(targeted), writes_torn=len(torn),
+               p3_na=p3na, writes_targeted=len(targeted), writes_torn=len(torn),
                torn_O=len(by_model["O"]), torn_R=len(by_model["R"]),
                torn_T=len(by_model["T"]),
                upper95=("%.4f" % wilson_hi(len(torn), len(targeted))

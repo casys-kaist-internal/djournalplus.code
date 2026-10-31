@@ -179,8 +179,9 @@ MOUNT_OPTS="$FS_MOUNT_OPTS"
 UNTORN="$FS_UNTORN"
 
 # What fsck says about a filesystem that has only just been created.  Anything
-# in here is mkfs's doing, not a crash's, and must not count against P3.
-fs_fsck_report "$FS" "$DEV" > "$WORKDIR/fsck-baseline.txt"
+# in here is mkfs's doing, not a crash's, and must not count against P3.  XFS
+# is checked on the backing file, as explore.sh checks a state on its image.
+fs_fsck_report "$FS" "$DEV" "$BACKING" > "$WORKDIR/fsck-baseline.txt"
 BASELINE_N=$(wc -l < "$WORKDIR/fsck-baseline.txt")
 [ "$BASELINE_N" = 0 ] || say "note: pristine $FS already has $BASELINE_N fsck finding(s); P3 is judged relative to them"
 

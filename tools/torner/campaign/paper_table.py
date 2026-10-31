@@ -71,7 +71,7 @@ def merge(rs):
     m = {k: sum(num(r, k) for r in rs) for k in
          ("states", "viol_content", "viol_size", "viol_durability", "writes",
           "writes_targeted", "writes_torn", "torn_O", "torn_R", "torn_T",
-          "unmountable", "unjudged", "p3_dirty")}
+          "unmountable", "unjudged", "p3_dirty", "p3_na")}
     m["bad"] = m["viol_content"] + m["viol_size"] + m["viol_durability"] + m["writes_torn"]
     m["witness"] = next((r["witness"] for r in rs if r.get("witness")), "")
     m["profiles"] = "/".join(sorted({r["profile"] for r in rs}))
@@ -137,11 +137,14 @@ def main():
         print("| %s | %s |" % (rn.ljust(w), " | ".join(mark(grid.get((rk, c[0]))) for c in cols)))
     print()
     for (rk, ck), m in sorted(grid.items()):
+        # p3: fsck found something new; n/a: states that would not unmount,
+        # never fsck'd (shown when there are some)
         print("%-9s %-18s states=%-6d writes=%-6d targeted=%-5d torn=%d (O%d R%d T%d)"
-              "  content=%d size=%d durability=%d  unmountable=%d p3=%d  [%s]"
+              "  content=%d size=%d durability=%d  unmountable=%d p3=%d%s  [%s]"
               % (rk, ck, m["states"], m["writes"], m["writes_targeted"], m["writes_torn"],
                  m["torn_O"], m["torn_R"], m["torn_T"], m["viol_content"], m["viol_size"],
-                 m["viol_durability"], m["unmountable"], m["p3_dirty"], m["profiles"]))
+                 m["viol_durability"], m["unmountable"], m["p3_dirty"],
+                 " (n/a %d)" % m["p3_na"] if m["p3_na"] else "", m["profiles"]))
         if m["witness"]:
             print("          witness: %s" % m["witness"][:200])
 

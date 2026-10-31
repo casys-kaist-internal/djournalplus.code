@@ -185,7 +185,7 @@ fs_fsck() {
 	esac
 }
 
-# fs_fsck_report <fs> <dev>
+# fs_fsck_report <fs> <dev> [<file>]
 #
 # Normalised list of what fsck complains about, for comparing a recovered state
 # against a pristine one.  The exit code on its own is not usable as P3:
@@ -199,12 +199,32 @@ fs_fsck() {
 # So capture.sh records this report for the freshly formatted device, and
 # explore.sh fails P3 only when a state's report says something the baseline
 # did not.
+#
+# <file> is the regular file under <dev> (the loop's backing file), and XFS is
+# checked on it, with -f.  Handed a device, xfs_repair first looks for it among
+# the mounts and stat()s every mount point on the way; a stat that lands on
+# another explore slot's mount holds it for a moment, and that slot's umount
+# fails with EBUSY.  Handed a file it does not look (libxfs_device_open).  Seen
+# 2026-10-31: 18-31 EBUSY in 22-25k umounts beside eight xfs_repair -n on
+# devices, none beside xfs_repair -n -f.
 fs_fsck_report() {
-	local fs="$1" dev="$2"
+	local fs="$1" dev="$2" file="${3:-}"
 
 	case "$fs" in
 	ext4|ext4-data|ext4-dioread-lock|ext4-nodelalloc|tau-ext4)	e2fsck -f -n "$dev" 2>&1 ;;
-	xfs|tau-xfs)			xfs_repair -n "$dev" 2>&1 ;;
+	xfs|tau-xfs)
+		if [ -n "$file" ]; then
+			# -f on a host file system that is not XFS adds three lines on
+			# the host's sector size: about the host, not the image
+			xfs_repair -n -f "$file" 2>&1 | sed \
+				-e "s|$file||g" \
+				-e '/^Cannot get host filesystem geometry\.$/d' \
+				-e '/^Repair may fail if there is a sector size mismatch between$/d' \
+				-e '/^the image and the host filesystem\.$/d'
+		else
+			xfs_repair -n "$dev" 2>&1
+		fi
+		;;
 	btrfs)				btrfs check --readonly "$dev" 2>&1 ;;
 	f2fs)				fsck.f2fs --dry-run "$dev" 2>&1 ;;
 	zfs|zfs-4k|zfs-8k|zfs-16k|zfs-16k-lz4|zfs-recordsize-16k|zfs-16k-tp)

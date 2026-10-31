@@ -185,8 +185,11 @@ umount_diag() {
 # VFS alone -- a reference on this mount, or on a copy propagated into another
 # mount namespace -- never from the file system.  Until 2026-10-31 its rc was
 # dropped and fsck then ran on a mounted XFS: every tau-xfs P3 of #365, #385
-# and #388.  Retried once; a state that stays mounted is not judged for P3, and
-# its mount is detached lazily so the slot's mount point is clean again.
+# and #388.  The reference was another slot's xfs_repair looking for its device
+# among the mounts; XFS is now checked on the state's image, where it does not
+# look (fs_fsck_report).  Retried once all the same; a state that stays mounted
+# is not judged for P3, and its mount is detached lazily so the slot's mount
+# point is clean again.
 umount_state() {
 	local mnt="$1" loop="$2" sid="$3" err
 	err=$(umount "$mnt" 2>&1) && return 0
@@ -347,7 +350,7 @@ do_state() {
 	# judged against the pristine filesystem, not against a zero exit code:
 	# see fs_fsck_report() for why a fresh mkfs is already "dirty" here.
 	if [ -z "$p3" ]; then
-		fs_is_zfs "$FS" || fs_fsck_report "$FS" "$loop" > "$WORK/f$slot"
+		fs_is_zfs "$FS" || fs_fsck_report "$FS" "$loop" "$img" > "$WORK/f$slot"
 		if [ -s "$BASEFSCK" ] || [ -s "$WORK/f$slot" ]; then
 			if diff -q "$BASEFSCK" "$WORK/f$slot" >/dev/null 2>&1; then
 				p3=pass
