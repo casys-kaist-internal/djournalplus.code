@@ -189,6 +189,13 @@ def summary_md(raw, runs, tpcc=None):
                   " The steady-state set is the 64-thread/terminal points from 2026-10-29"
                   " on; MySQL runs from 2026-10-29 on pre-write the spare redo files after"
                   " each start (mysql/api.sh prewrite_spare_redo).", ""]
+    if any("-empty" in k[2] for k in points):
+        lines += ["The -empty rows (EVAL_PLAN DB3 insert-from-empty) insert into the empty"
+                  " tables of the t16_r0 images: a 60-s warm-up, then three 5-min runs at 64"
+                  " threads on the growing database, all three averaged here. MySQL EXT4"
+                  " Raw/App step up ~30% about 5.5 min after the server start, inside the"
+                  " first run, so the paper table (paper/evaluation/db3_insert_empty in the"
+                  " results) uses runs 2-3.", ""]
     lines += ["Throughput in transactions/s (mean of the runs at a point);"
               " protection on = PostgreSQL",
               "full_page_writes / InnoDB doublewrite; KB/trx = device writes per"

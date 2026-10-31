@@ -25,6 +25,8 @@ The τ rows (ext4-tau, xfs-tau and their variants) ran on the τ kernel (6.8.0tj
 
 The ssd990 rows ran on a Samsung 990 PRO 4TB (no PLP, volatile write cache) in its steady state (written once over its capacity, no trim before the restore), the baselines on the base kernel; their 64-thread points are one 40-min run (TPC-C: 64 terminals for 40 min once). The -kcheck rows are baselines run on the τ kernel as a kernel cross-check. The drive settled into a slower steady state between 2026-10-26 and 10-27, its over-provisioning filled up (EXT4 Raw 64 threads: PG 8,872 -> 7,600 TPS, MySQL 8,060 -> ~5,000, stable since): ssd990 runs up to 2026-10-26 are from the earlier, transitional state and compare only among themselves. The steady-state set is the 64-thread/terminal points from 2026-10-29 on; MySQL runs from 2026-10-29 on pre-write the spare redo files after each start (mysql/api.sh prewrite_spare_redo).
 
+The -empty rows (EVAL_PLAN DB3 insert-from-empty) insert into the empty tables of the t16_r0 images: a 60-s warm-up, then three 5-min runs at 64 threads on the growing database, all three averaged here. MySQL EXT4 Raw/App step up ~30% about 5.5 min after the server start, inside the first run, so the paper table (paper/evaluation/db3_insert_empty in the results) uses runs 2-3.
+
 Throughput in transactions/s (mean of the runs at a point); protection on = PostgreSQL
 full_page_writes / InnoDB doublewrite; KB/trx = device writes per transaction at the most threads.
 
@@ -35,7 +37,10 @@ full_page_writes / InnoDB doublewrite; KB/trx = device writes per transaction at
 | insert | btrfs | off | 281 | 389 | 1089 | 582 | 1260 | 32.1 | `20261019_061714` |
 | insert | ext4 | off | 9061 | 61540 | 111453 | 154989 | 203505 | 2.0 | `20261017_093244` |
 | insert | ext4 | on | 8854 | 60661 | 106814 | 147811 | 193581 | 3.2 | `20261017_093244` |
+| insert | ext4-dj20-empty | off |  |  |  |  | 118484 | 2.9 | `20261031_003824_empty` |
 | insert | ext4-dj40 | off | 4877 | 31093 | 53438 | 70840 | 98128 | 5.1 | `20261017_093244` |
+| insert | ext4-empty | off |  |  |  |  | 193372 | 1.5 | `20261031_003824_empty` |
+| insert | ext4-empty | on |  |  |  |  | 189047 | 1.8 | `20261031_003824_empty` |
 | insert | ext4-tau | off | 8925 | 61467 | 110611 | 151631 | 196329 | 2.9 | `20261020_204243` |
 | insert | xfs | off | 8926 | 61679 | 111056 | 152929 | 201284 | 2.0 | `20261017_093244` |
 | insert | xfs | on | 8811 | 59585 | 107164 | 147525 | 193656 | 3.1 | `20261017_093244` |
@@ -100,7 +105,10 @@ full_page_writes / InnoDB doublewrite; KB/trx = device writes per transaction at
 | insert | btrfs | off | 2462 | 11646 | 22366 | 7488 | 13837 | 8.4 | `20261019_020217` |
 | insert | ext4 | off | 9865 | 57584 | 98321 | 145735 | 175973 | 2.1 | `20261017_032251` |
 | insert | ext4 | on | 9650 | 55136 | 85932 | 117871 | 135935 | 6.0 | `20261017_032251` |
+| insert | ext4-dj20-empty | off |  |  |  |  | 118344 | 3.6 | `20261030_232156_empty` |
 | insert | ext4-dj40 | off | 5688 | 33892 | 57480 | 79774 | 109975 | 4.7 | `20261017_032251` |
+| insert | ext4-empty | off |  |  |  |  | 177772 | 1.7 | `20261030_232156_empty` |
+| insert | ext4-empty | on |  |  |  |  | 176115 | 1.8 | `20261030_232156_empty` |
 | insert | ext4-tau | off | 9821 | 58722 | 97749 | 139992 | 169359 | 3.0 | `20261020_122600` |
 | insert | xfs | off | 9734 | 57416 | 97879 | 144065 | 175178 | 2.1 | `20261017_032251` |
 | insert | xfs | on | 9610 | 54380 | 85029 | 116443 | 134687 | 5.9 | `20261017_032251` |
