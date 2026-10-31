@@ -44,7 +44,8 @@ die() { echo "run_vm_torner: $*" >&2; exit 1; }
 
 RELEASE="$(cat "$KERNEL/include/config/kernel.release" 2>/dev/null)"
 [ -n "$RELEASE" ] || die "cannot read kernel release"
-INITRD="/boot/initrd.img-$RELEASE"
+# root-only on some hosts (0600): INITRD=<a readable copy> runs qemu unprivileged
+INITRD="${INITRD:-/boot/initrd.img-$RELEASE}"
 [ -f "$INITRD" ] || die "initrd not found: $INITRD"
 
 # The stack under test needs CONFIG_DM_LOG_WRITES; without it the guest cannot
