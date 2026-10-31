@@ -13,6 +13,9 @@ TAU_SRCTREE=${TAU_SRCTREE:-$HOME/djournalplus.code}
 # Patched mkfs binaries. Stock mkfs cannot create the tau journal.
 MKFS_XFS=${MKFS_XFS:-$TAU_SRCTREE/xfsprogs-dev/mkfs/mkfs.xfs}
 MKE2FS=${MKE2FS:-$TAU_SRCTREE/e2fsprogs/misc/mke2fs}
+# The FS's own checks from the same trees: e2fsck knows the tau journal inode
+E2FSCK=${E2FSCK:-$TAU_SRCTREE/e2fsprogs/e2fsck/e2fsck}
+XFS_REPAIR=${XFS_REPAIR:-$TAU_SRCTREE/xfsprogs-dev/repair/xfs_repair}
 
 TAUWRITE=$TAU_BIN/tauwrite
 TAUWRITE_NOFSYNC=$TAU_BIN/tauwrite_nofsync
@@ -78,6 +81,28 @@ mount_tau() {
 	# when it does, and on a default-sized journal that takes hours.
 	sudo mount -t "$fs" -o "${TAU_MOUNT_OPTS:-tjournal}" "$TAU_DEV" "$TAU_MNT" ||
 		die "mount -t $fs -o ${TAU_MOUNT_OPTS:-tjournal} failed"
+}
+
+# fsck_tau <xfs|ext4>: the FS's own check of the unmounted $TAU_DEV, read-only
+# (e2fsck -fn, xfs_repair -n); on a complaint, the last lines of what it said
+fsck_tau() {
+	local bin out rc
+
+	case "$1" in
+	ext4) bin=$E2FSCK ;;
+	xfs) bin=$XFS_REPAIR ;;
+	*) die "unknown fs '$1' (want xfs or ext4)" ;;
+	esac
+	[ -x "$bin" ] || { echo "  missing $bin"; return 1; }
+	case "$1" in
+	ext4) out=$(sudo "$bin" -fn "$TAU_DEV" 2>&1) ;;
+	xfs) out=$(sudo "$bin" -n "$TAU_DEV" 2>&1) ;;
+	esac
+	rc=$?
+	[ "$rc" = 0 ] && return 0
+	echo "  $(basename "$bin") exit $rc:"
+	echo "$out" | tail -15 | sed 's/^/    /'
+	return 1
 }
 
 # tau_home <0|1>: from kernel #372 a commit writes new blocks home, not to the

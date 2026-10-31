@@ -1235,10 +1235,43 @@ timed jbd2 commit closes the window.
   allocation is durable and the conversion is not. On XFS that was #44 (block
   1 new, blocks 2-3 lost); recovery now rolls the tx back. On ext4 the one
   jbd2 transaction makes it whole.
-- `partial` (XFS only, not in `all`): holes at blocks 4 and 8 of a 64 KiB
+- `partial` (not in `all`): holes at blocks 4 and 8 of a 64 KiB
   file, one tx writing blocks 3-4 and 8, the cut between the two conversions of
   pass 2 after another file's fsync made the first durable. The tx must be
-  rolled back and the block converted without its data zeroed (no salt).
+  rolled back and the block converted without its data zeroed (no salt). On
+  ext4 from #386 pass 2 is one jbd2 handle (kernel bug.md #73): the fsync waits
+  for it and nothing is converted at the cut.
+- `eof`, `eof-journal` (not in `all`; kernel bug.md #73): `partial` past EOF --
+  block 256 and then blocks 16-17 of a 64 KiB file in one tx, the cut between
+  the two conversions after another file's fsync; `eof-journal` with
+  `tau_home` 0. After the recovery the FS's own check must pass (`fsck_tau`:
+  `e2fsck -fn`, `xfs_repair -n`; a fresh FS is checked first, and a failure
+  there is INCONCLUSIVE). Until #385 an ext4 rollback left the converted
+  blocks written past EOF, and e2fsck took that for a bad `i_size` (`-y` grows
+  the file over the zeros; with an extent tree it clears the extent). Two
+  blocks, because e2fsck lets one written block right after a block-aligned EOF
+  pass; block 256 first, because XFS zeroes the range between EOF and a write
+  past it, which would join the two runs. XFS allows written blocks past EOF,
+  so there the case passes on every kernel.
+
+A free after an fsync'd allocation (kernel bug.md #74; part of `all`). F is
+64 KiB new + fsync, then, with no fsync on F, a free, another file's fsync
+(the free reaches the host log) and the cut:
+- `free-punch`: block 4 punched. F must read 0x30 but block 4.
+- `free-trunc`: F truncated to 32 KiB. Its first 32 KiB must be 0x30.
+- `free-punch-journal`: `free-punch` with `tau_home` 0; the punch waits until
+  F's tx was checkpointed and dropped (`tau_probe_tx_dropped`), else F's
+  journal copies make the free commit and the bug does not show.
+- `free-overwrite`: F, block 0 rewritten + fsync and that tx dropped, then
+  block 4 punched. The newest record names no new blocks or size, so the punch
+  goes without a commit (`free_skip`; if it commits the case is INCONCLUSIVE)
+  and recovery must keep F: blocks 0, 3, 4, 5 = 31, 30, 00, 30.
+Until #388 a free whose range had no journal copy wrote no record, and recovery
+read the freed blocks or the short size as F's unfinished publication and
+rolled F back: all zeros.
+
+Every case ends with the FS's own check of what recovery left (`fsck_tau` in
+`guest/common.sh`: `e2fsck -fn`, `xfs_repair -n`; kernel bug.md #73).
 
 `NOROLLBACK=1` switches the rollback off for the recovery mount
 (`tau_inject_fault=8`), to see what the cases look like without it.
@@ -1313,6 +1346,9 @@ rows say.
 | #339 `publish` | FAIL: 30,44,-,- (#44) | PASS: 30,44,44,44 |
 | #341, rollback off | `publish` FAIL 30,44,-,-; `partial` FAIL 45,45,00 | -- |
 | #341 | `all` PASS (`publish` 30,30,-,-: rolled back); `partial` PASS 30,00,00, 1 block zeroed | `all` PASS |
+| #385 | `eof`, `eof-journal` PASS ("2 of 3 new blocks converted ... rolled back (2 zeroed)", `xfs_repair -n` clean); `free-punch`, `free-trunc`, `free-punch-journal` FAIL: F all zeros | `eof`, `eof-journal` FAIL: e2fsck "i_size is 65536, should be 1052672"; `free-*` FAIL: F all zeros |
+| #386 (pass 2 in one jbd2 handle) | `free-*` FAIL as on #385 | `eof` PASS; `partial` FAIL: tid 1 left out by the gate, tid 0 (F, blocks 4 and 8 punched since) rolled back, "14 of 16 ... (14 zeroed)" -- #74; `free-*` FAIL |
+| #388 (+ the free's record, #74) | all 18 PASS, `xfs_repair -n` clean after each; `free-*` replay the free's commit (tid 1), F kept; `free-overwrite` punched with no commit, 31,30,00,30 | all 18 PASS, e2fsck clean after each; `partial` 30,00,00 (tid 3 left out, tid 1..2 replayed); `free-overwrite` as on XFS |
 
 ### Flush order: what a device write cache can lose
 

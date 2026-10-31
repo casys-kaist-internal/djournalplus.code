@@ -2,9 +2,11 @@
 # An allocating commit's host metadata is never durable without its record, and
 # one commit's allocations land in one host transaction (#49-#51).  README.
 #   usage: epoch-test.sh [xfs|ext4|both] [case|all, or a comma list] [rounds]
-# cases: convert split gate publish partial append append-umount append-torn isize
+# cases: convert split gate publish partial eof eof-journal free-punch free-trunc
+#        free-punch-journal free-overwrite append append-umount append-torn isize
 #        undo-bg undo-wb undo-sparse
-# all = every case but partial (#44 rollback; ext4 from #364).
+# all = every case but the rollbacks: partial (#44; ext4 from #364), eof and
+# eof-journal (#73).  Every case ends with the FS's own check.
 # WARNING: runs mkfs on $TAU_DEV inside the guest.
 
 set -u
@@ -21,7 +23,7 @@ xfs|ext4) ;;
 *) echo "usage: $0 [xfs|ext4|both] [case|all] [rounds]" >&2; exit 2 ;;
 esac
 CASES=${CASES//,/ }
-CASES=${CASES//all/convert split gate publish append append-umount append-torn isize undo-bg undo-wb undo-sparse}
+CASES=${CASES//all/convert split gate publish free-punch free-trunc free-punch-journal free-overwrite append append-umount append-torn isize undo-bg undo-wb undo-sparse}
 
 rc=0
 summary=""

@@ -27,6 +27,14 @@
 #            blocks 3-4 and 8; the cut comes between the two conversions of
 #            pass 2, after another file's fsync made the first durable.  The tx
 #            is rolled back and the block converted without its data is zeroed.
+#            On ext4 pass 2 is one jbd2 handle (#73): the fsync waits for it,
+#            nothing is converted at the cut.
+#   eof      partial with new blocks 16-17 and 256 past the EOF of a 64 KiB
+#            file (256 written first: XFS zeroes from EOF to a write past it;
+#            two blocks: e2fsck lets one written block at an aligned EOF pass):
+#            the FS's own check (e2fsck -fn, xfs_repair -n) must pass after the
+#            rollback -- on ext4 no written block past EOF (#73)
+#   eof-journal  eof with tau_home 0, the new blocks journaled
 # Size only (no allocation: the EOF moves inside the written last block, #45):
 #   append         100 B + fsync, 100 B appended + fsync, cut: size 200
 #   append-umount  the same, then a clean umount + mount before the cut
@@ -36,6 +44,21 @@
 #                  next append grows the same block, then the first commit
 #                  finishes and the power is cut: the size is the first one's
 #                  (#46: not the live i_size, which would show zeros)
+# A free after an fsync (bug.md #74): F = 64 KiB new + fsync, then, no fsync:
+#   free-punch          block 4 punched, another file's fsync, cut: F with
+#                       block 4 a hole
+#   free-trunc          F truncated to 32 KiB, another file's fsync, cut: its
+#                       first 32 KiB
+#   free-punch-journal  free-punch with tau_home 0, the new blocks journaled;
+#                       the punch waits for F's tx to be checkpointed and
+#                       dropped (a small tx goes at once), so no copy is left
+#   free-overwrite      F, then block 0 rewritten + fsync and that tx checkpointed
+#                       and dropped, then block 4 punched: the newest record names
+#                       no new blocks or size, so the punch goes without a commit
+#                       (free_skip) and recovery has nothing to misjudge: F with
+#                       block 0 new and block 4 a hole
+#   Until #388 the free wrote no record after F and recovery took it for F's
+#   missed publication: F rolled back, all zeros.
 # An append into the TauRedo block EOF sits in (design.md §20.3, bug.md #52).
 # F = 4 KiB of A + 100 B of B, a clean remount, 10 B of b over block 1 + fsync
 # with tau_cp_small_tx 0: block 1 stays TauRedo, block 0 is no longer tau's.
@@ -62,7 +85,9 @@ P=/sys/module/tau_journal/parameters
 F=$TAU_MNT/epoch
 
 case "$CASE" in
-convert|split|gate|publish|partial|append|append-umount|append-torn|isize) ;;
+convert|split|gate|publish|partial|eof|eof-journal) ;;
+free-punch|free-trunc|free-punch-journal|free-overwrite) ;;
+append|append-umount|append-torn|isize) ;;
 undo-bg|undo-wb|undo-sparse) ;;
 *) die "usage: $0 <xfs|ext4> <case> [hold-seconds]" ;;
 esac
@@ -343,6 +368,96 @@ partial)
 	echo "== between the conversions: forcing the host log =="
 	logforce 1 &
 	sleep 2
+	;;
+eof|eof-journal)
+	[ "$CASE" = eof-journal ] && tau_home 0
+	sudo umount "$TAU_MNT" || die "umount failed"
+	fsck_tau "$FS" || inconclusive "the $FS check fails on a fresh FS"
+	mount_tau "$FS"
+	sudo python3 - "$F" <<-'EOF' || die "setup failed"
+		import os, sys
+		fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT | 0o40000000, 0o644)
+		os.pwrite(fd, bytes([0x30]) * 65536, 0)
+		os.fsync(fd)
+		os.close(fd)
+	EOF
+	setparam tau_inject_delay $((1 << 4))	# PUBLISH_RUN
+	sudo python3 - "$F" <<-'EOF' || die "write failed"
+		import os, sys
+		fd = os.open(sys.argv[1], os.O_RDWR | 0o40000000)
+		os.pwrite(fd, bytes([0x46]) * 4096, 256 * 4096)
+		os.pwrite(fd, bytes([0x45]) * 8192, 16 * 4096)
+		os.close(fd)
+	EOF
+	echo "== blocks 256 and 16-17 written past EOF (two runs), no fsync; waiting for pass 2 =="
+	wait_delay 4 20 || inconclusive "pass 2 never reached a second run"
+	echo "== between the conversions: forcing the host log =="
+	logforce 1 &
+	sleep 2
+	;;
+free-punch|free-trunc|free-punch-journal)
+	[ "$CASE" = free-punch-journal ] && tau_home 0
+	d0=$(cat $P/tau_probe_tx_dropped)
+	sudo python3 - "$F" <<-'EOF' || die "write failed"
+		import os, sys
+		fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT | 0o40000000, 0o644)
+		os.pwrite(fd, bytes([0x30]) * 65536, 0)
+		os.fsync(fd)
+		os.close(fd)
+	EOF
+	if [ "$CASE" = free-punch-journal ]; then
+		for i in $(seq 1 100); do
+			[ "$(cat $P/tau_probe_tx_dropped)" -gt "$d0" ] && break
+			sleep 0.2
+		done
+		[ "$(cat $P/tau_probe_tx_dropped)" -gt "$d0" ] ||
+			inconclusive "F's tx was not checkpointed and dropped"
+	fi
+	sudo python3 - "$F" "$CASE" <<-'EOF' || die "free failed"
+		import ctypes, os, sys
+		libc = ctypes.CDLL("libc.so.6", use_errno=True)
+		libc.fallocate.argtypes = [ctypes.c_int, ctypes.c_int,
+					   ctypes.c_long, ctypes.c_long]
+		fd = os.open(sys.argv[1], os.O_RDWR | 0o40000000)
+		if sys.argv[2] == "free-trunc":
+		    os.ftruncate(fd, 32768)
+		elif libc.fallocate(fd, 3, 4 * 4096, 4096):	# PUNCH_HOLE | KEEP_SIZE
+		    raise OSError(ctypes.get_errno(), "punch")
+		os.close(fd)
+	EOF
+	echo "== 64 KiB new + fsync, then freed ($CASE), no fsync; forcing the host log =="
+	logforce 1
+	;;
+free-overwrite)
+	d0=$(cat $P/tau_probe_tx_dropped)
+	sudo python3 - "$F" <<-'EOF' || die "write failed"
+		import os, sys
+		fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT | 0o40000000, 0o644)
+		os.pwrite(fd, bytes([0x30]) * 65536, 0)
+		os.fsync(fd)
+		os.pwrite(fd, bytes([0x31]) * 4096, 0)
+		os.fsync(fd)
+		os.close(fd)
+	EOF
+	for i in $(seq 1 100); do
+		[ $(( $(cat $P/tau_probe_tx_dropped) - d0 )) -ge 2 ] && break
+		sleep 0.2
+	done
+	s0=$(cat $P/tau_probe_free_skip)
+	sudo python3 - "$F" <<-'EOF' || die "punch failed"
+		import ctypes, os, sys
+		libc = ctypes.CDLL("libc.so.6", use_errno=True)
+		libc.fallocate.argtypes = [ctypes.c_int, ctypes.c_int,
+					   ctypes.c_long, ctypes.c_long]
+		fd = os.open(sys.argv[1], os.O_RDWR | 0o40000000)
+		if libc.fallocate(fd, 3, 4 * 4096, 4096):	# PUNCH_HOLE | KEEP_SIZE
+		    raise OSError(ctypes.get_errno(), "punch")
+		os.close(fd)
+	EOF
+	[ "$(cat $P/tau_probe_free_skip)" -gt "$s0" ] ||
+		inconclusive "the punch committed: a copy was left or the newest record names new blocks"
+	echo "== 64 KiB new + fsync, block 0 rewritten + fsync, block 4 punched without a commit; forcing the host log =="
+	logforce 1
 	;;
 esac
 

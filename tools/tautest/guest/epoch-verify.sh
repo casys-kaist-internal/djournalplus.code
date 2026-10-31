@@ -14,10 +14,24 @@ convert) BLKS="0 1";  OK="43,43 00,00" ;;
 split)   BLKS="0 16"; OK="41,42 -,- 00,00" ;;
 gate|publish) BLKS="0 1 2 3"; OK="30,30,-,- 30,44,44,44" ;;
 partial) BLKS="3 4 8"; OK="30,00,00 45,45,46" ;;
+eof|eof-journal) BLKS="15 16 17 256"; OK="30,-,-,- 30,45,45,46" ;;
+free-punch|free-punch-journal) BLKS="3 4 5"; OK="30,00,30" ;;
+free-trunc) BLKS="0 7 8"; OK="30,30,-" ;;
+free-overwrite) BLKS="0 3 4 5"; OK="31,30,00,30" ;;
 append|append-umount|append-torn|isize|undo-bg|undo-wb|undo-sparse) BLKS="" ;;
 *) die "usage: $0 <xfs|ext4> <case>" ;;
 esac
 [ -n "$FS" ] || die "usage: $0 <xfs|ext4> <case>"
+
+# what recovery left must pass the FS's own check (#73)
+check_fs() {
+	if fsck_tau "$FS"; then
+		echo "  $FS check clean"
+	else
+		echo "RESULT: FAIL (the $FS check after recovery)"
+		rc=1
+	fi
+}
 
 sudo umount "$TAU_MNT" 2>/dev/null || true
 # NOROLLBACK=1: recovery skips its rollback check (TAU_FAULT_NOROLLBACK) --
@@ -60,7 +74,8 @@ PY
 		show_kernel_faults
 		rc=1
 	fi
-	sudo umount "$TAU_MNT" || rc=1
+	sudo umount "$TAU_MNT" || { echo "RESULT: FAIL (umount)"; exit 1; }
+	check_fs
 	exit $rc
 fi
 
@@ -92,7 +107,6 @@ if [ $rc -eq 0 ]; then
 	echo "RESULT: PASS (blocks $blocks, no salt)"
 else
 	echo "RESULT: FAIL (blocks $blocks, $salt salt bytes; want one of: $OK)"
-	sudo filefrag -v "$F" | sed 's/^/  /'
 fi
 
 if [ "$(kernel_faults)" != "0" ]; then
@@ -100,6 +114,8 @@ if [ "$(kernel_faults)" != "0" ]; then
 	show_kernel_faults
 	rc=1
 fi
+sudo filefrag -v "$F" | sed 's/^/  /'
 
-sudo umount "$TAU_MNT" || { echo "RESULT: FAIL (umount)"; rc=1; }
+sudo umount "$TAU_MNT" || { echo "RESULT: FAIL (umount)"; exit 1; }
+check_fs
 exit $rc
