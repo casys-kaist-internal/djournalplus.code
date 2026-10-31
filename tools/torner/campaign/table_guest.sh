@@ -14,6 +14,8 @@
 #                    on the recovery side, which runs when a state is mounted
 #   TAU_SEG          tau journal segment size [2m], small so segments get reused
 #                    (as torner ran from #349); MKFS_OPTS overrides the option
+#   GEN_EXTRA        more `torner gen` arguments for every capture: --fdatasync
+#                    (an overwrite's record then takes its own flush, no host commit)
 #   TAG              suffix of the capture names
 # Ends with "===== done".
 set -u
@@ -21,7 +23,7 @@ T=~/torner; S=$T/scripts; C=$T/campaign; W=/mnt/scratch; P=/sys/module/tau_journ
 CELLS=${CELLS:?}; PROFILES=${PROFILES:-"quiet busy"}
 LIMIT_ATOM=${LIMIT_ATOM:-1000}; LIMIT_EPOCH=${LIMIT_EPOCH:-1000}
 PREFER_SPLIT=${PREFER_SPLIT:-0}; CAP_PARAM=${CAP_PARAM:-}; EXPLORE_PARAM=${EXPLORE_PARAM:-}
-TAU_SEG=${TAU_SEG:-2m}; TAG=${TAG:-}
+TAU_SEG=${TAU_SEG:-2m}; GEN_EXTRA=${GEN_EXTRA:-}; TAG=${TAG:-}
 SYS=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 MK=/mnt/scratch/stock/etc/mke2fs.conf
 CSV=$W/table.csv
@@ -83,10 +85,11 @@ for cell in $CELLS; do
 	*)        path=/mnt/scratch/stock/bin:$SYS; mkfs="" ;;
 	esac
 	for prof in $PROFILES; do
-		gen="$(row_gen $row) $(profile_gen $prof)" || { echo "unknown profile $prof"; continue; }
+		gen="$(row_gen $row) $(profile_gen $prof)${GEN_EXTRA:+ $GEN_EXTRA}" ||
+			{ echo "unknown profile $prof"; continue; }
 		name=$fs-$row-$prof${TAG:+-$TAG}; D=$W/cap-$name
 		sudo rm -rf $D
-		echo "===== $name capture $(date +%T)${CAP_PARAM:+  $CAP_PARAM}${EXPLORE_PARAM:+  explore $EXPLORE_PARAM}"
+		echo "===== $name capture $(date +%T)${CAP_PARAM:+  $CAP_PARAM}${EXPLORE_PARAM:+  explore $EXPLORE_PARAM}${GEN_EXTRA:+  gen $GEN_EXTRA}"
 		undo=
 		if [ -n "$CAP_PARAM" ]; then
 			undo=$(setps "$CAP_PARAM") || { echo "cell skipped"; continue; }
@@ -100,8 +103,8 @@ for cell in $CELLS; do
 		grep -E "application writes" $W/$name-capture.log
 		[ $rc = 0 ] || continue
 		# what the cell is, for cell_csv.py run again later on the host
-		printf '{"row":"%s","profile":"%s","tag":"%s","cap_param":"%s","explore_param":"%s"}\n' \
-			"$row" "$prof" "$TAG" "$CAP_PARAM" "$EXPLORE_PARAM" | sudo tee $D/cell.json >/dev/null
+		printf '{"row":"%s","profile":"%s","tag":"%s","cap_param":"%s","explore_param":"%s","gen_extra":"%s"}\n' \
+			"$row" "$prof" "$TAG" "$CAP_PARAM" "$EXPLORE_PARAM" "$GEN_EXTRA" | sudo tee $D/cell.json >/dev/null
 		undo=
 		if [ -n "$EXPLORE_PARAM" ]; then
 			undo=$(setps "$EXPLORE_PARAM") || { echo "cell skipped"; continue; }

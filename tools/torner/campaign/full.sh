@@ -18,9 +18,10 @@
 #   QUEUES="q1 q2" MERGE="$(ls -d <earlier out>/{q3,q4,q5,q6}/cap-*)"
 #   CONTROLS: the tau queues' controls, each switch restoring a bug a fix closed
 #   (the rows must fail again); VARIANTS: settings the rows must still pass.
-#   Entries <tag>[:cap=<p>=<v>[,...]][:exp=<p>=<v>[,...]][:rows=<r>[,...]][:profiles=<p>[,...]]:
-#   cap is set for each capture, exp while its states are explored (the
-#   recovery side), rows [ow16k,ap16k], profiles [busy]; a variant's tag starts "set-"
+#   Entries <tag>[:cap=<p>=<v>[,...]][:exp=<p>=<v>[,...]][:gen=<arg>[,...]][:rows=<r>[,...]]
+#   [:profiles=<p>[,...]]: cap is set for each capture, exp while its states are
+#   explored (the recovery side), gen goes to `torner gen` (GEN_EXTRA: --fdatasync),
+#   rows [ow16k,ap16k], profiles [busy]; a variant's tag starts "set-"
 set -u
 TC=$(cd "$(dirname "$0")" && pwd)
 KT=$(cd "${1:?usage: full.sh <tau tree> <basevm tree> <out dir>}" && pwd) || exit 1
@@ -37,24 +38,25 @@ export MEM=${MEM:-10G}
 CONTROLS=${CONTROLS:-record_fua_only:cap=tau_record_fua_only=1 segmap_fua_only:cap=tau_segmap_fua_only=1 reuse_flush_only:cap=tau_reuse_flush_only=1}
 VARIANTS=${VARIANTS:-}
 tq() {	# <name> <port> <gdb> <fs>
-	local n=$1 p=$2 gp=$3 fs=$4 c tag f cap exp rows profs kind lim
+	local n=$1 p=$2 gp=$3 fs=$4 c tag f cap exp gen rows profs kind lim
 	CELLS="$(cells $fs)" PROFILES="quiet busy" LIMIT_ATOM=${LIMIT_TAU_ATOM:-1500} \
 		LIMIT_EPOCH=${LIMIT_TAU_EPOCH:-2000} NAME=$n PORT=$p GDB_PORT=$gp \
 		bash $TC/table.sh "$KT" "$OUT/$n-main"
 	for c in $CONTROLS $VARIANTS; do
-		tag=${c%%:*} cap= exp= rows="ow16k ap16k" profs=busy kind=ctl lim=${LIMIT_CTL:-800}
+		tag=${c%%:*} cap= exp= gen= rows="ow16k ap16k" profs=busy kind=ctl lim=${LIMIT_CTL:-800}
 		case $tag in set-*) kind=var lim=${LIMIT_VAR:-1000} ;; esac
 		for f in $(tr : ' ' <<< "${c#"$tag"}"); do
 			case $f in
 			cap=*) cap=${f#cap=} ;;
 			exp=*) exp=${f#exp=} ;;
+			gen=*) gen=$(tr , ' ' <<< "${f#gen=}") ;;
 			rows=*) rows=$(tr , ' ' <<< "${f#rows=}") ;;
 			profiles=*) profs=$(tr , ' ' <<< "${f#profiles=}") ;;
 			*) echo "$c: unknown field $f" ;;
 			esac
 		done
-		CELLS="$(cells $fs $rows)" PROFILES="$profs" CAP_PARAM="$cap" EXPLORE_PARAM="$exp" TAG=$tag \
-			LIMIT_ATOM=$lim LIMIT_EPOCH=$lim NAME=$n PORT=$p \
+		CELLS="$(cells $fs $rows)" PROFILES="$profs" CAP_PARAM="$cap" EXPLORE_PARAM="$exp" \
+			GEN_EXTRA="$gen" TAG=$tag LIMIT_ATOM=$lim LIMIT_EPOCH=$lim NAME=$n PORT=$p \
 			GDB_PORT=$gp bash $TC/table.sh "$KT" "$OUT/$n-$kind-$tag"
 	done
 }

@@ -5,7 +5,8 @@
 #
 #   usage: table.sh <kernel tree> <out dir>
 #   env:   CELLS (required), PROFILES, LIMIT_ATOM, LIMIT_EPOCH, PREFER_SPLIT,
-#          CAP_PARAM, EXPLORE_PARAM, TAU_SEG, MKFS_OPTS, TAG -- passed to table_guest.sh
+#          CAP_PARAM, EXPLORE_PARAM, TAU_SEG, MKFS_OPTS, GEN_EXTRA, TAG -- passed to
+#          table_guest.sh
 #          PORT [5556], GDB_PORT [1236], NAME [table]: two calls with different
 #          ones run side by side; DEADLINE_MIN [600]; MEM [16G]
 #          ZFS_KIT: build_zfs.sh's kit (spl/zfs modules for the basevm kernel,
@@ -135,7 +136,7 @@ g "setsid nohup env CELLS='$CELLS' PROFILES='${PROFILES:-quiet busy}' \
 	LIMIT_ATOM=${LIMIT_ATOM:-1000} LIMIT_EPOCH=${LIMIT_EPOCH:-1000} \
 	PREFER_SPLIT=${PREFER_SPLIT:-0} CAP_PARAM='${CAP_PARAM:-}' EXPLORE_PARAM='${EXPLORE_PARAM:-}' \
 	TAU_SEG='${TAU_SEG:-2m}' \
-	MKFS_OPTS='${MKFS_OPTS:-}' \
+	MKFS_OPTS='${MKFS_OPTS:-}' GEN_EXTRA='${GEN_EXTRA:-}' \
 	TAG='${TAG:-}' bash ~/torner/campaign/table_guest.sh > /mnt/scratch/table_guest.log 2>&1 < /dev/null &"
 deadline=$(( $(date +%s) + ${DEADLINE_MIN:-600} * 60 ))
 while :; do
