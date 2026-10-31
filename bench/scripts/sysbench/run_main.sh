@@ -54,9 +54,10 @@ echo "=================================================="
 FS_GROUPS="${FS_GROUPS-ext4 xfs}"
 FS_FPWON="${FS_FPWON-ext4 xfs}"
 FS_FPWOFF="${FS_FPWOFF-ext4 xfs}"
-# Stage 2, protection off only: EXT4_Data and ZFS (recordsize = DB page size)
-#   mysql:    FS_GROUPS="ext4-dj20 zfs-16k"  FS_FPWON=""  FS_FPWOFF="ext4-dj20 zfs-16k"
-#   postgres: FS_GROUPS="ext4-dj20 zfs-8k"   FS_FPWON=""  FS_FPWOFF="ext4-dj20 zfs-8k"
+# Stage 2, protection off only: EXT4_Data (ext4-dj40: data=journal, 40 GB journal,
+# the paper's configuration) and ZFS (recordsize = DB page size)
+#   mysql:    FS_GROUPS="ext4-dj40 zfs-16k"  FS_FPWON=""  FS_FPWOFF="ext4-dj40 zfs-16k"
+#   postgres: FS_GROUPS="ext4-dj40 zfs-8k"   FS_FPWON=""  FS_FPWOFF="ext4-dj40 zfs-8k"
 # Stage 3: FS_GROUPS="ext4-tau xfs-tau"  FS_FPWON=""  FS_FPWOFF="ext4-tau xfs-tau"
 
 # Every baseline configuration runs on one kernel build (TAU_BASE_KERNEL in
