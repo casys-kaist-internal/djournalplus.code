@@ -3,7 +3,12 @@
 # middle, the shape of SOSP E10 (taujournal-test.code/figures/results.csv):
 # BURST_RATE transactions/s (1000) for PRE_S (600 s), unlimited for BURST_S (2400
 # s), BURST_RATE again for POST_S (600 s), TERMINALS (64) throughout, throughput
-# in 2-s windows; beside it a 2-s sampler of the WAL directory's size on disk
+# in 2-s windows. The burst is rate-limited at BURST_MAX_RATE (100000/s, ~9x the
+# most this server reaches) instead of "unlimited": after a rate-limited phase
+# BenchBase's workers keep waiting for queued work that an unlimited phase never
+# queues (WorkloadState.fetchWork), so an unlimited burst ran no transactions;
+# the work queue is capped at 10,000 and reset at each phase change (checked on
+# a 1-warehouse loop-device run: the burst ran as fast as an unlimited run); beside it a 2-s sampler of the WAL directory's size on disk
 # (the App configurations' "journal") and of the device's write volume, plus the
 # output of JOURNAL_SAMPLE_CMD when set (τ's journal size, for the τ runs). Per
 # configuration (FS_GROUPS with FS_FPWON / FS_FPWOFF as in run_tpcc.sh) and per
@@ -28,6 +33,7 @@ FS_FPWOFF="${FS_FPWOFF-}"
 WAL_SIZES="${WAL_SIZES-4GB 32GB}"
 TERMINALS=${TERMINALS:-64}
 BURST_RATE=${BURST_RATE:-1000}
+BURST_MAX_RATE=${BURST_MAX_RATE:-100000}
 PRE_S=${PRE_S:-600}
 BURST_S=${BURST_S:-2400}
 POST_S=${POST_S:-600}
@@ -50,7 +56,7 @@ source "$TAUFS_BENCH/scripts/benchbase/tpcc_lib.sh"
 exec > >(tee -a "$OUT/run.log") 2>&1
 cp "$0" "$OUT/"
 echo "=== DB5 burst: $MODE, $WH warehouses, $TERMINALS terminals, ${BURST_RATE}/s for ${PRE_S} s," \
-  "unlimited for ${BURST_S} s, ${BURST_RATE}/s for ${POST_S} s; WAL sizes ${WAL_SIZES:-default};" \
+  "${BURST_MAX_RATE}/s for ${BURST_S} s, ${BURST_RATE}/s for ${POST_S} s; WAL sizes ${WAL_SIZES:-default};" \
   "FS $FS_GROUPS (FPW on: $FS_FPWON; off: $FS_FPWOFF) $(date -u --rfc-3339=seconds)"
 git -C "$TAUFS_BENCH/benchbase" log -1 --format='benchbase %h %cs' > "$OUT/versions"
 log_env "$OUT/env.txt"
@@ -74,7 +80,7 @@ burst_config() {  # <file>: the three phases, the standard mix, no think time
     <randomWarehouse>true</randomWarehouse>
     <works>
 EOF
-    for phase in "$PRE_S $BURST_RATE" "$BURST_S unlimited" "$POST_S $BURST_RATE"; do
+    for phase in "$PRE_S $BURST_RATE" "$BURST_S $BURST_MAX_RATE" "$POST_S $BURST_RATE"; do
       set -- $phase
       cat <<EOF
         <work>
