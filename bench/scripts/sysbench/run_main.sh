@@ -131,6 +131,10 @@ case "$VARIANT" in
     MY_BINLOG=ON ;;
   fullfill)  # SSD sensitivity: the whole device written once after the trim (common.sh)
     TAU_FILL_BEFORE_RESTORE=1 ;;
+  drift)  # EVAL_PLAN §1 check (b): the main protocol, then the first point (1 thread)
+          # again after the 64-thread runs (label c1_r2), to see how far the database
+          # drifts over a block (insert grows the tables); settings unchanged
+    THREADS_LIST=(1 8 16 32 64 64 64 1); LAST_POINT_RUNS=1 ;;
   empty)  # EVAL_PLAN DB3 insert-from-empty: oltp_insert into the empty tables of the
           # t16_r0 images (IMAGE_ROWS=0 create_image.sh), so every write goes to a
           # growing table; --table-size stays the main one (the range of the k values)
