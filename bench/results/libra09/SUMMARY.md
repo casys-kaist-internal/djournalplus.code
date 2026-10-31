@@ -40,6 +40,7 @@ full_page_writes / InnoDB doublewrite; KB/trx = device writes per transaction at
 | insert | ext4-dj20-empty | off |  |  |  |  | 118484 | 2.9 | `20261031_003824_empty` |
 | insert | ext4-dj40 | off | 4877 | 31093 | 53438 | 70840 | 98128 | 5.1 | `20261017_093244` |
 | insert | ext4-dj40-empty | off |  |  |  |  | 117829 | 2.9 | `20261031_124721_empty` |
+| insert | ext4-drift | on | 9024 | 61701 | 107959 | 148608 | 194037 | 3.1 | `20261031_175807_drift` |
 | insert | ext4-empty | off |  |  |  |  | 193372 | 1.5 | `20261031_003824_empty` |
 | insert | ext4-empty | on |  |  |  |  | 189047 | 1.8 | `20261031_003824_empty` |
 | insert | ext4-tau | off | 8925 | 61467 | 110611 | 151631 | 196329 | 2.9 | `20261020_204243` |
@@ -109,6 +110,7 @@ full_page_writes / InnoDB doublewrite; KB/trx = device writes per transaction at
 | insert | ext4-dj20-empty | off |  |  |  |  | 118344 | 3.6 | `20261030_232156_empty` |
 | insert | ext4-dj40 | off | 5688 | 33892 | 57480 | 79774 | 109975 | 4.7 | `20261017_032251` |
 | insert | ext4-dj40-empty | off |  |  |  |  | 117707 | 3.6 | `20261031_122343_empty` |
+| insert | ext4-drift | on | 9234 | 55650 | 86509 | 118193 | 135140 | 6.0 | `20261031_164910_drift` |
 | insert | ext4-empty | off |  |  |  |  | 177772 | 1.7 | `20261030_232156_empty` |
 | insert | ext4-empty | on |  |  |  |  | 176115 | 1.8 | `20261030_232156_empty` |
 | insert | ext4-tau | off | 9821 | 58722 | 97749 | 139992 | 169359 | 3.0 | `20261020_122600` |
