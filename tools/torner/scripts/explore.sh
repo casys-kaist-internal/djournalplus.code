@@ -140,8 +140,66 @@ JOBS="$(fs_max_jobs "$FS" "$JOBS")"
 WORK="$CAPTURE/explore"
 rm -rf "$WORK"; mkdir -p "$WORK"
 : > "$OUT"
+# what P3 leaves behind, per state: the fsck report of a P3 fail, and who held
+# a mount that would not come off.  WORK is wiped by the next strategy; this
+# stays with the capture.
+P3DIR="$CAPTURE/p3-$STRATEGY"
+rm -rf "$P3DIR"
 
 say() { echo "[explore] $*" >&2; }
+
+# Everything that might be holding a mount: its mountinfo line (propagation
+# included), the tasks with their cwd, root, an open file or a mapping on it,
+# every mount namespace that has a copy of it, and the tasks in D state with
+# their stacks.  From /proc alone: the guest has no fuser.
+umount_diag() {
+	local mnt="$1" loop="$2" dev mm p pid rest
+	dev=$(stat -c %d "$mnt")
+	mm=$(mountpoint -d "$mnt")
+	mm=$(printf '%02x:%02x' "${mm%:*}" "${mm#*:}")
+	echo "== mountinfo"
+	grep -F " $loop " /proc/self/mountinfo
+	echo "== tasks with their cwd, root, an open file or a mapping on it"
+	{
+		{
+			find -L /proc/[0-9]*/cwd /proc/[0-9]*/root -maxdepth 0 -printf '%D %p\n'
+			find -L /proc/[0-9]*/fd -mindepth 1 -maxdepth 1 -printf '%D %p\n'
+		} | awk -v d="$dev" '$1 == d { print $2 }'
+		grep -lF " $mm " /proc/[0-9]*/maps
+	} 2>/dev/null | awk '{ split($1, a, "/"); f = "/proc/" a[3] "/comm"; c = ""
+			      getline c < f; close(f); print $1, c }'
+	echo "== mount namespaces with $loop: ns tasks first-pid comm"
+	for p in /proc/[0-9]*; do
+		grep -qF " $loop " "$p/mountinfo" 2>/dev/null || continue
+		echo "$(readlink "$p/ns/mnt") ${p#/proc/} $(cat "$p/comm" 2>/dev/null)"
+	done | awk '{ n[$1]++; if (!($1 in f)) f[$1] = $2 " " $3 }
+		    END { for (k in n) print k, n[k], f[k] }'
+	echo "== D state"
+	ps -eo pid=,stat=,wchan:32=,comm= | awk '$2 ~ /^D/' | while read -r pid rest; do
+		echo "$pid $rest"
+		cat "/proc/$pid/stack" 2>/dev/null
+	done
+}
+
+# umount before fsck, and say so when it fails.  umount's EBUSY comes from the
+# VFS alone -- a reference on this mount, or on a copy propagated into another
+# mount namespace -- never from the file system.  Until 2026-10-31 its rc was
+# dropped and fsck then ran on a mounted XFS: every tau-xfs P3 of #365, #385
+# and #388.  Retried once; a state that stays mounted is not judged for P3, and
+# its mount is detached lazily so the slot's mount point is clean again.
+umount_state() {
+	local mnt="$1" loop="$2" sid="$3" err
+	err=$(umount "$mnt" 2>&1) && return 0
+	mkdir -p "$P3DIR"
+	{ echo "#### umount: $err"; umount_diag "$mnt" "$loop"; } >> "$P3DIR/$sid.umount" 2>&1
+	say "state $sid: umount failed ($err), retrying; see $P3DIR/$sid.umount"
+	sleep 1
+	err=$(umount "$mnt" 2>&1) && { say "state $sid: umount ok on retry"; return 0; }
+	{ echo "#### retry: $err"; umount_diag "$mnt" "$loop"; } >> "$P3DIR/$sid.umount" 2>&1
+	say "state $sid: still mounted ($err): P3 not judged"
+	umount -l "$mnt"
+	return 1
+}
 
 # ---- enumerate ---------------------------------------------------------
 ENUM="$WORK/states.all"
@@ -274,27 +332,34 @@ do_state() {
 	rc=$?
 
 	# P3 first for ZFS: scrub needs the pool imported.  For the others fsck
-	# needs it unmounted, so the order is reversed.
+	# needs it unmounted, so the order is reversed -- and fsck on a file
+	# system still mounted judges nothing.
+	p3=
 	if fs_is_zfs "$FS"; then
 		fs_fsck_report "$FS" "$loop" > "$WORK/f$slot"
 		fs_zfs_export
-	else
-		umount "$mnt" 2>/dev/null
+	elif ! umount_state "$mnt" "$loop" "$sid"; then
+		p3=n/a
 	fi
 
 	# P3 is only meaningful after recovery has run, i.e. after the mount
 	# above -- a raw crash state legitimately has a dirty journal.  And it is
 	# judged against the pristine filesystem, not against a zero exit code:
 	# see fs_fsck_report() for why a fresh mkfs is already "dirty" here.
-	fs_is_zfs "$FS" || fs_fsck_report "$FS" "$loop" > "$WORK/f$slot"
-	if [ -s "$BASEFSCK" ] || [ -s "$WORK/f$slot" ]; then
-		if diff -q "$BASEFSCK" "$WORK/f$slot" >/dev/null 2>&1; then
-			p3=pass
+	if [ -z "$p3" ]; then
+		fs_is_zfs "$FS" || fs_fsck_report "$FS" "$loop" > "$WORK/f$slot"
+		if [ -s "$BASEFSCK" ] || [ -s "$WORK/f$slot" ]; then
+			if diff -q "$BASEFSCK" "$WORK/f$slot" >/dev/null 2>&1; then
+				p3=pass
+			else
+				p3=fail
+				mkdir -p "$P3DIR"
+				cp "$WORK/f$slot" "$P3DIR/$sid.fsck"
+				say "state $sid: P3 fail, fsck report in $P3DIR/$sid.fsck"
+			fi
 		else
-			p3=fail
+			p3=pass
 		fi
-	else
-		p3=pass
 	fi
 	losetup -d "$loop"
 	rm -f "$img"
@@ -330,7 +395,7 @@ say "results -> $OUT"
 python3 - "$OUT" <<'EOF' >&2
 import json, sys
 
-n = p1 = sz = p2 = p3 = mf = nochk = 0
+n = p1 = sz = p2 = p3 = p3na = mf = nochk = 0
 targeted, torn, states_tearing = set(), set(), 0
 for line in open(sys.argv[1]):
     try:
@@ -343,6 +408,8 @@ for line in open(sys.argv[1]):
     sz += o.get("size") == "fail"
     p2 += o.get("p2") == "fail"
     p3 += o.get("p3") == "fail"
+    # mounted and never let go: P3 could not be judged
+    p3na += r.get("mount") == "ok" and o.get("p3") == "n/a"
     mf += r.get("mount") == "failed"
     if r.get("mount") == "ok" and "focus" not in r and "stats" not in r:
         nochk += 1
@@ -353,8 +420,8 @@ for line in open(sys.argv[1]):
         states_tearing += bool(tt)
 
 print("[explore] states=%d  P1 torn=%d (%.1f%%, size %d)  P2 lost=%d  P3 dirty=%d"
-      "  unmountable=%d  unjudged=%d"
-      % (n, p1, 100.0 * p1 / n if n else 0, sz, p2, p3, mf, nochk))
+      " (not judged %d)  unmountable=%d  unjudged=%d"
+      % (n, p1, 100.0 * p1 / n if n else 0, sz, p2, p3, p3na, mf, nochk))
 if targeted:
     print("[explore] application writes targeted=%d  torn=%d (%.1f%%)"
           "  states tearing a target=%d"

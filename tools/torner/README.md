@@ -533,7 +533,7 @@ assembled by `scripts/state_tool.py`, not by `sed` on JSON.
 `explore.sh` must run in the guest: every state is a deliberately damaged file
 system, and mounting one can take the kernel down.
 
-Two things the harness learned the hard way and now handles:
+Three things the harness learned the hard way and now handles:
 
 - **P3 is judged against a pristine baseline, not against a zero exit code.**
   The tau-aware `mke2fs` puts the tau journal at reserved inode 9, and `e2fsck`
@@ -542,6 +542,17 @@ Two things the harness learned the hard way and now handles:
   dirty — which reads like a catastrophic finding and is really a property of
   mkfs. `capture.sh` records what fsck says about the fresh filesystem and
   `explore.sh` fails P3 only on something new.
+- **fsck runs only on a filesystem that came off.** `umount` now and then
+  fails with EBUSY (a reference on the mount or on a copy propagated into
+  another mount namespace: the VFS refuses, the filesystem is never asked).
+  Until 2026-10-31 its rc was dropped and fsck then ran on a mounted XFS:
+  every τ-XFS P3 of kernels #365, #385 and #388 was that. `explore.sh` now
+  retries once after 1 s; a state still mounted then is recorded with P3
+  `n/a` (the summary line's "not judged") and detached lazily. What held it
+  (mountinfo, the tasks with a cwd, open file or mapping on it, the mount
+  namespaces with a copy, D-state stacks) is in
+  `CAPTURE/p3-STRATEGY/STATE.umount`, and a P3 fail's fsck report in
+  `STATE.fsck` next to it.
 - **States before the first progress mark are skipped** by the epoch-based
   strategies.  Those predate the workload — they are mkfs and file prefill, do
   not carry a formed filesystem yet, and would fill the sample with mount
