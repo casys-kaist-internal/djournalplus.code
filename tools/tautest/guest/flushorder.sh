@@ -63,10 +63,10 @@
 #              without a flush, its blocks converted only after it -- it whole
 #              or absent, the writes before it kept
 #   logappend  maplog, but each round four threads append a block to four new
-#              files, fdatasync each: allocating commits, records without a
-#              flush, a new segment each -- the map blocks are written while
-#              other commits' claims wait for their host commits; every
-#              fsync'd append must stay
+#              files, fdatasync each, journaled (tau_home 0): allocating
+#              commits, records without a flush, a new segment each -- the
+#              map blocks are written while other commits' claims wait for
+#              their host commits; every fsync'd append must stay
 #   inoreuse   file 1's twenty 128 KiB writes, never checkpointed, then it is
 #              unlinked; file 2, created after it with its ino, is given its
 #              segment and writes ten 128 KiB pages the same way: file 1's txs
@@ -220,7 +220,7 @@ if [ "$CASE" = unlink ] || [ "$CASE" = truncate ] || [ -n "$GEOM" ] || [ "$CASE"
 	echo 0 | sudo tee $P/tau_cp_small_tx >/dev/null
 	echo 120 | sudo tee $P/tau_max_transaction_age >/dev/null
 fi
-case "$CASE" in reuse|unlink|truncate|cpappend|inoreuse|mapappend)	# file 1 journaled, not written home
+case "$CASE" in reuse|unlink|truncate|cpappend|inoreuse|mapappend|logappend)	# file 1 journaled, not written home
 	home=$(cat $P/tau_home 2>/dev/null || echo 1); tau_home 0 ;;
 esac
 sudo sh -c "echo 0 > $P/tau_probe_seg_reuse_flush" 2>/dev/null
@@ -511,7 +511,7 @@ if [ -e $P/tau_maplog_len ]; then
 	echo 0 | sudo tee $P/tau_maplog_split $P/tau_maplog_early_base >/dev/null
 	echo "$mllen" | sudo tee $P/tau_maplog_len >/dev/null
 fi
-case "$CASE" in reuse|unlink|truncate|cpappend|inoreuse|mapappend) tau_home "$home" ;; esac
+case "$CASE" in reuse|unlink|truncate|cpappend|inoreuse|mapappend|logappend) tau_home "$home" ;; esac
 if [ "$CASE" = unlink ] || [ "$CASE" = truncate ] || [ -n "$GEOM" ] || [ "$CASE" = inoreuse ]; then
 	echo "$small_tx" | sudo tee $P/tau_cp_small_tx >/dev/null
 	echo "$tx_age" | sudo tee $P/tau_max_transaction_age >/dev/null
