@@ -29,6 +29,7 @@ fi
 # qemu-7.2.1/build-numa, configured with --enable-numa for VM_NUMA=1 on a host
 # whose installed qemu lacks NUMA binding.
 [ -n "${VM_QEMU_DIR:-}" ] && PATH="$VM_QEMU_DIR:$PATH"
+# VM_IMAGE overrides the guest disk image (default vm_imgs/qemu-image.qcow2).
 # VM_INITRD overrides the initrd (default the tau kernel's), e.g. for a guest
 # booted on the baseline kernel.
 # VM_KCMDLINE_EXTRA appends to the guest kernel command line. Built-in module
@@ -65,7 +66,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then # script is executed directly.
 				-cpu host \
 				$SMP_ARGS \
 				$NUMA_ARGS \
-				-drive file=vm_imgs/qemu-image.qcow2,index=0,media=disk,format=qcow2 \
+				-drive file="${VM_IMAGE:-vm_imgs/qemu-image.qcow2}",index=0,media=disk,format=qcow2 \
 				-m "$TOTAL_MEM" \
 				-append "root=/dev/sda rw console=ttyS0 selinux=0 ${VM_KCMDLINE_EXTRA:-}" \
 				--enable-kvm \
