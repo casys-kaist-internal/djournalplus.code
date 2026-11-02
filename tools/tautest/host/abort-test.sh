@@ -1,7 +1,8 @@
 #!/bin/bash
 # Inject a fault at each abort-path site and check the journal stops cleanly
-# and umount + mount recovers every fsync (#22, #7).
-#   usage: abort-test.sh [xfs|ext4|both] [sites, default "1 2 3 4 5 6"]
+# and umount + mount recovers every fsync (#22, #7); "keep": the unmount after
+# an abort leaves the journal for the next mount, on a discard mount (#65).
+#   usage: abort-test.sh [xfs|ext4|both] [sites, default "1 2 3 4 5 6 keep"]
 # WARNING: runs mkfs on $TAU_DEV inside the guest.
 
 set -u
@@ -9,7 +10,7 @@ cd "$(dirname "$0")" || exit 1
 . ./vm.sh
 
 FSLIST=${1:-both}
-SITES=${2:-1 2 3 4 5 6}
+SITES=${2:-1 2 3 4 5 6 keep}
 case "$FSLIST" in
 both) FSLIST="xfs ext4" ;;
 xfs|ext4) ;;
@@ -29,7 +30,10 @@ for fs in $FSLIST; do
 			vm_sync_tests || { rc=1; break 2; }
 			fresh=0
 		fi
-		vm_ssh "~/tautest/guest/abort.sh $fs $s"
+		case $s in
+		keep) vm_ssh "~/tautest/guest/abort-keep.sh $fs" ;;
+		*) vm_ssh "~/tautest/guest/abort.sh $fs $s" ;;
+		esac
 		case $? in
 		0) summary+="$tag: PASS\n" ;;
 		3) summary+="$tag: INCONCLUSIVE\n" ;;
