@@ -24,6 +24,11 @@ else
 	DISPLAY_ARGS="--nographic"
 fi
 
+# VM_QEMU_DIR puts another qemu build first on the PATH (the command line still
+# starts with "qemu-system-x86_64", which vm.sh's vm_pid matches), e.g.
+# qemu-7.2.1/build-numa, configured with --enable-numa for VM_NUMA=1 on a host
+# whose installed qemu lacks NUMA binding.
+[ -n "${VM_QEMU_DIR:-}" ] && PATH="$VM_QEMU_DIR:$PATH"
 # VM_INITRD overrides the initrd (default the tau kernel's), e.g. for a guest
 # booted on the baseline kernel.
 # VM_KCMDLINE_EXTRA appends to the guest kernel command line. Built-in module
