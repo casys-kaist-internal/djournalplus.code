@@ -168,7 +168,10 @@ trial() {  # FS FPW crash_after
   while [[ $(awk -v a="$(now)" -v b="$s" 'BEGIN {print (a - b >= '"$CRASH_AFTER"') ? 1 : 0}') == 0 ]]; do sleep 0.2; done
   echo "before_crash $(db_pos)" >> "$T"
   # the guest's logs so far, fetched before the kill (they stay in the guest image too)
+  # (the load and server logs too: what the guest has not synced is lost in the crash)
   vm_scp jhlee@localhost:r2/warmup.log "$OUT/$LABEL.warmup.log" > /dev/null 2>&1
+  vm_scp jhlee@localhost:r2/load.log "$OUT/$LABEL.sysbench.log" > /dev/null 2>&1
+  vm_scp "jhlee@localhost:r2/$LOGFILE.0" "$OUT/$LABEL.server.log" > /dev/null 2>&1
   t=$(now)
   vm_crash > /dev/null
   echo "crash_epoch=$t" >> "$T"
@@ -180,11 +183,10 @@ trial() {  # FS FPW crash_after
   b=$(db_start "~/r2/$LOGFILE.restart") || { echo "$b"; fail "db start after crash"; return 1; }
   echo "db_start_s=$b" | tee -a "$T"
   echo "after_restart $(db_pos)" >> "$T"
-  for f in load.log mount1.dmesg "$LOGFILE.0" "$LOGFILE.restart"; do
+  for f in mount1.dmesg "$LOGFILE.restart"; do
     vm_scp "jhlee@localhost:r2/$f" "$OUT/$LABEL.${f//\//_}" > /dev/null 2>&1
   done
   [[ -f "$OUT/$LABEL.$LOGFILE.restart" ]] && cp "$OUT/$LABEL.$LOGFILE.restart" "$OUT/$LABEL.restart.log"
-  [[ -f "$OUT/$LABEL.load.log" ]] && cp "$OUT/$LABEL.load.log" "$OUT/$LABEL.sysbench.log"
   [[ "$FS" == *tau* ]] && grep -i 'tau' "$OUT/$LABEL.mount1.dmesg" | head -20 | sed 's/^/tau_dmesg /' >> "$T"
   cat "$T"
   db_stop; g umount
