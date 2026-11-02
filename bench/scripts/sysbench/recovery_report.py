@@ -51,9 +51,17 @@ def tps_before(path):
     return statistics.mean(last) if last else None
 
 
+def last_section(path, marker):
+    """the lines from the last one containing marker (run_recovery_vm.sh's guest logs
+    were appended across trials before 2026-11-03)"""
+    lines = path.read_text(errors="replace").splitlines()
+    starts = [i for i, l in enumerate(lines) if marker in l]
+    return lines[starts[-1]:] if starts else lines
+
+
 def pg_restart(path):
     r = {}
-    for line in path.read_text(errors="replace").splitlines():
+    for line in last_section(path, "database system was interrupted"):
         m = PG_TS.match(line)
         ts = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S.%f").timestamp() if m else None
         if "redo starts at" in line:
@@ -78,7 +86,7 @@ def pg_restart(path):
 
 def my_restart(path):
     r = {}
-    for line in path.read_text(errors="replace").splitlines():
+    for line in last_section(path, "starting as process"):
         m = MY_TS.match(line)
         ts = datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S.%f").timestamp() if m else None
         if ts is not None and "t_first" not in r:

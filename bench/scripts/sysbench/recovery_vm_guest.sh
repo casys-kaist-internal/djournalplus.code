@@ -32,6 +32,8 @@ case "$cmd" in
     sudo swapoff -a
     sudo modprobe xfs 2>/dev/null || true   # loaded before any timed mount
     sudo mkdir -p $MNT
+    # every boot starts with fresh logs: the host fetched what it needs from the last boot
+    rm -f "${R2:?}"/*.log* "${R2:?}"/mount* "${R2:?}"/*.done "${R2:?}"/*.err*
     echo "guest $(uname -r) $(uname -v | grep -o '#[0-9]*') mem $(free -g | awk '/Mem:/ {print $2}')G cpus $(nproc)"
     ;;
   mount)
