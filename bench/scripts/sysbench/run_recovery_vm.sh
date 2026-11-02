@@ -10,8 +10,9 @@
 # FS_FPWON / FS_FPWOFF as in run_main.sh) and per crash time in CRASH_TIMES (300
 # 304 308 s into the load: one trial each, spread over PG's checkpoint cycle):
 #   1. host: the PM1735 back on the nvme driver, trim and restore of the image,
-#      the PG settings written into postgresql.conf (MySQL takes its settings on
-#      the command line), then the device to vfio-pci
+#      then the device to vfio-pci (the host, on base+, cannot mount τ file
+#      systems; PG's settings go into postgresql.conf in the guest after its
+#      mount, MySQL takes them on the command line)
 #   2. guest (64 GB from the host's 1 GiB huge pages, 32 vCPUs on two nodes):
 #      mount, DB start with the benchmark settings, WARMUP_TIME (600 s) of the
 #      64-thread load, then the load again and CRASH_AFTER s into it the WAL/redo
@@ -121,10 +122,8 @@ case "$DBMS" in
   postgres)
     SB=(--db-driver=pgsql --auto_inc=on --pgsql-host=127.0.0.1 --pgsql-port="$PG_PORT"
         --pgsql-user="$PGUSER" --pgsql-db="$DBNAME")
-    db_settings() {  # on the host, into the restored data directory
-      mount_fs $FS "$MOUNT_DIR" > /dev/null && pg_fpw "$MOUNT_DIR/pgsql_data" "$FPW" &&
-        pg_fixed_settings "$MOUNT_DIR/pgsql_data" && sync && umount_fs "$MOUNT_DIR"
-    }
+    # in the guest after its mount: the host (base+) cannot mount τ file systems
+    db_settings() { g pg_conf full_page_writes=$FPW shared_buffers=$PG_SHARED_BUFFERS max_wal_size=$PG_MAX_WAL_SIZE; }
     db_start() { g pg_start "$1"; }
     db_pos() { g pos_pg "$DBNAME"; }
     db_stop() { g pg_stop; }
@@ -151,13 +150,13 @@ trial() {  # FS FPW crash_after
   [[ -s "$OUT/device.txt" ]] || echo "device $BDF $DEVICE vwc $(sudo nvme id-ctrl "$DEVICE" 2>/dev/null | awk '/^vwc /{print $3}')" \
     | tee "$OUT/device.txt"
   restore_filesystem $FS "$IMAGE_KEY" "$BACKUP_DIR" > "$OUT/$LABEL.restore.log" 2>&1 || { fail restore; return 1; }
-  db_settings || { fail settings; return 1; }
   DBW=OFF; [[ "$FPW" == on ]] && DBW=ON
   to_vfio || { fail vfio; return 1; }
   echo "fs=$FS fpw=$FPW crash_after_s=$CRASH_AFTER threads=$THREADS warmup_s=$WARMUP_TIME workload=$WORKLOAD" > "$T"
   b=$(boot $FS) || { echo "$b"; fail boot; return 1; }
   echo "$b" | tee -a "$T"
   g mount $FS ~/r2/mount0 > /dev/null || { fail mount; return 1; }
+  db_settings >> "$OUT/$LABEL.settings" || { fail settings; return 1; }
   db_start "~/r2/$LOGFILE.0" > /dev/null || { fail "db start"; return 1; }
   echo "--> warm-up ${WARMUP_TIME} s $(date -u +%T)"
   g sb warmup $WORKLOAD "${SB[*]}" --time=$WARMUP_TIME --rand-seed=1 run > /dev/null

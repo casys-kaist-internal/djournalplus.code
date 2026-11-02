@@ -4,6 +4,7 @@
 # is run over ssh by the host. Long steps run detached (nohup) and leave a marker
 # that the host polls, so a wedged guest never blocks an ssh call.
 #   prep <fs>                  check the device, settings that the host has (numa balancing off)
+#   pg_conf <key=value>...     PG settings into postgresql.conf, synced (the host cannot mount τ)
 #   mount <fs> <out>           mount, timed (seconds into <out>), dmesg since the mount call
 #   pg_start <log> | my_start <log> <dblwr> <args...>   start the DB until it accepts
 #                              connections, timed (seconds on stdout)
@@ -50,6 +51,20 @@ case "$cmd" in
     echo "mount_options=$(findmnt -no OPTIONS $MNT)" >> "$out"
     sudo dmesg | tail -n +$((n + 1)) > "$out.dmesg"
     cat "$out"
+    ;;
+  pg_conf)   # <key=value>...: as postgres/api.sh pg_conf_set, then synced (before any crash)
+    conf=$PG_DATA/postgresql.conf
+    [[ -f "$conf.bak" ]] || cp -a "$conf" "$conf.bak"
+    for kv in "$@"; do
+      k=${kv%%=*} v=${kv#*=}
+      if grep -Eq "^[[:space:]]*#?[[:space:]]*$k[[:space:]]*=" "$conf"; then
+        sed -i -E "s|^[[:space:]]*#?[[:space:]]*($k)[[:space:]]*=.*|\1 = $v|g" "$conf"
+      else
+        printf "\n%s = %s\n" "$k" "$v" >> "$conf"
+      fi
+    done
+    sync
+    grep -E "^($(printf '%s|' "${@%%=*}" | sed 's/|$//'))[[:space:]]*=" "$conf"
     ;;
   pg_start)
     rm -f $PG_DATA/postmaster.pid   # no PG runs in a freshly booted guest
