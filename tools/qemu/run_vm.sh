@@ -39,6 +39,16 @@ if [ "${VM_NUMA:-0}" = 1 ]; then
 	NUMA_ARGS="$NUMA_ARGS -object memory-backend-ram,id=m1,size=${half}G,host-nodes=1,policy=bind,prealloc=on"
 	NUMA_ARGS="$NUMA_ARGS -numa node,nodeid=1,cpus=16-31,memdev=m1"
 	PREALLOC_ARG=""		# prealloc is a property of the backends above
+	# VM_HUGEPAGES=1 (off by default): back each node with the host's reserved
+	# 1 GiB huge pages instead of plain RAM. libra09 reserves 63 per node to
+	# emulate a 64 GB host, so a 64G guest fits there and the host keeps its
+	# own memory (the bench R2 runs).
+	if [ "${VM_HUGEPAGES:-0}" = 1 ]; then
+		HP=/dev/hugepages1G
+		mountpoint -q $HP || { mkdir -p $HP && mount -t hugetlbfs -o pagesize=1G none $HP; }
+		NUMA_ARGS=${NUMA_ARGS//memory-backend-ram,id=m0,/memory-backend-file,mem-path=$HP,id=m0,}
+		NUMA_ARGS=${NUMA_ARGS//memory-backend-ram,id=m1,/memory-backend-file,mem-path=$HP,id=m1,}
+	fi
 fi
 # 86:00.0 SAMSUNG MZPLJ3T2HBJR   3c:00.0 980 PRO   af:00.0 Optane
 
