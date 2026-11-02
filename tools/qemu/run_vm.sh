@@ -24,6 +24,8 @@ else
 	DISPLAY_ARGS="--nographic"
 fi
 
+# VM_INITRD overrides the initrd (default the tau kernel's), e.g. for a guest
+# booted on the baseline kernel.
 # VM_KCMDLINE_EXTRA appends to the guest kernel command line. Built-in module
 # parameters take "<module>.<param>=<value>" there, which is how a setting can
 # be held across the reboots a crash test performs -- writing to
@@ -54,7 +56,7 @@ fi
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then # script is executed directly.
 	qemu-system-x86_64	-kernel $TAUFS_KERNEL/arch/x86/boot/bzImage \
-				-initrd /boot/initrd.img-6.8.0tjournal+ \
+				-initrd "${VM_INITRD:-/boot/initrd.img-6.8.0tjournal+}" \
 				-cpu host \
 				$SMP_ARGS \
 				$NUMA_ARGS \
