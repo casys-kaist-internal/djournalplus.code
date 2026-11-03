@@ -30,6 +30,18 @@ stock_mkfs_xfs() {
   sudo "$STOCK_DIR/sbin/mkfs.xfs" "$@"
 }
 
+# The tau forks, with the baselines' file-system features. The fork's mke2fs reads
+# /etc/mke2fs.conf, which the fork's make install replaced with its own (ext4 gains
+# metadata_csum_seed and orphan_file), so it gets the stock conf as stock_mke2fs does.
+# The fork's mkfs.xfs (6.16) turns on nrext64, which the stock 6.6.0 leaves off.
+tau_mke2fs() {
+  sudo env MKE2FS_CONFIG="$STOCK_DIR/etc/mke2fs.conf" "$TAUFS_E2FSPROGS/misc/mke2fs" "$@"
+}
+
+tau_mkfs_xfs() {
+  sudo "$TAUFS_XFSPROGS/mkfs/mkfs.xfs" -i nrext64=0 "$@"
+}
+
 do_mkfs() {
   local FS=$1
   local DEVICE=$2
@@ -83,10 +95,10 @@ do_mkfs() {
       # (256 segments a block), 32G keeps the 32 GiB journal at any segment size
       local xl=tjmaxsize=1G
       [[ -n "${TAU_SEGSIZE:-}" ]] && xl=tjsegsize=$TAU_SEGSIZE,tjmaxsize=32G
-      sudo $TAUFS_XFSPROGS/mkfs/mkfs.xfs $DEVICE -f -l $xl
+      tau_mkfs_xfs $DEVICE -f -l $xl
       ;;
     ext4-tau)
-      sudo $TAUFS_E2FSPROGS/misc/mke2fs -t ext4 -E lazy_itable_init=0,lazy_journal_init=0${TAU_SEGSIZE:+,tau_segsize=$TAU_SEGSIZE} -F $DEVICE
+      tau_mke2fs -t ext4 -E lazy_itable_init=0,lazy_journal_init=0${TAU_SEGSIZE:+,tau_segsize=$TAU_SEGSIZE} -F $DEVICE
       ;;
     *)
       echo "Unknown FS: $FS"; exit 1;;

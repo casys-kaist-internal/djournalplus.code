@@ -83,8 +83,8 @@ fs_make() {
     EXT4_Raw)  stock_mke2fs -q -t ext4 -E lazy_itable_init=0,lazy_journal_init=0 -F "$DEVICE" ;;
     EXT4_Data) stock_mke2fs -q -t ext4 -J size=40000 -E lazy_itable_init=0,lazy_journal_init=0 -F "$DEVICE" ;;
     XFS_Raw)   stock_mkfs_xfs -q -f "$DEVICE" ;;
-    tau-EXT4)  sudo "$TAUFS_E2FSPROGS/misc/mke2fs" -q -t ext4 -E lazy_itable_init=0,lazy_journal_init=0${TAU_SEGSIZE:+,tau_segsize=$TAU_SEGSIZE} -F "$DEVICE" ;;
-    tau-XFS)   sudo "$TAUFS_XFSPROGS/mkfs/mkfs.xfs" -q -f -l ${TAU_SEGSIZE:+tjsegsize=$TAU_SEGSIZE,}tjmaxsize=32G "$DEVICE" ;;
+    tau-EXT4)  tau_mke2fs -q -t ext4 -E lazy_itable_init=0,lazy_journal_init=0${TAU_SEGSIZE:+,tau_segsize=$TAU_SEGSIZE} -F "$DEVICE" ;;
+    tau-XFS)   tau_mkfs_xfs -q -f -l ${TAU_SEGSIZE:+tjsegsize=$TAU_SEGSIZE,}tjmaxsize=32G "$DEVICE" ;;
     ZFS)
       sudo wipefs -a "$DEVICE" >/dev/null
       sudo zpool create -f -o ashift=12 -O recordsize=16K -O compression=off -O atime=off \

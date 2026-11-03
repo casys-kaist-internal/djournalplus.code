@@ -49,7 +49,7 @@ DBNAME="trend_t${SB_TABLES}"
 MOUNT_DIR=/mnt/temp
 DEV="$TAU_DEVICE"
 MKFS_XFS="${TAUFS_XFSPROGS:-$TAUFS_ROOT/codes/xfsprogs-dev}/mkfs/mkfs.xfs"
-MKE2FS="${TAUFS_E2FSPROGS:-$TAUFS_ROOT/codes/e2fsprogs}/misc/mke2fs"
+MKE2FS="${TAUFS_E2FSPROGS:-$TAUFS_ROOT/codes/e2fsprogs}/misc/mke2fs"   # both forks run with the baselines' FS features (as common.sh tau_mke2fs / tau_mkfs_xfs)
 PG_BIN="$TAUFS_BENCH_WS/pg_install/bin"
 PG_PORT=5432
 UNIT=tau-trend-postgres
@@ -118,8 +118,8 @@ EOF
 
 do_mkfs_tau() {
   case "$1" in
-    xfs-tau)  sudo "$MKFS_XFS" -f -l "tjmaxsize=${JOURNAL_GB}G" "$DEV" >/dev/null ;;
-    ext4-tau) sudo "$MKE2FS" -t ext4 -E lazy_itable_init=0,lazy_journal_init=0 -F "$DEV" >/dev/null ;;
+    xfs-tau)  sudo "$MKFS_XFS" -i nrext64=0 -f -l "tjmaxsize=${JOURNAL_GB}G" "$DEV" >/dev/null ;;
+    ext4-tau) sudo env MKE2FS_CONFIG="$TAUFS_BENCH_WS/stock/etc/mke2fs.conf" "$MKE2FS" -t ext4 -E lazy_itable_init=0,lazy_journal_init=0 -F "$DEV" >/dev/null ;;
     ext4)     sudo mke2fs -t ext4 -E lazy_itable_init=0,lazy_journal_init=0 -F "$DEV" >/dev/null ;;
     xfs)      sudo mkfs.xfs -f "$DEV" >/dev/null ;;
     *) echo "unknown fs $1" >&2; exit 1 ;;

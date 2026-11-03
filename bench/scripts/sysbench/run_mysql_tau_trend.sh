@@ -56,7 +56,7 @@ DBNAME="trend_t${SB_TABLES}"
 MOUNT_DIR=/mnt/temp
 DEV="$TAU_DEVICE"
 MKFS_XFS="${TAUFS_XFSPROGS:-$TAUFS_ROOT/codes/xfsprogs-dev}/mkfs/mkfs.xfs"
-MKE2FS="${TAUFS_E2FSPROGS:-$TAUFS_ROOT/codes/e2fsprogs}/misc/mke2fs"
+MKE2FS="${TAUFS_E2FSPROGS:-$TAUFS_ROOT/codes/e2fsprogs}/misc/mke2fs"   # both forks run with the baselines' FS features (as common.sh tau_mke2fs / tau_mkfs_xfs)
 MYSQL_BIN="$TAUFS_BENCH/mysql-server/build/bin"
 UNIT=tau-trend-mysqld
 
@@ -150,8 +150,8 @@ EOF
 do_mkfs_tau() {
   local fs=$1
   case "$fs" in
-    xfs-tau)  sudo "$MKFS_XFS" -f -l "tjmaxsize=${JOURNAL_GB}G" "$DEV" >/dev/null ;;
-    ext4-tau) sudo "$MKE2FS" -t ext4 -E lazy_itable_init=0,lazy_journal_init=0 -F "$DEV" >/dev/null ;;
+    xfs-tau)  sudo "$MKFS_XFS" -i nrext64=0 -f -l "tjmaxsize=${JOURNAL_GB}G" "$DEV" >/dev/null ;;
+    ext4-tau) sudo env MKE2FS_CONFIG="$TAUFS_BENCH_WS/stock/etc/mke2fs.conf" "$MKE2FS" -t ext4 -E lazy_itable_init=0,lazy_journal_init=0 -F "$DEV" >/dev/null ;;
     ext4)     sudo mke2fs -t ext4 -E lazy_itable_init=0,lazy_journal_init=0 -F "$DEV" >/dev/null ;;
     xfs)      sudo mkfs.xfs -f "$DEV" >/dev/null ;;
     *) echo "unknown fs $fs" >&2; exit 1 ;;
