@@ -51,6 +51,7 @@ case "$VARIANT" in
     [[ "$MODE" == "postgres" ]] || { echo "❌ VARIANT=walcomp is for postgres"; exit 1; }
     PG_BIN="$TAUFS_BENCH_WS/pg_install_lz4/bin"; PG_WAL_COMPRESSION=lz4
     [[ -x "$PG_BIN/postgres" ]] || { echo "❌ VARIANT=walcomp: no $PG_BIN (PG_LZ4=1 install_postgres.sh)"; exit 1; } ;;
+  quick) ;;  # as run_main.sh: settings unchanged, a label for short checks
   *) echo "❌ Unknown VARIANT: $VARIANT"; exit 1 ;;
 esac
 PROFILE="${PROFILE:-}"

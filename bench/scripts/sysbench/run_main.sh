@@ -131,6 +131,10 @@ case "$VARIANT" in
     MY_BINLOG=ON ;;
   fullfill)  # SSD sensitivity: the whole device written once after the trim (common.sh)
     TAU_FILL_BEFORE_RESTORE=1 ;;
+  quick)  # a short check (2026-11-03): settings unchanged, only the label, so that a
+          # 64-thread-only run (THREADS_LIST=64 LAST_POINT_RUNS=1) stays apart from the
+          # main rows in SUMMARY.md
+    ;;
   drift)  # EVAL_PLAN §1 check (b): the main protocol, then the first point (1 thread)
           # again after the 64-thread runs (label c1_r2), to see how far the database
           # drifts over a block (insert grows the tables); settings unchanged

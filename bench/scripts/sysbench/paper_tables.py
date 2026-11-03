@@ -25,7 +25,7 @@ CONFIGS = ["EXT4_Raw", "EXT4_App", "XFS_Raw", "XFS_App", "EXT4_Data", "ZFS", "BT
            "tau-EXT4", "tau-XFS"]
 THREADS = [1, 8, 16, 32, 64]
 VARIANTS = tuple(f"-{v}" for v in
-                 ["uniform", "fullfill", "odirect", "spin", "nologwriter", "binlog", "empty", "drift"])
+                 ["uniform", "fullfill", "odirect", "spin", "nologwriter", "binlog", "empty", "drift", "quick"])
 DBS = [("mysql", "MySQL"), ("postgres", "PostgreSQL")]
 # (summary column, label, scale) -> label per transaction
 MECH_COLS = [("dev_write_mb", "dev KB", 1024), ("wal_mb", "WAL KB", 1024),
