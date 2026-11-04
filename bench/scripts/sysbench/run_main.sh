@@ -181,7 +181,7 @@ fi
 
 TABLE=$MAIN_TABLES
 ROWS=$MAIN_ROWS_PER_TABLE
-IMAGE_KEY="t${TABLE}_r${IMAGE_ROWS:-$ROWS}"   # main_image_key, or VARIANT=empty's
+IMAGE_KEY="t${TABLE}_r${IMAGE_ROWS:-$ROWS}${TAU_SEGSIZE:+_seg$TAU_SEGSIZE}"   # main_image_key, or VARIANT=empty's
 BACKUP_DIR=$TAU_BACKUP_ROOT/sysbench/$DBMS
 
 echo "=== Starting sysbench benchamrk: DBMS=$DBMS, image=$IMAGE_KEY${VARIANT:+, variant=$VARIANT} ==="

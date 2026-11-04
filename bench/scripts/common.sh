@@ -79,10 +79,14 @@ do_mkfs() {
       sudo zfs create -o recordsize=128k -o logbias=latency zfspool/log
       ;;
     xfs-tau)  # the fork in the tree: the system one may predate s_segment_size
-      sudo $TAUFS_XFSPROGS/mkfs/mkfs.xfs $DEVICE -f -l tjmaxsize=1G
+      # TAU_SEGSIZE (e.g. 16m): journal segment size; tjmaxsize sizes the map
+      # (256 segments a block), 32G keeps the 32 GiB journal at any segment size
+      local xl=tjmaxsize=1G
+      [[ -n "${TAU_SEGSIZE:-}" ]] && xl=tjsegsize=$TAU_SEGSIZE,tjmaxsize=32G
+      sudo $TAUFS_XFSPROGS/mkfs/mkfs.xfs $DEVICE -f -l $xl
       ;;
     ext4-tau)
-      sudo $TAUFS_E2FSPROGS/misc/mke2fs -t ext4 -E lazy_itable_init=0,lazy_journal_init=0 -F $DEVICE
+      sudo $TAUFS_E2FSPROGS/misc/mke2fs -t ext4 -E lazy_itable_init=0,lazy_journal_init=0${TAU_SEGSIZE:+,tau_segsize=$TAU_SEGSIZE} -F $DEVICE
       ;;
     *)
       echo "Unknown FS: $FS"; exit 1;;
@@ -129,7 +133,7 @@ mount_fs() {
       sudo zfs set mountpoint=$MOUNT_DIR zfspool
       ;;
     ext4-tau)
-      sudo mount -t ext4 -o tjournal,tjournal_size=32  $DEVICE $MOUNT_DIR
+      sudo mount -t ext4 -o tjournal,tjournal_size=${TAU_JSIZE:-32}  $DEVICE $MOUNT_DIR
       ;;
     xfs-tau)
       sudo mount -t xfs -o tjournal $DEVICE $MOUNT_DIR
@@ -372,8 +376,9 @@ main_rows_per_table () {
 MAIN_TABLES=16
 MAIN_ROWS_PER_TABLE=32000000
 
+# TAU_SEGSIZE: the tau images made with that journal segment size (do_mkfs)
 main_image_key () {
-  echo "t${MAIN_TABLES}_r${MAIN_ROWS_PER_TABLE}"
+  echo "t${MAIN_TABLES}_r${MAIN_ROWS_PER_TABLE}${TAU_SEGSIZE:+_seg$TAU_SEGSIZE}"
 }
 
 # /proc/diskstats lines of the test device (sector = 512 B), taken before and
