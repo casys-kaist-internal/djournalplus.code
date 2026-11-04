@@ -140,6 +140,10 @@ fi
 RESULT_DIR=$TAU_RESULTS/micro/$(date +%Y%m%d_%H%M%S)_fio_$TAG
 mkdir -p "$RESULT_DIR/runs"
 cp "$0" "$HERE/tau_preload.c" "$HERE/atomicw.c" "$HERE/fio_report.py" "$HERE/m3_phases.bt" "$HERE/m3_report.py" "$RESULT_DIR/"
+# the tracer for this kernel (XFS's probes move to vmlinux on the tau kernel)
+if [[ "${M3_TRACE:-0}" == 1 ]]; then
+  M3_BT=$(bt_for_kernel "$HERE/m3_phases.bt" "$RESULT_DIR/m3_phases.kernel.bt")
+fi
 CSV=$RESULT_DIR/results.csv
 python3 "$HERE/fio_report.py" header > "$CSV"
 log_env "$RESULT_DIR/env.txt"
@@ -402,7 +406,7 @@ run_fio() {  # <config> <exp> <op> <threads> <files> <fdatasync n> <dist> <rep> 
   pid=$!
   local trp=""
   if [[ "${M3_TRACE:-0}" == 1 ]]; then   # EVAL_PLAN M3: the run's fsync phases, after the ramp
-    ( sleep "$ramp"; exec sudo env BPFTRACE_MAX_MAP_KEYS=100000 bpftrace "$HERE/m3_phases.bt" "$pid" "$DEVT" ) \
+    ( sleep "$ramp"; exec sudo env BPFTRACE_MAX_MAP_KEYS=100000 bpftrace "$M3_BT" "$pid" "$DEVT" ) \
       > "$out.m3" 2>&1 &
     trp=$!
   fi

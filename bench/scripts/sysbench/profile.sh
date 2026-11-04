@@ -186,8 +186,9 @@ profile_begin() {
       if [[ "$PROFILE" == trace ]]; then
         sudo bpftrace "$PROFILE_IO_BT" "$filt" "$devnum" > "$o.bpftrace" 2>&1 &
       else
-        sudo modprobe xfs   # file_writes.bt probes kfunc:xfs
-        sudo env BPFTRACE_MAX_MAP_KEYS=200000 bpftrace "$PROFILE_FILES_BT" "$filt" "$devnum" > "$o.bpftrace" 2>&1 &
+        sudo modprobe xfs   # file_writes.bt probes kfunc:xfs (built in on the tau kernel)
+        sudo env BPFTRACE_MAX_MAP_KEYS=200000 bpftrace "$(bt_for_kernel "$PROFILE_FILES_BT" "$o.files.bt")" \
+          "$filt" "$devnum" > "$o.bpftrace" 2>&1 &
       fi
       PROF_BT_PID=$!
       # start the measurement only once every probe is attached

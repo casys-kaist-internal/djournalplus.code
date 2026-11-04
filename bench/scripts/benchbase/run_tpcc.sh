@@ -84,8 +84,9 @@ files_begin() {
   local filt=0 devnum i
   [[ "$MODE" == mysql ]] && filt=$MYSQLD_PID
   devnum=$(( (0x$(stat -c %t "$DEVICE") << 20) | 0x$(stat -c %T "$DEVICE") ))
-  sudo modprobe xfs   # file_writes.bt probes kfunc:xfs
-  sudo env BPFTRACE_MAX_MAP_KEYS=200000 bpftrace "$TAUFS_BENCH/scripts/sysbench/file_writes.bt" \
+  sudo modprobe xfs   # file_writes.bt probes kfunc:xfs (built in on the tau kernel)
+  sudo env BPFTRACE_MAX_MAP_KEYS=200000 \
+    bpftrace "$(bt_for_kernel "$TAUFS_BENCH/scripts/sysbench/file_writes.bt" "$OUT/$1.files.bt")" \
     "$filt" "$devnum" > "$OUT/$1.bpftrace" 2>&1 &
   FILES_BT_PID=$!
   for (( i = 0; i < 60; i++ )); do   # the measurement starts once every probe is attached

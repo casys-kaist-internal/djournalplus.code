@@ -42,6 +42,18 @@ tau_mkfs_xfs() {
   sudo "$TAUFS_XFSPROGS/mkfs/mkfs.xfs" -i nrext64=0 "$@"
 }
 
+# bt_for_kernel <script.bt> <copy.bt>: the bpftrace script for the running kernel,
+# written to <copy.bt> (kept with the results) and printed. XFS is a module on the
+# baseline kernel (kfunc:xfs:...) and built in on the tau kernel, where its probes
+# are kfunc:vmlinux:...
+bt_for_kernel() {
+  if grep -qw 'xfs\.ko' "/lib/modules/$(uname -r)/modules.builtin" 2>/dev/null; then
+    sed -E 's/^(k|kret)func:xfs:/\1func:vmlinux:/' "$1" > "$2"
+  else
+    cp "$1" "$2"
+  fi && echo "$2"
+}
+
 do_mkfs() {
   local FS=$1
   local DEVICE=$2
