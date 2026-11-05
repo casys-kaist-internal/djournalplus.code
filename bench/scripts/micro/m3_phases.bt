@@ -228,6 +228,9 @@ tracepoint:jbd2:jbd2_run_stats /args.dev == $2 && nsecs > @gate/
 
 BEGIN
 {
+	/* @inct is set only by m3_phases_tau.bt; define it for the kernels without it */
+	@inct[tid] = 0;
+	delete(@inct[tid]);
 	@gate = nsecs + 2000000000;
 	printf("window_begin_ns %llu\n", @gate);
 }

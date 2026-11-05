@@ -99,6 +99,14 @@ ZONED_CONFIGS=${ZONED_CONFIGS:-EXT4_Raw EXT4_Data tau-EXT4}
 ZONED_DIST=${ZONED_DIST:-zoned:75/1:25/99}
 R1_FILES=${R1_FILES:-1000 10000 100000}
 R1_OPEN=${R1_OPEN:-100000:100}
+# r1 keeps up to 100k files open: the open-file limit goes up to the hard limit
+# (a shell's is often 1M, but cron's soft limit is 1024), and r1 fails early if
+# the largest case does not fit
+ulimit -n "$(ulimit -Hn)" 2>/dev/null || true
+if [[ " $EXPS " == *" r1 "* ]]; then
+  r1_max=$(for f in $R1_FILES $(for c in $R1_OPEN; do echo "${c%%:*}"; done); do echo "$f"; done | sort -n | tail -1)
+  (( $(ulimit -n) > r1_max + 1024 )) || { echo "❌ r1 opens $r1_max files, but the open-file limit is $(ulimit -n)"; exit 1; }
+fi
 R1_FSYNC_N=${R1_FSYNC_N:-1}
 
 has() { [[ " $1 " == *" $2 "* ]]; }
