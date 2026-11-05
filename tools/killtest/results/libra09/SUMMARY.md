@@ -38,6 +38,7 @@
 | 3.8 ZFS 분리 구성 (10-07) | 같은 설정, ZFS | 0/40 |
 | 3.9 4 KiB 분할 없이 (10-07) | MySQL ext4 | 1/20 (분할 있을 때 7/20) |
 | 3.11 x100 캠페인 (10-10 ~ 10-14) | §2 설정, 게스트 6.8.0-base+, config당 100회 | MySQL ext4 54, xfs 32, ext4-dj 12, ZFS 0; PG ext4 15, xfs 15, ext4-dj 6, ZFS 0 (/100) |
+| 3.12 EXT4_App x100 (11-04 ~ 11-05) | 3.11 ext4와 같고 보호만 켬(PG FPW, MySQL doublewrite) | 찢어짐 MySQL 3, PG 4 (/100) — 모두 복구됨, 재시작 실패 0 |
 
 ## 1. 도구와 크래시 모델
 
@@ -276,6 +277,28 @@ config를 번갈아, 시드는 라운드·config마다 고정(`scripts/db100*.sh
 - MySQL이 §3.7(바닐라 6.8.0+)보다 많이 찢어진다(ext4 30% → 54%, xfs 17% → 32%, 모든 라운드에서).
   PostgreSQL은 그대로. native AIO와 커널의 aio 수정이 걸린 차이로 보이나 확인하지 않았다.
 
+### 3.12 EXT4_App x100 — 보호를 켠 대조군 (11-04 ~ 11-05)
+
+§3.11의 ext4 행과 같은 설정·같은 golden 이미지에서 DB의 찢어진 페이지 보호만 켰다(EVAL_PLAN
+§6.2 T2b의 EXT4_App 행): PostgreSQL `--pg-set full_page_writes=on`, MySQL `--my-set
+innodb-doublewrite=1`. 복구 기동을 포함한 모든 기동에 적용되고, 실행 중 서버에서 읽은 값으로
+확인했다(`db_vars`). 호스트·게스트 모두 6.8.0-base+, 20회씩 5라운드, 시드 20261900+10·라운드+{0,1}
+(`2026-11-03_db_app_x100/scripts/dbapp.sh`, README):
+
+| config | trials | 찢어짐, 복구 전 (95% CI) | 재시작 실패 또는 복구 후 손상 | 복구 시간 중간값 (최대) |
+|---|---|---|---|---|
+| MySQL ext4, doublewrite 켬 | 100 | 3 (1.0–8.5%) | 0 (0–3.7%) | 17.0 s (20.0) |
+| PostgreSQL ext4, FPW 켬 | 100 | 4 (1.6–9.8%) | 0 (0–3.7%) | 7.3 s (10.3) |
+
+- 찢어진 7건은 모두 재시작했고, 복구 후 검사가 깨끗하다: doublewrite·full-page image가 그 페이지를
+  다시 썼다. §3.11의 보호를 끈 ext4는 찢어진 시도가 거의 모두 재시작에 실패했다(MySQL 54/54,
+  PG 14/15).
+- 찢어짐 비율 자체도 낮다(MySQL 54 → 3%, PG 15 → 4%). 보호가 쓰기 모양(doublewrite 배치,
+  WAL의 페이지 이미지, 낮은 처리량)을 바꾸므로, 비교할 것은 비율이 아니라 결과(페이지가 온전한
+  재시작)다.
+- 복구 시간: PostgreSQL은 FPW를 켜면 9배 빠르다(7.3 대 64 s, 페이지 이미지가 없으면 WAL 레코드마다
+  페이지를 장치에서 읽는다). MySQL은 17 s(보호를 끈 성공 재시작 8 s).
+
 ## 4. 정정
 
 - 10-05·06의 분석은 MySQL ext4의 쓰기 0개 torn을 "커널 writeback이 16 KiB 페이지의 4 KiB 조각
@@ -286,7 +309,7 @@ config를 번갈아, 시드는 라운드·config마다 고정(`scripts/db100*.sh
 ## 5. 남은 일
 
 - τJournal을 §2 설정으로(복구 경로 패치 중). config당 100회와 ext4 data=journal은 §3.11.
-- FPW/DWB를 켠 대조군: 찢어진 페이지가 있어도 복구되는지.
+- ~~FPW/DWB를 켠 대조군~~: §3.12에서 함(찢어짐 7/200, 모두 복구).
 - 쓰기 0개 torn의 정확한 경로(§3.9).
 
 ## 6. 실행 기록 (libra09)
@@ -306,6 +329,8 @@ config를 번갈아, 시드는 라운드·config마다 고정(`scripts/db100*.sh
 | `2026-10-07_db_msk512` | `20261006_231033` |
 | `2026-10-10_base_kernel_smoke` | `20261010_120609`(게스트 6.8.0-base+ 확인, MySQL ZFS 1회) |
 | `2026-10-10_db_x100` | `20261010_123546` … `20261014_055814`, 45개(첫 PG ZFS `20261010_220036`은 디스크 부족으로 0회); `scripts/db100.sh`·`db100b.sh`·`db100c.sh`·`db100d.sh`, `tally.py` |
+| `2026-11-03_db_app_smoke` | `20261103_145718`(PG)·`150131`(MySQL), 1회씩, 이미지 보관해 확인 |
+| `2026-11-03_db_app_x100` | `20261104_132538` … `20261105_024626`, 10개; `scripts/dbapp.sh`, README |
 | `99_Archive` | `20261006_023520`·`065310`·`103503` |
 
 이미지는 `tools/killtest/work/db-<db>-<fs>[-revision[-mem<size>][-logdefault]].img`(gitignore).
