@@ -1,0 +1,205 @@
+/*
+ * EVAL_PLAN M3, tau phases 5-10 (see m3_phases.bt): appended to m3_phases.bt by
+ * run_fio.sh on the tau kernel, where these functions exist. Probe points from
+ * libra08 (2026-11-04), checked with bpftrace -l on #1979 (new_main 4814a2e4).
+ */
+
+kfunc:vmlinux:ext4_tau_commit /pid == $1 && @s[tid]/
+{
+	$now = nsecs;
+	@t0[tid, 5] = $now;
+	@cx[tid, @ph[tid]] = @cx[tid, @ph[tid]] + $now - @p0[tid];
+	@stk[tid, @lvl[tid]] = @ph[tid];
+	@lvl[tid] = @lvl[tid] + 1;
+	@ph[tid] = 5;
+	@p0[tid] = $now;
+}
+
+kretfunc:vmlinux:ext4_tau_commit /pid == $1 && @s[tid] && @lvl[tid] > 0 && @ph[tid] == 5/
+{
+	$now = nsecs;
+	@ci[tid, 5] = @ci[tid, 5] + $now - @t0[tid, 5];
+	@cn[tid, 5] = @cn[tid, 5] + 1;
+	delete(@t0[tid, 5]);
+	@cx[tid, 5] = @cx[tid, 5] + $now - @p0[tid];
+	@lvl[tid] = @lvl[tid] - 1;
+	@ph[tid] = @stk[tid, @lvl[tid]];
+	delete(@stk[tid, @lvl[tid]]);
+	@p0[tid] = $now;
+}
+
+kfunc:vmlinux:xfs_tau_commit /pid == $1 && @s[tid]/
+{
+	$now = nsecs;
+	@t0[tid, 5] = $now;
+	@cx[tid, @ph[tid]] = @cx[tid, @ph[tid]] + $now - @p0[tid];
+	@stk[tid, @lvl[tid]] = @ph[tid];
+	@lvl[tid] = @lvl[tid] + 1;
+	@ph[tid] = 5;
+	@p0[tid] = $now;
+}
+
+kretfunc:vmlinux:xfs_tau_commit /pid == $1 && @s[tid] && @lvl[tid] > 0 && @ph[tid] == 5/
+{
+	$now = nsecs;
+	@ci[tid, 5] = @ci[tid, 5] + $now - @t0[tid, 5];
+	@cn[tid, 5] = @cn[tid, 5] + 1;
+	delete(@t0[tid, 5]);
+	@cx[tid, 5] = @cx[tid, 5] + $now - @p0[tid];
+	@lvl[tid] = @lvl[tid] - 1;
+	@ph[tid] = @stk[tid, @lvl[tid]];
+	delete(@stk[tid, @lvl[tid]]);
+	@p0[tid] = $now;
+}
+
+kfunc:vmlinux:tau_wait_inflight /pid == $1 && @s[tid]/
+{
+	$now = nsecs;
+	@t0[tid, 6] = $now;
+	@cx[tid, @ph[tid]] = @cx[tid, @ph[tid]] + $now - @p0[tid];
+	@stk[tid, @lvl[tid]] = @ph[tid];
+	@lvl[tid] = @lvl[tid] + 1;
+	@ph[tid] = 6;
+	@p0[tid] = $now;
+}
+
+kretfunc:vmlinux:tau_wait_inflight /pid == $1 && @s[tid] && @lvl[tid] > 0 && @ph[tid] == 6/
+{
+	$now = nsecs;
+	@ci[tid, 6] = @ci[tid, 6] + $now - @t0[tid, 6];
+	@cn[tid, 6] = @cn[tid, 6] + 1;
+	delete(@t0[tid, 6]);
+	@cx[tid, 6] = @cx[tid, 6] + $now - @p0[tid];
+	@lvl[tid] = @lvl[tid] - 1;
+	@ph[tid] = @stk[tid, @lvl[tid]];
+	delete(@stk[tid, @lvl[tid]]);
+	@p0[tid] = $now;
+}
+
+kfunc:vmlinux:tau_bh_commit_transaction /pid == $1 && @s[tid]/
+{
+	$now = nsecs;
+	@t0[tid, 7] = $now;
+	@cx[tid, @ph[tid]] = @cx[tid, @ph[tid]] + $now - @p0[tid];
+	@stk[tid, @lvl[tid]] = @ph[tid];
+	@lvl[tid] = @lvl[tid] + 1;
+	@ph[tid] = 7;
+	@p0[tid] = $now;
+	@inct[tid] = 1;
+}
+
+kretfunc:vmlinux:tau_bh_commit_transaction /pid == $1 && @s[tid] && @lvl[tid] > 0 && @ph[tid] == 7/
+{
+	$now = nsecs;
+	@ci[tid, 7] = @ci[tid, 7] + $now - @t0[tid, 7];
+	@cn[tid, 7] = @cn[tid, 7] + 1;
+	delete(@t0[tid, 7]);
+	@cx[tid, 7] = @cx[tid, 7] + $now - @p0[tid];
+	@lvl[tid] = @lvl[tid] - 1;
+	@ph[tid] = @stk[tid, @lvl[tid]];
+	delete(@stk[tid, @lvl[tid]]);
+	@p0[tid] = $now;
+	delete(@inct[tid]);
+}
+
+kfunc:vmlinux:tau_io_commit_transaction /pid == $1 && @s[tid]/
+{
+	$now = nsecs;
+	@t0[tid, 7] = $now;
+	@cx[tid, @ph[tid]] = @cx[tid, @ph[tid]] + $now - @p0[tid];
+	@stk[tid, @lvl[tid]] = @ph[tid];
+	@lvl[tid] = @lvl[tid] + 1;
+	@ph[tid] = 7;
+	@p0[tid] = $now;
+	@inct[tid] = 1;
+}
+
+kretfunc:vmlinux:tau_io_commit_transaction /pid == $1 && @s[tid] && @lvl[tid] > 0 && @ph[tid] == 7/
+{
+	$now = nsecs;
+	@ci[tid, 7] = @ci[tid, 7] + $now - @t0[tid, 7];
+	@cn[tid, 7] = @cn[tid, 7] + 1;
+	delete(@t0[tid, 7]);
+	@cx[tid, 7] = @cx[tid, 7] + $now - @p0[tid];
+	@lvl[tid] = @lvl[tid] - 1;
+	@ph[tid] = @stk[tid, @lvl[tid]];
+	delete(@stk[tid, @lvl[tid]]);
+	@p0[tid] = $now;
+	delete(@inct[tid]);
+}
+
+/* the buffer waits of a tau commit: 9 for the commit record, 8 for the rest */
+kfunc:vmlinux:__wait_on_buffer /pid == $1 && @s[tid] && @inct[tid]/
+{
+	$now = nsecs;
+	$p = (*(uint32 *)args.bh->b_data == 0x98393bc0 && *(uint32 *)(args.bh->b_data + 4) == 0x02000000) ? 9 : 8;
+	@t0[tid, $p] = $now;
+	@cx[tid, @ph[tid]] = @cx[tid, @ph[tid]] + $now - @p0[tid];
+	@stk[tid, @lvl[tid]] = @ph[tid];
+	@lvl[tid] = @lvl[tid] + 1;
+	@ph[tid] = $p;
+	@p0[tid] = $now;
+}
+
+kretfunc:vmlinux:__wait_on_buffer /pid == $1 && @s[tid] && @inct[tid] && @lvl[tid] > 0 && (@ph[tid] == 8 || @ph[tid] == 9)/
+{
+	$now = nsecs;
+	$p = @ph[tid];
+	@ci[tid, $p] = @ci[tid, $p] + $now - @t0[tid, $p];
+	@cn[tid, $p] = @cn[tid, $p] + 1;
+	delete(@t0[tid, $p]);
+	@cx[tid, $p] = @cx[tid, $p] + $now - @p0[tid];
+	@lvl[tid] = @lvl[tid] - 1;
+	@ph[tid] = @stk[tid, @lvl[tid]];
+	delete(@stk[tid, @lvl[tid]]);
+	@p0[tid] = $now;
+}
+
+kfunc:vmlinux:ext4_tau_commit_durable /pid == $1 && @s[tid]/
+{
+	$now = nsecs;
+	@t0[tid, 10] = $now;
+	@cx[tid, @ph[tid]] = @cx[tid, @ph[tid]] + $now - @p0[tid];
+	@stk[tid, @lvl[tid]] = @ph[tid];
+	@lvl[tid] = @lvl[tid] + 1;
+	@ph[tid] = 10;
+	@p0[tid] = $now;
+}
+
+kretfunc:vmlinux:ext4_tau_commit_durable /pid == $1 && @s[tid] && @lvl[tid] > 0 && @ph[tid] == 10/
+{
+	$now = nsecs;
+	@ci[tid, 10] = @ci[tid, 10] + $now - @t0[tid, 10];
+	@cn[tid, 10] = @cn[tid, 10] + 1;
+	delete(@t0[tid, 10]);
+	@cx[tid, 10] = @cx[tid, 10] + $now - @p0[tid];
+	@lvl[tid] = @lvl[tid] - 1;
+	@ph[tid] = @stk[tid, @lvl[tid]];
+	delete(@stk[tid, @lvl[tid]]);
+	@p0[tid] = $now;
+}
+
+kfunc:vmlinux:xfs_tau_commit_durable /pid == $1 && @s[tid]/
+{
+	$now = nsecs;
+	@t0[tid, 10] = $now;
+	@cx[tid, @ph[tid]] = @cx[tid, @ph[tid]] + $now - @p0[tid];
+	@stk[tid, @lvl[tid]] = @ph[tid];
+	@lvl[tid] = @lvl[tid] + 1;
+	@ph[tid] = 10;
+	@p0[tid] = $now;
+}
+
+kretfunc:vmlinux:xfs_tau_commit_durable /pid == $1 && @s[tid] && @lvl[tid] > 0 && @ph[tid] == 10/
+{
+	$now = nsecs;
+	@ci[tid, 10] = @ci[tid, 10] + $now - @t0[tid, 10];
+	@cn[tid, 10] = @cn[tid, 10] + 1;
+	delete(@t0[tid, 10]);
+	@cx[tid, 10] = @cx[tid, 10] + $now - @p0[tid];
+	@lvl[tid] = @lvl[tid] - 1;
+	@ph[tid] = @stk[tid, @lvl[tid]];
+	delete(@stk[tid, @lvl[tid]]);
+	@p0[tid] = $now;
+}
+

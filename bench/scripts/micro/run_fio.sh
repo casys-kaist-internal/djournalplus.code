@@ -139,10 +139,13 @@ fi
 
 RESULT_DIR=$TAU_RESULTS/micro/$(date +%Y%m%d_%H%M%S)_fio_$TAG
 mkdir -p "$RESULT_DIR/runs"
-cp "$0" "$HERE/tau_preload.c" "$HERE/atomicw.c" "$HERE/fio_report.py" "$HERE/m3_phases.bt" "$HERE/m3_report.py" "$RESULT_DIR/"
-# the tracer for this kernel (XFS's probes move to vmlinux on the tau kernel)
+cp "$0" "$HERE/tau_preload.c" "$HERE/atomicw.c" "$HERE/fio_report.py" "$HERE/m3_phases.bt" "$HERE/m3_phases_tau.bt" \
+  "$HERE/m3_report.py" "$RESULT_DIR/"
+# the tracer for this kernel: XFS's probes move to vmlinux on the tau kernel,
+# which also gets the tau phases (functions that exist only there)
 if [[ "${M3_TRACE:-0}" == 1 ]]; then
   M3_BT=$(bt_for_kernel "$HERE/m3_phases.bt" "$RESULT_DIR/m3_phases.kernel.bt")
+  if (( TAU_KERNEL )); then cat "$HERE/m3_phases_tau.bt" >> "$M3_BT"; fi
 fi
 CSV=$RESULT_DIR/results.csv
 python3 "$HERE/fio_report.py" header > "$CSV"

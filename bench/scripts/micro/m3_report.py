@@ -5,11 +5,15 @@ fsync's time goes (µs per sync, exclusive phases of vfs_fsync_range that add up
 to the sync: a nested phase is taken out of the enclosing one): D =
 file_write_and_wait_range (data writeback and its wait), JC =
 jbd2_log_wait_commit (ext4), LF = xfs_log_force_seq (XFS), FL =
-blkdev_issue_flush, other = the rest; D_incl = D with what nests in it, calls
-per sync of JC and FL, check = the phases' sum over the sync time (%); and the
-device's jbd2 commits (per commit: request delay, locked, flushing, logging in
-ms at HZ 1000; handles, blocks; syncs per commit). From runs/<label>.m3
-(m3_phases.bt) and .info.
+blkdev_issue_flush; on the tau kernel the tau commit's parts (m3_phases_tau.bt):
+TW = waits before the commit (write mutex, this file's earlier commit), TI =
+waiting for a background commit, CT = building the transaction, JIO = journal
+block I/O waits, REC = the commit record's I/O wait, DUR = the host commit it
+names; other = the rest; D_incl = D with what nests in it, TC_incl = the whole
+tau commit, calls per sync of JC, FL and DUR, check = the phases' sum over the
+sync time (%); and the device's jbd2 commits (per commit: request delay, locked,
+flushing, logging in ms at HZ 1000; handles, blocks; syncs per commit). From
+runs/<label>.m3 (m3_phases.bt) and .info.
 
 Usage: m3_report.py <result dir>
 """
@@ -20,7 +24,8 @@ from collections import defaultdict
 from pathlib import Path
 
 MAP = re.compile(r"^@(\w+?)(?:\[(\d+)\])?: (\d+)$")
-PHASES = {"other": 0, "D": 1, "JC": 2, "LF": 3, "FL": 4}
+PHASES = {"other": 0, "D": 1, "JC": 2, "LF": 3, "FL": 4,
+          "TW": 5, "TI": 6, "CT": 7, "JIO": 8, "REC": 9, "DUR": 10}
 
 
 def parse(m3):
@@ -54,8 +59,10 @@ def main():
         for name, i in PHASES.items():
             r[name] = us("x%d" % i)
         r["D_incl"] = us("inc1")
+        r["TC_incl"] = us("inc5")
         r["JC_calls"] = v.get("calls2", 0) / n
         r["FL_calls"] = v.get("calls4", 0) / n
+        r["DUR_calls"] = v.get("calls10", 0) / n
         r["check"] = 100.0 * sum(v.get("x%d" % i, 0) for i in PHASES.values()) / v["sync_ns"]
         c = v.get("jc_n", 0)
         for k in ("request_delay", "locked", "flushing", "logging", "handles", "blocks"):
@@ -63,9 +70,10 @@ def main():
         r["commits"] = c
         r["syncs_per_commit"] = n / c if c else None
         rows[(inf.get("config"), inf.get("op"), int(inf.get("threads", 0)))].append(r)
-    cols = ["syncs", "fdatasync_pct", "sync", "D", "JC", "LF", "FL", "other", "D_incl",
-            "JC_calls", "FL_calls", "check", "commits", "syncs_per_commit", "jc_request_delay",
-            "jc_locked", "jc_flushing", "jc_logging", "jc_handles", "jc_blocks"]
+    cols = ["syncs", "fdatasync_pct", "sync", "D", "JC", "LF", "FL", "TW", "TI", "CT", "JIO", "REC",
+            "DUR", "other", "D_incl", "TC_incl", "JC_calls", "FL_calls", "DUR_calls", "check",
+            "commits", "syncs_per_commit", "jc_request_delay", "jc_locked", "jc_flushing",
+            "jc_logging", "jc_handles", "jc_blocks"]
     print("| config | op | T | runs | " + " | ".join(cols) + " |")
     print("|---|---|---:|---:|" + "---:|" * len(cols))
     for k in sorted(rows, key=lambda k: (k[0] or "", k[1] or "", k[2])):
