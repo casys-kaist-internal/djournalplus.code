@@ -8,6 +8,8 @@
  *
  * $1  pid (atomicw)
  * $2  dev_t of the test device (major << 20 | minor), for the jbd2 tracepoint
+ * $3  optional: only syncs of files at least this many bytes long (0 or unset: all),
+ *     e.g. a database's table files apart from its log (profile.sh PROFILE=m3)
  *
  * Per vfs_fsync_range of the process (fdatasync or fsync: @sync_ds counts the
  * fdatasyncs), its time split into exclusive phases (a nested phase's time is
@@ -46,7 +48,7 @@
  * kernel: ms), handles and blocks.
  */
 
-kfunc:vmlinux:vfs_fsync_range /pid == $1 && nsecs > @gate/
+kfunc:vmlinux:vfs_fsync_range /pid == $1 && nsecs > @gate && args.file->f_inode->i_size >= $3/
 {
 	$now = nsecs;
 	@s[tid] = $now;

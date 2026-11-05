@@ -1,4 +1,4 @@
-# Profiling runs of run_main.sh (PROFILE=trace|files|perf|walkeep|diag), sourced by it:
+# Profiling runs of run_main.sh (PROFILE=trace|files|m3|perf|walkeep|diag), sourced by it:
 # the usual restore and 10-min warm-up, then one 5-min measurement at 64
 # threads with collectors around it. Separate from the throughput runs, which
 # carry no tracing.
@@ -7,6 +7,9 @@
 #   files    file_writes.bt: writes and syncs per file, sync latency per file
 #            type (EVAL_PLAN DB2; ext4 and XFS), and the files of the mount
 #            with their inode numbers at the end (<label>.inodes)
+#   m3       MySQL only: micro/m3_phases.bt (+ m3_phases_tau.bt on the tau kernel) on
+#            mysqld, the fsync phases of its table files (>= PROFILE_M3_MIN_BYTES,
+#            1 GiB: the data files, not the 512 MiB redo files; 0 traces all)
 #   perf     perf lock contention -ab (top 20 waiters with call stacks), then
 #            perf record -a -g, 60 s each inside the measurement
 #   walkeep  PG only: wal_keep_size keeps every WAL segment of the measurement,
@@ -65,6 +68,13 @@ profile_check() {
       fi
       ;;
     walkeep) [[ "$DBMS" == "postgres" ]] || { echo "❌ PROFILE=walkeep is for postgres"; return 1; } ;;
+    m3)   # one process: PostgreSQL's syncs come from many
+      [[ "$DBMS" == "mysql" ]] || { echo "❌ PROFILE=m3 is for mysql"; return 1; }
+      local f
+      for f in $FS_GROUPS; do
+        case $f in zfs*|btrfs) echo "❌ PROFILE=m3 is for ext4 and xfs, not $f"; return 1 ;; esac
+      done
+      ;;
     *) echo "❌ Unknown PROFILE: $PROFILE"; return 1 ;;
   esac
   [[ -e /sys/kernel/btf/vmlinux ]] || { echo "❌ PROFILE needs kernel BTF (boot $TAU_BASE_KERNEL)"; return 1; }
@@ -179,12 +189,18 @@ profile_begin() {
     PROF_SAMPLER_PID=$!
   fi
   case "$PROFILE" in
-    trace|files)
+    trace|files|m3)
       local filt=0 devnum
       [[ "$DBMS" == "mysql" ]] && filt=$MYSQLD_PID
       devnum=$(( (0x$(stat -c %t "$DEVICE") << 20) | 0x$(stat -c %T "$DEVICE") ))
       if [[ "$PROFILE" == trace ]]; then
         sudo bpftrace "$PROFILE_IO_BT" "$filt" "$devnum" > "$o.bpftrace" 2>&1 &
+      elif [[ "$PROFILE" == m3 ]]; then
+        sudo modprobe xfs
+        bt_for_kernel "$TAUFS_BENCH/scripts/micro/m3_phases.bt" "$o.m3.bt" > /dev/null
+        [[ "$(uname -r)" == *tjournal* ]] && cat "$TAUFS_BENCH/scripts/micro/m3_phases_tau.bt" >> "$o.m3.bt"
+        sudo env BPFTRACE_MAX_MAP_KEYS=100000 bpftrace "$o.m3.bt" "$MYSQLD_PID" "$devnum" \
+          "${PROFILE_M3_MIN_BYTES:-1073741824}" > "$o.bpftrace" 2>&1 &
       else
         sudo modprobe xfs   # file_writes.bt probes kfunc:xfs (built in on the tau kernel)
         sudo env BPFTRACE_MAX_MAP_KEYS=200000 bpftrace "$(bt_for_kernel "$PROFILE_FILES_BT" "$o.files.bt")" \
