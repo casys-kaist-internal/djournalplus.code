@@ -56,9 +56,11 @@ GUEST=$TAUFS_BENCH/scripts/sysbench/recovery_vm_guest.sh
 BASE_KERNEL=${BASE_KERNEL:-$HOME/codes/linux-6.8.0plus-build}
 TAU_KERNEL=${TAU_KERNEL:-$W/codes/djournalplus-kernel.code}
 # an initrd with that build's own modules: the guest's root is btrfs (a module), and
-# /boot/initrd.img-6.8.0tjournal+ carries an older τ build's modules, which the
-# new kernel rejects (made from that initrd with the modules of the build, depmod)
-TAU_INITRD=${TAU_INITRD:-$W/tools/qemu/vm_imgs/initrd.img-6.8.0tjournal+-1979}
+# an initrd of another τ build carries modules the kernel rejects. One per build
+# number of the tree's bzImage: a copy of /boot/initrd.img-6.8.0tjournal+ made
+# while the host has that build installed (#1979: rebuilt from an older initrd)
+TAU_BUILD=$(strings "$TAU_KERNEL/arch/x86/boot/bzImage" 2>/dev/null | grep -m1 '^6\.8\.0tjournal' | grep -oE '#[0-9]+' | tr -d '#')
+TAU_INITRD=${TAU_INITRD:-$W/tools/qemu/vm_imgs/initrd.img-6.8.0tjournal+-$TAU_BUILD}
 export VM_MEM=64G VM_NUMA=1 VM_HUGEPAGES=1 BOOT_TIMEOUT=${BOOT_TIMEOUT:-300}
 export VM_QEMU_DIR=${VM_QEMU_DIR:-$W/tools/qemu/qemu-7.2.1/build-numa}
 export VM_IMAGE=${VM_IMAGE:-vm_imgs/r2-guest.qcow2}
