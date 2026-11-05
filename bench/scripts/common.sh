@@ -377,8 +377,9 @@ MAIN_TABLES=16
 MAIN_ROWS_PER_TABLE=32000000
 
 # TAU_SEGSIZE: the tau images made with that journal segment size (do_mkfs)
+# TAU_IMGTAG: another image of the same kind, <fs>_<key>_<tag>.img
 main_image_key () {
-  echo "t${MAIN_TABLES}_r${MAIN_ROWS_PER_TABLE}${TAU_SEGSIZE:+_seg$TAU_SEGSIZE}"
+  echo "t${MAIN_TABLES}_r${MAIN_ROWS_PER_TABLE}${TAU_SEGSIZE:+_seg$TAU_SEGSIZE}${TAU_IMGTAG:+_$TAU_IMGTAG}"
 }
 
 # /proc/diskstats lines of the test device (sector = 512 B), taken before and

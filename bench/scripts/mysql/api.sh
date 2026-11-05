@@ -21,6 +21,7 @@ MY_LOG_SPIN_CPU_PCT_HWM=0
 # over both NUMA nodes). It exists only in a build WITH_NUMA=ON (install_mysql.sh).
 MY_EXTRA_ARGS=""           # extra server options, set by run_main.sh variants
 MY_PREWRITE_REDO=0         # 1: prewrite_spare_redo after the start (run_main.sh VARIANT=ssd990)
+MY_CPUS=${MY_CPUS:-}       # mysqld on these CPUs only (a taskset list; run_main.sh SB_CPUS: the client's)
 
 wait_for_sock () {
   local path="$1" tries="${2:-60}"
@@ -73,7 +74,7 @@ start_mysqld() {
   local datadir="$1" sock="$2" dblwr="$3" errlog="$4" extra=()
   [[ "$MY_BINLOG" == "OFF" ]] && extra+=(--disable-log-bin)
   extra+=($MY_EXTRA_ARGS)
-  $MYSQL_BIN/mysqld \
+  ${MY_CPUS:+taskset -c $MY_CPUS} $MYSQL_BIN/mysqld \
       --datadir="$datadir" \
       --socket="$sock" \
       --port="$MYSQL_PORT" \

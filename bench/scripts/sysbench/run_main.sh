@@ -171,6 +171,9 @@ PG_PRE_CHECKPOINT=${PG_PRE_CHECKPOINT:-0}
 # tracing; with IOSTAT=0 they skip the per-second iostat too.
 PROFILE="${PROFILE:-}"
 IOSTAT=${IOSTAT:-1}
+# SB_CPUS: the sysbench client runs on these CPUs only (a taskset list); with
+# mysql/api.sh's MY_CPUS, client and server stay off each other's CPUs
+SB_PIN=${SB_CPUS:+taskset -c $SB_CPUS}
 if [[ -n "$PROFILE" ]]; then
   source "$TAUFS_BENCH/scripts/sysbench/profile.sh"
   profile_check || exit 1
@@ -181,7 +184,7 @@ fi
 
 TABLE=$MAIN_TABLES
 ROWS=$MAIN_ROWS_PER_TABLE
-IMAGE_KEY="t${TABLE}_r${IMAGE_ROWS:-$ROWS}${TAU_SEGSIZE:+_seg$TAU_SEGSIZE}"   # main_image_key, or VARIANT=empty's
+IMAGE_KEY="t${TABLE}_r${IMAGE_ROWS:-$ROWS}${TAU_SEGSIZE:+_seg$TAU_SEGSIZE}${TAU_IMGTAG:+_$TAU_IMGTAG}"   # main_image_key, or VARIANT=empty's
 BACKUP_DIR=$TAU_BACKUP_ROOT/sysbench/$DBMS
 
 echo "=== Starting sysbench benchamrk: DBMS=$DBMS, image=$IMAGE_KEY${VARIANT:+, variant=$VARIANT} ==="
@@ -231,7 +234,7 @@ run_sweep() {
 
   echo "--> Warming up $BLOCK (${WARMUP_TIME}s, $WARMUP_THREADS threads)"
   if (( IOSTAT )); then iostat_start "$RESULT_DIR/${BLOCK}_warmup.iostat" $((WARMUP_TIME + 10)); fi
-  sysbench $WORKLOAD "${SB_ARGS[@]}" --threads=$WARMUP_THREADS --time=$WARMUP_TIME \
+  $SB_PIN sysbench $WORKLOAD "${SB_ARGS[@]}" --threads=$WARMUP_THREADS --time=$WARMUP_TIME \
     $(seed_opt $SEED_WARMUP) --report-interval=10 run >> "$RESULT_DIR/${BLOCK}_warmup.log"
   iostat_stop
   log_tau_fds "$RESULT_DIR/${BLOCK}.spec"
@@ -241,7 +244,7 @@ run_sweep() {
     LABEL="${BLOCK}_c${THREADS}_r${runs[$THREADS]}"
     if [[ "$THREADS" != "$prev" ]]; then
       echo "--> Warming up $LABEL (${POINT_WARMUP_TIME}s)"
-      sysbench $WORKLOAD "${SB_ARGS[@]}" --threads=$THREADS --time=$POINT_WARMUP_TIME \
+      $SB_PIN sysbench $WORKLOAD "${SB_ARGS[@]}" --threads=$THREADS --time=$POINT_WARMUP_TIME \
         $(seed_opt $((100 + THREADS))) --report-interval=10 run >> "$RESULT_DIR/${BLOCK}_warmup.log"
       prev=$THREADS
     fi
@@ -253,7 +256,7 @@ run_sweep() {
     if [[ -n "$PROFILE" && "$THREADS" == "$last" ]]; then profile_begin "$LABEL"; fi
     log_io_counters begin "$RESULT_DIR/${LABEL}.io" || true
     if (( IOSTAT )); then iostat_start "$RESULT_DIR/${LABEL}.iostat" $((RUNNING_TIME + 10)); fi
-    sysbench $WORKLOAD "${SB_ARGS[@]}" --threads=$THREADS --time=$RUNNING_TIME \
+    $SB_PIN sysbench $WORKLOAD "${SB_ARGS[@]}" --threads=$THREADS --time=$RUNNING_TIME \
       $(seed_opt $((1000 * runs[$THREADS] + THREADS))) \
       --report-interval=10 --percentile=99 --histogram=on run > "$RESULT_DIR/${LABEL}.log"
     iostat_stop
