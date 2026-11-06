@@ -1360,7 +1360,13 @@ def prepare_golden(ctx, golden):
     if timed_out or "@@KT DONE" not in lines:
         die("preparing the image failed (%s); console %s"
             % (info.get("lines", ["no DONE"])[-1], con))
-    os.replace(ctx.test_img, golden)
+    if os.stat(ctx.test_img.parent).st_dev == os.stat(golden.parent).st_dev:
+        os.replace(ctx.test_img, golden)
+    else:
+        # --image on another file system: a sparse copy, as each trial's
+        subprocess.run(["cp", "--sparse=always", str(ctx.test_img),
+                        str(golden)], check=True)
+        ctx.test_img.unlink()
     info.update({"db": ctx.db, "fs": ctx.fs, "settings": ctx.settings,
                  "my_opts": ctx.my_opts, "release": ctx.release,
                  "kernel_version": ctx.kversion, "qemu": ctx.qemu,
