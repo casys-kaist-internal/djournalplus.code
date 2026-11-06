@@ -186,6 +186,18 @@ DBFSCONF = {
                 mount="mount -t xfs $TEST_DEV $TEST_DIR", modprobe="xfs"),
     "zfs-8k": _zfs_db("8k"),       # run.sh paired PostgreSQL with zfs-8k
     "zfs-16k": _zfs_db("16k"),     # and MySQL with zfs-16k
+    # common.sh's ext4-tau and xfs-tau, with the forks; the builds open their
+    # data files O_TAU_ATOMIC (postgres.h, os0file.h), so tau journals them.
+    # The rootfs's mke2fs.conf is the stock one, and nrext64=0 is stock
+    # mkfs.xfs 6.6.0's default (common.sh's tau_mke2fs / tau_mkfs_xfs).
+    "tau-ext4": dict(mkfs="/kt/tau/mke2fs -t ext4 -E lazy_itable_init=0,"
+                          "lazy_journal_init=0 -F $TEST_DEV",
+                     mount="mount -t ext4 -o tjournal,tjournal_size=32"
+                           " $TEST_DEV $TEST_DIR", tau=True),
+    "tau-xfs": dict(mkfs="/kt/tau/mkfs.xfs -f -i nrext64=0 -l tjmaxsize=1G"
+                         " $TEST_DEV",
+                    mount="mount -t xfs -o tjournal $TEST_DEV $TEST_DIR",
+                    modprobe="xfs", tau=True),
 }
 
 # The SOSP round's settings: create_image.sh (16M rows over 32 tables, about
@@ -1632,7 +1644,8 @@ def cmd_db(a):
     ctx.logs.mkdir(parents=True)
     WORK.mkdir(parents=True, exist_ok=True)
     ctx.tools = build_tools_disk(name, a.fs, "db", "", a.max_sectors_kb,
-                                 ctx.release, tau=False, conf=conf, db=True)
+                                 ctx.release, tau=c.get("tau", False),
+                                 conf=conf, db=True)
     ctx.test_img = WORK / ("test-" + name + ".img")
 
     meta = {
