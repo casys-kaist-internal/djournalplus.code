@@ -299,6 +299,38 @@ innodb-doublewrite=1`. 복구 기동을 포함한 모든 기동에 적용되고,
 - 복구 시간: PostgreSQL은 FPW를 켜면 9배 빠르다(7.3 대 64 s, 페이지 이미지가 없으면 WAL 레코드마다
   페이지를 장치에서 읽는다). MySQL은 17 s(보호를 끈 성공 재시작 8 s).
 
+### 3.13 τJournal — §3.11 설정, 구성당 20회 (11-06 ~ 11-07)
+
+§3.11과 같은 설정에서 FS만 τ-EXT4·τ-XFS로 바꿨다. DB 보호는 끈 채다.
+- FS 구성(killtest.py DBFSCONF, f4f40f1):
+  - 게스트에서 포크 mkfs를 쓰고 베이스라인과 같은 FS 기능으로 만든다(ext4는 rootfs의 stock
+    mke2fs.conf, xfs는 `-i nrext64=0`).
+  - 마운트: ext4 `tjournal,tjournal_size=32`, xfs `tjournal`.
+  - DB 빌드는 데이터 파일을 O_TAU_ATOMIC으로 연다.
+- 커널: 게스트는 τ 트리의 #1980(new_main a6d55fe7)이다. 호스트도 #1980이다(베이스라인 행의 호스트는
+  6.8.0-base+, 호스트는 하이퍼바이저일 뿐).
+- golden 이미지: smoke(`2026-11-06_db_tau_smoke`, 구성당 1회)가 #1980에서 만들었고 PM1735
+  `/mnt/recidem/killtest`에 둔다(`--image`, c4b695f). τ 저널이 들어 있어 11–24 GB다.
+- 일정: smoke 4회가 모두 clean일 때만 본 실행으로 넘어간다(`scripts/dbtau_chain.sh`). 시드는
+  20262010+i(`2026-11-06_db_tau/scripts/dbtau.sh`, README).
+
+| config | trials | 찢어짐 (95% CI) | 재시작 실패 | 복구 시간 중간값 (최대) |
+|---|---|---|---|---|
+| MySQL τ-EXT4 | 20 (+smoke 1) | 0 (0–16.1%) | 0 | 8.0 s (9.0) |
+| PostgreSQL τ-EXT4 | 20 (+1) | 0 (0–16.1%) | 0 | 53.2 s (70.1) |
+| MySQL τ-XFS | 20 (+1) | 0 (0–16.1%) | 0 | 7.0 s (8.0) |
+| PostgreSQL τ-XFS | 20 (+1) | 0 (0–16.1%) | 0 | 42.3 s (68.7) |
+
+- 84회 모두 clean이다. 기록된 커널 줄에도, 남긴 콘솔에도 WARNING/BUG/lockup 줄이 없다.
+- 쓰기 16개 이상이 걸린 채 죽인 시도: PG τ-ext4 6, PG τ-xfs 7, MySQL τ-xfs 2. 그래도 찢어진 페이지는
+  없었다.
+- FS를 합치면 DB마다 0/42다. §3.11의 PostgreSQL 비율 15%에서 0/42가 나올 확률은 0.1%다.
+- MySQL 시도 40회 중 34회에서 τ 재생이 `TAU: invalid block ... expected magic` 류를 남긴다. kill 때
+  쓰던, 커밋되지 않은 트랜잭션을 버리는 메시지다(recovery.c).
+- 이 VM에서 golden 이미지 aging 처리량은 §3.11 이미지의 약 절반이다(MySQL 581/565 대 1306/1399 tps,
+  PG 1790/1818 대 3508/3517). 호스트 커널과 디스크 경로가 달라 성능 비교로 쓰지 않는다.
+- 최종 τ 커널(8dc3b484·e6f2cdb2 포함)에서 golden 이미지부터 다시 돌린다.
+
 ## 4. 정정
 
 - 10-05·06의 분석은 MySQL ext4의 쓰기 0개 torn을 "커널 writeback이 16 KiB 페이지의 4 KiB 조각
@@ -308,7 +340,8 @@ innodb-doublewrite=1`. 복구 기동을 포함한 모든 기동에 적용되고,
 
 ## 5. 남은 일
 
-- τJournal을 §2 설정으로(복구 경로 패치 중). config당 100회와 ext4 data=journal은 §3.11.
+- ~~τJournal을 §2 설정으로~~: §3.13에서 #1980으로 함(84회 모두 clean). 최종 τ 커널에서 다시 돌린다.
+  config당 100회와 ext4 data=journal은 §3.11.
 - ~~FPW/DWB를 켠 대조군~~: §3.12에서 함(찢어짐 7/200, 모두 복구).
 - 쓰기 0개 torn의 정확한 경로(§3.9).
 
@@ -331,6 +364,9 @@ innodb-doublewrite=1`. 복구 기동을 포함한 모든 기동에 적용되고,
 | `2026-10-10_db_x100` | `20261010_123546` … `20261014_055814`, 45개(첫 PG ZFS `20261010_220036`은 디스크 부족으로 0회); `scripts/db100.sh`·`db100b.sh`·`db100c.sh`·`db100d.sh`, `tally.py` |
 | `2026-11-03_db_app_smoke` | `20261103_145718`(PG)·`150131`(MySQL), 1회씩, 이미지 보관해 확인 |
 | `2026-11-03_db_app_x100` | `20261104_132538` … `20261105_024626`, 10개; `scripts/dbapp.sh`, README |
+| `2026-11-06_db_tau_smoke` | `20261106_114039`·`115424`·`120945`·`122544`, 1회씩(golden 이미지 생성 포함) |
+| `2026-11-06_db_tau` | `20261106_124238`·`142510`·`162543`·`180234`, 20회씩; `scripts/dbtau.sh`·`dbtau_chain.sh`, README |
 | `99_Archive` | `20261006_023520`·`065310`·`103503` |
 
-이미지는 `tools/killtest/work/db-<db>-<fs>[-revision[-mem<size>][-logdefault]].img`(gitignore).
+이미지는 `tools/killtest/work/db-<db>-<fs>[-revision[-mem<size>][-logdefault]].img`(gitignore). τ 이미지는
+같은 이름으로 PM1735의 `/mnt/recidem/killtest/`에 있다(§3.13).
