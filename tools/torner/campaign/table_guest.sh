@@ -17,6 +17,12 @@
 #   GEN_EXTRA        more `torner gen` arguments for every capture: --fdatasync
 #                    (an overwrite's record then takes its own flush, no host commit)
 #   TAG              suffix of the capture names
+# A tau capture also leaves tau-probe.txt: its run's probe counters, i.e. how often
+# a reuse found its segment's free not yet on the map log, and how often a writer
+# waited for journal space.  They show whether the cell reached those paths at all.
+# tau-probe-samples.txt has them every 0.2 s, with whether torner gen was running:
+# gen fills the file before its timed run, and explore crashes only inside that
+# run, so cell_csv.py counts the run's own reuses from the samples.
 # Ends with "===== done".
 set -u
 T=~/torner; S=$T/scripts; C=$T/campaign; W=/mnt/scratch; P=/sys/module/tau_journal/parameters
@@ -28,7 +34,8 @@ SYS=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 MK=/mnt/scratch/stock/etc/mke2fs.conf
 CSV=$W/table.csv
 
-# One writer, an fsync after every write (one write = one table entry), 5 s.
+# One writer, an fsync after every write (one write = one table entry), 5 s;
+# a row's own --threads/--fsync-every come later and win.
 row_args() {
 	case "$1" in
 	ow4k)     echo "--mode overwrite --unit 4096" ;;	# a block rewritten in place
@@ -38,6 +45,17 @@ row_args() {
 	ap16k)    echo "--mode append --unit 16384" ;;
 	prealloc) echo "--mode alloc --unit 16384" ;;	# into fallocate()d space, once each
 	hole)     echo "--mode delalloc --unit 16384" ;;	# into an ftruncate()d hole, once each
+	# Journal pressure (kernel e6f2cdb2, 11-06): a 375 MiB file on a 512 MiB FS, so the
+	# journal cannot grow past its first 8 segments of 2 MiB. A freed segment is then
+	# often wanted again before journald logs its free, and tau_flush_freed writes the
+	# free on the spot. The 11-06 pilot (tau-xfs, inside the 5 s run): ~16% of reuses
+	# did so in every row, ow16k included (its journal stayed at 8 segments too), so
+	# what -t4 adds is volume: ~160 reuses, ~26 frees on the spot (ow16k ~45, ~7).
+	# A state also replays the 375 MiB prefill: ~3x the time of an ow16k state.
+	# Variants: -f16 fsyncs every 16 writes, -t4 runs 4 writers on the file.
+	owfull)     echo "--mode overwrite --unit 16384 --dev-size 512M --log-size 3G --pages 24000" ;;
+	owfull-f16) echo "--mode overwrite --unit 16384 --dev-size 512M --log-size 3G --pages 24000 --fsync-every 16" ;;
+	owfull-t4)  echo "--mode overwrite --unit 16384 --dev-size 512M --log-size 3G --pages 24000 --threads 4 --fsync-every 16" ;;
 	*) return 1 ;;
 	esac
 }
@@ -70,6 +88,33 @@ setps() {
 	for kv in ${1//,/ }; do echo "${kv#*=}" | sudo tee "$P/${kv%%=*}" >/dev/null; done
 	echo "$old"
 }
+# One capture's tau probe counters. They exist with CONFIG_TAU_PROBE_TORN and are
+# absent elsewhere.
+PROBES="seg_reused seg_reuse_flush space_wait space_wait_ms space_granted seg_idle_released seg_shrunk"
+probes_zero() {
+	local c
+	for c in $PROBES; do [ -e $P/tau_probe_$c ] && echo 0 | sudo tee $P/tau_probe_$c >/dev/null; done
+	return 0
+}
+probes_read() {
+	local c
+	for c in $PROBES; do [ -e $P/tau_probe_$c ] && printf '%s=%s ' $c "$(cat $P/tau_probe_$c)"; done
+	return 0
+}
+# <file>: a line every 0.2 s until killed -- time, gen=1 while torner gen runs, the
+# counters and the segment gauges
+probes_sample() {
+	local c l g
+	while :; do
+		g=0; pgrep -f '[t]orner gen' >/dev/null && g=1
+		l="$(date +%s.%N | cut -c1-14) gen=$g"
+		for c in $PROBES seg_total seg_free seg_owned; do
+			[ -e $P/tau_probe_$c ] && l="$l $c=$(cat $P/tau_probe_$c)"
+		done
+		echo "$l"
+		sleep 0.2
+	done > "$1"
+}
 
 echo "===== start $(uname -r) $(uname -v)  $(date +%T)"
 [ -s $CSV ] || python3 $C/cell_csv.py --header > $CSV
@@ -94,10 +139,20 @@ for cell in $CELLS; do
 		if [ -n "$CAP_PARAM" ]; then
 			undo=$(setps "$CAP_PARAM") || { echo "cell skipped"; continue; }
 		fi
+		spid=
+		case $fs in tau-*) probes_zero; probes_sample $W/$name-probe-samples.txt & spid=$! ;; esac
 		sudo env PATH=$path MKE2FS_CONFIG=$MK TORNER_TAU_MKFS_OPTS="$mkfs" $S/capture.sh --workdir $D \
-			--fs $fs $args --threads 1 --fsync-every 1 --gen-args "$gen" \
+			--fs $fs --threads 1 --fsync-every 1 $args --gen-args "$gen" \
 			> $W/$name-capture.log 2>&1
 		rc=$?
+		[ -z "$spid" ] || { kill $spid; wait $spid 2>/dev/null; }
+		case $fs in
+		tau-*)	pr=$(probes_read); echo "probe: $pr"
+			if [ -d $D ]; then
+				echo "$pr" | sudo tee $D/tau-probe.txt >/dev/null
+				sudo mv $W/$name-probe-samples.txt $D/tau-probe-samples.txt
+			fi ;;
+		esac
 		[ -z "$undo" ] || setps "$undo" >/dev/null
 		echo "capture rc=$rc  $(grep -m1 -oE 'mkfs.ext4=[^ ]*|mkfs.xfs=[^ ]*' $D/capture.json 2>/dev/null)"
 		grep -E "application writes" $W/$name-capture.log

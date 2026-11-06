@@ -118,6 +118,18 @@ for title, var in (("controls (a switch restores a fixed bug: each must fail)", 
         print("  %-9s %-9s %-6s %-30s states=%-5s content=%s size=%s durability=%s torn=%s/%s  %s" % (
             r["config"], r["row"], r["profile"], r["tag"], r["states"], r["viol_content"], r["viol_size"],
             r["viol_durability"], r["writes_torn"], r["writes_targeted"], verdict))
+# the tau probe counters (CONFIG_TAU_PROBE_TORN), captures from 11-06 on
+tau = [r for r in csv.DictReader(open(sys.argv[1])) if r.get("reuse_flush")]
+if tau:
+    print("\ntau segment reuse per cell: reuses, and frees tau_flush_freed wrote on the spot"
+          " (none of the reused segment's free on the map log yet), in gen's timed run --"
+          " the part explore crashes in -- and over the whole capture")
+    for r in tau:
+        bad = sum(int(r[k] or 0) for k in ("viol_content", "viol_size", "viol_durability", "writes_torn"))
+        print("  %-9s %-10s %-6s %-14s states=%-5s violations=%-3s run: reused %s, on the spot %s"
+              "   capture: reused %s, on the spot %s" % (
+                  r["config"], r["row"], r["profile"], r["tag"], r["states"], bad,
+                  r["reused_win"] or "?", r["reuse_flush_win"] or "?", r["reused"], r["reuse_flush"]))
 PYEOF
 } > "$OUT/summary.md"
 cat "$OUT/summary.md"

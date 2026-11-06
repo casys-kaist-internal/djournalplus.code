@@ -20,6 +20,11 @@ capture.json, atoms.json, states-<strategy>.jsonl -- and says, for that
                   model (O in-order prefix, R reordered cache, T torn bio)
   upper95         Wilson 95% upper bound on the per-write tear rate
   witness         the first violating state: strategy, state_spec, what broke
+  reused, reuse_flush   tau, CONFIG_TAU_PROBE_TORN (tau-probe.txt): journal segments
+                  handed out again over the capture, and those whose free was not
+                  yet on the map log, so tau_flush_freed wrote it on the spot
+  reused_win, reuse_flush_win   the same inside torner gen's timed run, the only
+                  part explore crashes in -- not its prefill (tau-probe-samples.txt)
 
 A 2 KiB append alternates a write that starts a block (even page) with one
 inside the block the previous write allocated (odd page); --row ap2k splits
@@ -39,7 +44,8 @@ FIELDS = ("config", "row", "profile", "tag", "kernel", "mount_opts", "mkfs_opts"
           "states", "unmountable", "unjudged",
           "viol_content", "viol_size", "viol_durability", "p3_dirty", "p3_na",
           "writes_targeted", "writes_torn", "torn_O", "torn_R", "torn_T",
-          "upper95", "kinds", "witness", "capture")
+          "upper95", "kinds", "witness", "capture",
+          "reused", "reuse_flush", "reused_win", "reuse_flush_win")
 
 
 def wilson_hi(k, n, z=1.96):
@@ -87,6 +93,39 @@ def violation_text(r):
         parts.append("target %s:%s %s" % (t.get("page"), t.get("version"),
                                            t.get("kind")))
     return "; ".join(parts)
+
+
+def probes(cap, duration):
+    """seg_reused / seg_reuse_flush over the capture, and inside gen's timed run: from
+    the first sample at or before (gen's end - duration) to the first after gen ended"""
+    out = {}
+    try:
+        kv = dict(x.split("=", 1) for x in open(os.path.join(cap, "tau-probe.txt")).read().split())
+    except (OSError, ValueError):
+        return out
+    out.update(reused=kv.get("seg_reused", ""), reuse_flush=kv.get("seg_reuse_flush", ""))
+    rows = []
+    try:
+        for line in open(os.path.join(cap, "tau-probe-samples.txt")):
+            f = line.split()
+            try:
+                d = {"t": float(f[0])}
+                d.update((k, int(v)) for k, v in (x.split("=", 1) for x in f[1:]))
+            except (ValueError, IndexError):
+                continue
+            rows.append(d)
+    except OSError:
+        return out
+    up = [i for i, d in enumerate(rows) if d.get("gen")]
+    if not up:
+        return out
+    end = rows[min(up[-1] + 1, len(rows) - 1)]
+    before = [d for d in rows[:up[-1] + 1] if d["t"] <= end["t"] - duration]
+    if before and all(k in d for d in (before[-1], end)
+                      for k in ("seg_reused", "seg_reuse_flush")):
+        out.update(reused_win=end["seg_reused"] - before[-1]["seg_reused"],
+                   reuse_flush_win=end["seg_reuse_flush"] - before[-1]["seg_reuse_flush"])
+    return out
 
 
 def summarize(cap, row, profile):
@@ -170,6 +209,7 @@ def summarize(cap, row, profile):
                         if targeted else ""),
                kinds=" ".join("%s=%d" % kv for kv in sorted(kinds.items())),
                witness=witness or "")
+    out.update(probes(cap, float(cj.get("duration_s", 5))))
     if row == "ap2k":
         # starts a block (even page) / inside the block the last write allocated
         nb = {p for p in targeted if p[0] % 2 == 0}
