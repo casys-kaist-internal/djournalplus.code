@@ -657,12 +657,18 @@ int torner_replay(int argc, char **argv)
 
 		for (k = 0; k < l.mark_n; k++)
 			nprog += l.m[k].kind == LMARK_PROG;
+		/* end_entry: entries logged before the torner:end mark (-1: none);
+		 * end_epoch: the epoch of the last of them, so a caller can bound
+		 * epoch<=N states by the mark (0 when no entry precedes it) */
 		printf("{\"tool\":\"torner-replay\",\"entries\":%zu,\"epochs\":%" PRIu64
 		       ",\"fepochs\":%" PRIu64 ",\"sectorsize\":%u"
 		       ",\"declared_entries\":%" PRIu64 ",\"marks\":%zu"
-		       ",\"begin_entry\":%" PRId64 "}\n",
+		       ",\"begin_entry\":%" PRId64 ",\"end_entry\":%" PRId64
+		       ",\"end_epoch\":%" PRIu64 "}\n",
 		       l.n, l.epochs, l.fepochs, l.sectorsize, l.nr_entries, nprog,
-		       l.begin_entry);
+		       l.begin_entry, l.end_entry,
+		       l.end_entry > 0 && (size_t)l.end_entry <= l.n ?
+		       l.e[l.end_entry - 1].epoch : 0);
 		rc = 0;
 		goto out;
 	}
@@ -755,13 +761,20 @@ int torner_replay(int argc, char **argv)
 	{
 		char sid[32];
 
+		uint64_t last = spec_last_entry(&sp, &l);
+
 		state_id(sid, sizeof(sid), specstr, &l);
+		/* last_entry / last_epoch: the last log entry the state can hold
+		 * and its epoch, so a caller can place an entry<=N cut in its
+		 * FLUSH window */
 		printf("{\"tool\":\"torner-replay\",\"state_id\":\"%s\""
 		       ",\"state_spec\":\"%s\",\"entries_applied\":%" PRIu64
 		       ",\"entries_total\":%zu,\"epochs\":%" PRIu64
-		       ",\"progress_limit\":%" PRIu64 "}\n",
+		       ",\"progress_limit\":%" PRIu64 ",\"last_entry\":%" PRIu64
+		       ",\"last_epoch\":%" PRIu64 "}\n",
 		       sid, specstr, applied, l.n, l.epochs,
-		       rlog_progress_limit(&l, spec_last_entry(&sp, &l)));
+		       rlog_progress_limit(&l, last), last,
+		       l.n && last < l.n ? l.e[last].epoch : 0);
 	}
 	free(sp.drop);
 	rc = 0;
