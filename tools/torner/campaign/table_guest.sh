@@ -29,6 +29,7 @@ T=~/torner; S=$T/scripts; C=$T/campaign; W=/mnt/scratch; P=/sys/module/tau_journ
 CELLS=${CELLS:?}; PROFILES=${PROFILES:-"quiet busy"}
 LIMIT_ATOM=${LIMIT_ATOM:-1000}; LIMIT_EPOCH=${LIMIT_EPOCH:-1000}
 PREFER_SPLIT=${PREFER_SPLIT:-0}; CAP_PARAM=${CAP_PARAM:-}; EXPLORE_PARAM=${EXPLORE_PARAM:-}
+STRATS=${STRATS:-row}
 TAU_SEG=${TAU_SEG:-2m}; GEN_EXTRA=${GEN_EXTRA:-}; TAG=${TAG:-}
 SYS=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 MK=/mnt/scratch/stock/etc/mke2fs.conf
@@ -71,6 +72,15 @@ profile_gen() {
 }
 # the epoch strategies reach crash points before a write's data, where an append's
 # size can already be on disk; the atom-* ones start at the data
+# STRATS: "row" (the row's own, below), "none" (capture only: loginv judges the
+# log, nothing is crashed), or a list of strategies
+strats_of() {
+	case "$STRATS" in
+	row)	row_strats "$1" ;;
+	none)	;;
+	*)	echo "$STRATS" ;;
+	esac
+}
 row_strats() {
 	case "$1" in
 	ap*) echo "atom-order atom-reorder atom-tear prefix single-drop" ;;
@@ -164,7 +174,7 @@ for cell in $CELLS; do
 		if [ -n "$EXPLORE_PARAM" ]; then
 			undo=$(setps "$EXPLORE_PARAM") || { echo "cell skipped"; continue; }
 		fi
-		for st in $(row_strats $row); do
+		for st in $(strats_of $row); do
 			case $st in
 			atom-*) lim=$LIMIT_ATOM; extra=""; [ "$PREFER_SPLIT" = 1 ] && extra=--prefer-split ;;
 			*)      lim=$LIMIT_EPOCH; extra="" ;;

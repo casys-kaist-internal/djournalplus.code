@@ -257,7 +257,7 @@ fi
 # and ext4 data=journal are meant to have them.
 LI_CHECK=
 case "$FS" in
-tau-*)		LI_CHECK=I1,I5 ;;
+tau-*)		LI_CHECK=I1,I2,I3,I4,I5 ;;
 ext4*|xfs)	LI_CHECK=I5 ;;
 esac
 if [ -n "$LI_CHECK" ]; then

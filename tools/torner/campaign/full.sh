@@ -144,6 +144,22 @@ if i1:
         print("  %-9s %-10s %-6s %-22s %s/%s  missing %s  own %s / host %s / never %s  violations %s  %s" % (
             r["config"], r["row"], r["profile"], r["tag"], r["i1_checked"], r["i1_skipped"],
             r["i1_missing"], r["i1_own"], r["i1_gated"], r["i1_gate_closed"], nv, verdict))
+# I2-I4 from the same loginv.json: the tail, scoped revoke tags, the map log.
+i24 = [r for r in csv.DictReader(open(sys.argv[1])) if r.get("i2_blocks")]
+if i24:
+    print("\nI2-I4 per cell (torner loginv): tail blocks not covered / checked, leads;"
+          " scoped tags violating / checked; segment reuses violating / checked")
+    # the controls these checks must catch (the kernel session, 11-07);
+    # segmap_fua_only shows on tau-xfs only
+    must = ("record_fua_only", "segmap_fua_only", "maplog_early_base", "reuse_flush_only")
+    for r in i24:
+        nv = sum(int(r[k] or 0) for k in ("i2_uncovered", "i3_violations", "i4_violations"))
+        ctl = r["tag"].replace("tau_", "", 1).startswith(must)
+        verdict = ("FAILS (good)" if nv else "NO SIGNAL") if ctl else ("VIOLATIONS" if nv else "passes")
+        print("  %-9s %-10s %-6s %-22s I2 %s/%s leads %s  I3 %s/%s  I4 %s/%s  %s" % (
+            r["config"], r["row"], r["profile"], r["tag"], r["i2_uncovered"], r["i2_blocks"],
+            r["i2_leads"], r["i3_violations"], r["i3_tags"], r["i4_violations"], r["i4_reuses"],
+            verdict))
 # I5 from the same loginv.json: is each application write inside one durable
 # unit -- a tau or jbd2 transaction, the bio with no data journal.  tau must
 # have no split; ext4 data=journal's splits are its commit-induced tears.

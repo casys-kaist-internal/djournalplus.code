@@ -30,6 +30,11 @@ capture.json, atoms.json, states-<strategy>.jsonl -- and says, for that
                   no write in the log, records ordered by their own flush, by the
                   host commit they name, whose host commit never came, and
                   violations (torner README, `torner loginv`)
+  i2_*, i3_*, i4_*  tau, loginv.json: the tail (journal blocks checked, not
+                  covered when a record's tail or a FREE ended their transaction's
+                  replay, home writes before the record was valid -- leads),
+                  scoped revoke tags (checked, violating), the map log (segment
+                  reuses checked, violations)
   i5_*            loginv.json: I5, each application write inside one durable
                   unit -- writes checked, split across units (and how many of
                   those start in gen's timed run), held in part (tau: counted,
@@ -59,7 +64,9 @@ FIELDS = ("config", "row", "profile", "tag", "kernel", "mount_opts", "mkfs_opts"
           "reused", "reuse_flush", "reused_win", "reuse_flush_win",
           "i1_checked", "i1_skipped", "i1_missing", "i1_own", "i1_gated",
           "i1_gate_closed", "i1_violations",
-          "i5_checked", "i5_split", "i5_split_run", "i5_partial", "i5_no_unit")
+          "i5_checked", "i5_split", "i5_split_run", "i5_partial", "i5_no_unit",
+          "i2_blocks", "i2_uncovered", "i2_leads", "i3_tags", "i3_violations",
+          "i4_reuses", "i4_violations")
 
 
 def wilson_hi(k, n, z=1.96):
@@ -159,6 +166,15 @@ def loginv_i1(cap):
         else:   # no data journal: the bio is the unit
             out.update(i5_checked=c.get("app_writes_checked", ""),
                        i5_split=c.get("app_writes_spanning_multiple_bios", ""))
+    for k, src, chk in (("i2_blocks", "i2_blocks", "I2"),
+                        ("i2_uncovered", "i2_uncovered", "I2"),
+                        ("i2_leads", "i2_leads", "I2"),
+                        ("i3_tags", "i3_scoped_tags", "I3"),
+                        ("i3_violations", "i3_violations", "I3"),
+                        ("i4_reuses", "i4_segment_reuses", "I4"),
+                        ("i4_violations", "i4_violations", "I4")):
+        if ck.get(chk) == "run":
+            out[k] = c.get(src, "")
     if ck.get("I1") != "run":
         return out
     keys = (("i1_checked", "i1_transactions_checked"),
