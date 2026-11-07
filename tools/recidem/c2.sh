@@ -11,9 +11,11 @@
 #     A crash then replays the old journal copy over the in-place page.
 #
 # Per trial, on a fresh τ file system (tools/recidem/c2_guest.py; pages Y and X of one O_TAU_UNTORN file):
-#   init: Y = A, X = P, fsync; umount + mount so that both are home and clean
-#   W0 Y = B + fsync (Y is now τRedo), W1 Y = C, W2 X = Q, all on one open fd; then by variant:
-#     bg      no fsync, wait WAIT_S for a background commit, kill qemu
+#   init: pages 0-1023 = A, X = P, fsync; umount + mount so that all are home and clean
+#   W0 pages 0-1023 = B + fsync: one tx of 1,024 blocks, at least tau_cp_small_tx (512). A smaller one is
+#   checkpointed at once and leaves the replay range before W2's commit. Y = page 0 is now τRedo.
+#   Then W1 Y = C and W2 X = Q, all on one open fd; then by variant:
+#     bg      no fsync, wait WAIT_S for the background commit (5 s), kill well inside the 120-s age
 #     fsync   fsync after W2 (the control), wait WAIT_S, kill
 #     nowait  no fsync, kill at once
 #   boot again, mount (recovery), read Y and X
@@ -98,6 +100,7 @@ for fs in $FSES; do
       g "sudo dmesg -C"; mnt $fs || { echo "$fs $variant $rep: recovery mount failed"; vm_kill; continue; }
       g "sudo dmesg" > "$P.recovery.dmesg"
       rd=$(g "python3 ~/c2/c2_guest.py read")
+      echo "$rd" > "$P.read"
       g "sudo umount /mnt/c2"; vm_off
       y=$(echo "$rd" | grep -oE 'Y=.' | cut -d= -f2); x=$(echo "$rd" | grep -oE 'X=.' | cut -d= -f2)
       case "$y$x" in
