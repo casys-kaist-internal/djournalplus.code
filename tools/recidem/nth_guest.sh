@@ -1,8 +1,12 @@
 #!/bin/bash
 # Guest side of tools/recidem/nth.sh: EVAL_PLAN T3 #9 (during_recovery_nth_block) as a block-level
-# sweep. /dev/vda holds the crash state and is never written. Every mount runs on a dm-snapshot of it,
-# with its COW in a sparse file on the guest's root.
-#   record <fs> <journal GiB>
+# sweep. /dev/vda is the crash image with room appended by the host. dm-linear cuts it in three:
+#   nthbase  the crash state, the τ FS's <fs GiB>: never written
+#   nthcow   <cow GiB>, the COW of every snapshot: non-persistent, so it needs no reset between them
+#   nthlog   <log GiB>, the dm-log-writes log
+# Every mount runs on a dm-snapshot of nthbase. (The first version kept the COW and the log in files on
+# the guest's root; the full-size run filled it, 11-07.)
+#   record <fs> <journal GiB> <fs GiB> <cow GiB> <log GiB>
 #       the reference recovery:
 #       - a snapshot, dm-log-writes on top (log ~/nth/log.img), mount (τ's replay), mark torner:end;
 #       - the data files' sha256 and sizes to ~/nth/A.hash, then umount;
@@ -17,10 +21,10 @@
 # Needs ~/nth/bin: torner, e2fsck, xfs_repair (the host's builds); ~/nth/mod: the kernel tree's
 # dm-bufio, dm-snapshot and dm-log-writes modules.
 set -u
-N=$HOME/nth; B=$N/bin; MNT=/mnt/nth; DEV=/dev/vda
+N=$HOME/nth; B=$N/bin; MNT=/mnt/nth; DEV=/dev/mapper/nthbase COW=/dev/mapper/nthcow LOG=/dev/mapper/nthlog
 cmd=${1:?command}; shift
 sudo mkdir -p $MNT; mkdir -p $N
-SZ=$(sudo blockdev --getsz $DEV)
+SZ=$(sudo blockdev --getsz $DEV 2> /dev/null)
 mopts() {  # <fs> <jgb>
   case $1 in
     ext4-tau) echo "-t ext4 -o tjournal,tjournal_size=$2" ;;
@@ -28,17 +32,24 @@ mopts() {  # <fs> <jgb>
     *) echo "unknown fs $1" >&2; exit 1 ;;
   esac
 }
-snap() {  # <name>: a snapshot of $DEV with a fresh sparse COW, prints its device
-  rm -f $N/$1.cow; truncate -s 64G $N/$1.cow
-  local l; l=$(sudo losetup --show -f $N/$1.cow) || exit 1
-  sudo dmsetup create $1 --table "0 $SZ snapshot $DEV $l N 8" || exit 1
+carve() {  # <fs GiB> <cow GiB> <log GiB>: the three linear devices on /dev/vda
+  local g=$((1 << 21)) a b c   # sectors per GiB
+  a=$(( $1 * g )) b=$(( $2 * g )) c=$(( $3 * g ))
+  (( $(sudo blockdev --getsz /dev/vda) >= a + b + c )) || { echo "/dev/vda is smaller than $1+$2+$3 GiB"; exit 1; }
+  sudo dmsetup create nthbase --table "0 $a linear /dev/vda 0" &&
+    sudo dmsetup create nthcow --table "0 $b linear /dev/vda $a" &&
+    sudo dmsetup create nthlog --table "0 $c linear /dev/vda $(( a + b ))" || exit 1
+  SZ=$a
+}
+snap() {  # <name>: a non-persistent snapshot of nthbase on nthcow, prints its device
+  sudo dmsetup create $1 --table "0 $SZ snapshot $DEV $COW N 8" || exit 1
   echo /dev/mapper/$1
 }
 unsnap() {  # <name>
-  local l; l=$(sudo dmsetup table $1 2> /dev/null | awk '{print $5}')
   sudo dmsetup remove $1 2> /dev/null
-  [ -n "$l" ] && sudo losetup -d /dev/block/$l 2> /dev/null
-  rm -f $N/$1.cow
+}
+cowuse() {  # <name>: "used/total sectors" of a snapshot's COW, or its status word (Invalid, Overflow)
+  sudo dmsetup status $1 2> /dev/null | awk '{print $4}'
 }
 hashfiles() {  # the data files f*, sorted, as recidem's guest.sh hash
   ( cd $MNT && ls f[0-9]* | sudo xargs -P 8 -n 1 sha256sum | sort -k 2 && sudo stat -c 'size %s %n' f[0-9]* )
@@ -66,11 +77,11 @@ case $cmd in
   record)
     fs=$1 jgb=$2
     mods
+    carve $3 $4 $5
     S=$(snap nthref) || exit 1
-    rm -f $N/log.img; truncate -s 24G $N/log.img
-    L=$(sudo losetup --show -f $N/log.img) || exit 1
+    L=$LOG
     echo "$L" > $N/log.loop
-    wc=$(cat /sys/block/$(basename $DEV)/queue/write_cache)
+    wc=$(cat /sys/block/vda/queue/write_cache)
     sudo dmsetup create nthlw --table "0 $SZ log-writes $S $L" || exit 1
     klog_start record
     t=$(mount_timed /dev/mapper/nthlw $fs $jgb) || { klog_stop; echo "record: mount failed"; exit 1; }
@@ -80,6 +91,7 @@ case $cmd in
     hashfiles > $N/A.hash
     sudo umount $MNT
     sudo dmsetup remove nthlw
+    echo "record: cow $(cowuse nthref)"
     unsnap nthref
     echo "record: mount_s=$t replayed=$r vda_write_cache='$wc' files=$(grep -c '^size' $N/A.hash)"
     sudo $B/torner replay --log $L --stat-only
@@ -98,6 +110,7 @@ case $cmd in
     hashfiles > $N/B.hash
     h=same; cmp -s $N/A.hash $N/B.hash || h=DIFF
     sudo umount $MNT
+    c=$(cowuse nthtrial)
     case $fs in
       ext4-tau) sudo $B/e2fsck -fn $S > $N/trial.fsck 2>&1 ;;
       xfs-tau)  sudo $B/xfs_repair -n $S > $N/trial.fsck 2>&1 ;;
@@ -107,13 +120,13 @@ case $cmd in
     unsnap nthtrial
     le=$(grep -o '"last_entry":[0-9]*' $N/trial.replay | cut -d: -f2)
     lp=$(grep -o '"last_epoch":[0-9]*' $N/trial.replay | cut -d: -f2)
-    echo "spec=$spec last=$le/$lp mount_s=$t replayed=$r hash=$h fsck=$f"
+    echo "spec=$spec last=$le/$lp mount_s=$t replayed=$r hash=$h fsck=$f cow=$c"
     ;;
   cleanup)
     mountpoint -q $MNT && sudo umount $MNT
     sudo dmsetup remove nthlw 2> /dev/null
     unsnap nthtrial; unsnap nthref
-    [ -s $N/log.loop ] && sudo losetup -d $(cat $N/log.loop) 2> /dev/null
+    for d in nthlog nthcow nthbase; do sudo dmsetup remove $d 2> /dev/null; done
     echo cleaned
     ;;
   *) echo "unknown command $cmd"; exit 2 ;;

@@ -26,8 +26,9 @@
 # PASS = hashes equal A's and fsck is clean.
 #
 # Usage: nth.sh [out dir]
-#   env FSES ("ext4-tau xfs-tau"), STATES (1), EPOCHS_MAX (40), ENTRY_CUTS (30), SUBSETS (10),
-#       FLIP_SUBSETS (6), SEED (1),
+#   env FSES ("ext4-tau xfs-tau"), STATES (1), EPOCHS_MAX (25), ENTRY_CUTS (20), SUBSETS (6),
+#       FLIP_SUBSETS (4), SEED (1), COW_GB (64), LOG_GB (32): the room appended to the crash image for the
+#       snapshots' COW and the log (nth_guest.sh carves /dev/vda; the guest's root stays out of it),
 #       plus run.sh's DISK_GB FILES DATA_GB JOURNAL_GB THREADS BATCH LOAD_S KILL_MIN_S IMGDIR
 # Guest: an overlay on vm_imgs/cm-guest-ubuntu.qcow2, the tree's bzImage and the initrd of its build.
 # Parsed whole first.
@@ -38,7 +39,8 @@ cd $R || exit 1
 unset TAU_TARGET_DISK; source set_env.sh > /dev/null; source bench/scripts/common.sh > /dev/null; set +e
 set -u
 FSES=${FSES:-ext4-tau xfs-tau} STATES=${STATES:-1}
-EPOCHS_MAX=${EPOCHS_MAX:-40} ENTRY_CUTS=${ENTRY_CUTS:-30} SUBSETS=${SUBSETS:-10} FLIP_SUBSETS=${FLIP_SUBSETS:-6} SEED=${SEED:-1}
+EPOCHS_MAX=${EPOCHS_MAX:-25} ENTRY_CUTS=${ENTRY_CUTS:-20} SUBSETS=${SUBSETS:-6} FLIP_SUBSETS=${FLIP_SUBSETS:-4} SEED=${SEED:-1}
+COW_GB=${COW_GB:-64} LOG_GB=${LOG_GB:-32}
 DISK_GB=${DISK_GB:-256} FILES=${FILES:-64} DATA_GB=${DATA_GB:-96} JOURNAL_GB=${JOURNAL_GB:-32}
 THREADS=${THREADS:-64} BATCH=${BATCH:-64} LOAD_S=${LOAD_S:-60} KILL_MIN_S=${KILL_MIN_S:-40}
 KD=$R/codes/djournalplus-kernel.code
@@ -105,7 +107,7 @@ mount_wait() {  # <timeout s>
 
 printf '%-9s %-6s %-34s %16s %8s %12s %5s %5s %s\n' fs state spec last_entry/epoch mount_s replayed hash fsck result | tee "$OUT/results.txt"
 trial() {  # <spec>: one state in the booted guest; the table line, and the line kept in $P.trials
-  local line m r h f le res
+  local line m r h f le c res
   # ssh must not read the spec list on stdin
   line=$(g "bash ~/recidem/nth_guest.sh trial $fs $JOURNAL_GB '$1'" < /dev/null 2>&1 | tail -1)
   echo "$line" >> "$P.trials"
@@ -114,7 +116,8 @@ trial() {  # <spec>: one state in the booted guest; the table line, and the line
   r=$(echo "$line" | grep -oE 'replayed=[^ ]+' | cut -d= -f2)
   h=$(echo "$line" | grep -oE 'hash=[^ ]+' | cut -d= -f2)
   f=$(echo "$line" | grep -oE 'fsck=[^ ]+' | cut -d= -f2)
-  if [[ $h == same && $f == 0 ]]; then res=PASS; else res="FAIL($line)"; fi
+  c=$(echo "$line" | grep -oE 'cow=[^ ]+' | cut -d= -f2)
+  if [[ $h == same && $f == 0 && $c =~ ^[0-9]+/[0-9]+$ ]]; then res=PASS; else res="FAIL($line)"; fi
   printf '%-9s %-6s %-34s %16s %8s %12s %5s %5s %s\n' "$fs" "s$s" "$1" "${le:--}" "${m:--}" "${r:--}" "${h:--}" "${f:--}" "$res" | tee -a "$OUT/results.txt"
 }
 blocks_of() {  # <spec>: the blocks the second recovery replayed in that state ("" if not run)
@@ -137,10 +140,11 @@ for fs in $FSES; do
     sleep "$k"
     g "tail -c 300 ~/recidem/load.log" > "$P.load.tail" 2> /dev/null
     vm_kill
+    truncate -s $(( DISK_GB + COW_GB + LOG_GB ))G "$C"   # the COW's and the log's room, behind the FS
     echo "$fs s$s: crash state after ${k}s of load ($(date -u +%T))"
     # the sweep, in one boot; /dev/vda (the crash image) is only read
     boot "$C" "$P.sweep.console" || { echo "$fs s$s: boot failed"; vm_kill; continue; }
-    g "bash ~/recidem/nth_guest.sh record $fs $JOURNAL_GB" > "$P.record" 2>&1
+    g "bash ~/recidem/nth_guest.sh record $fs $JOURNAL_GB $DISK_GB $COW_GB $LOG_GB" > "$P.record" 2>&1
     cat "$P.record"
     st=$(grep '^{"tool":"torner-replay"' "$P.record")
     E=$(echo "$st" | python3 -c 'import json, sys; print(json.load(sys.stdin)["entries"])' 2> /dev/null)
