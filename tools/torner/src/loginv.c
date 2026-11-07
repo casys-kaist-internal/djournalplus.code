@@ -2520,16 +2520,47 @@ static void check_i4(struct ctx *c, struct viol_out *v, struct i4stat *st)
 			continue;
 		}
 		if (sb->base > prev_base) {
+			uint64_t before = UINT64_MAX, after = UINT64_MAX;
+
 			st->base_moves++;
 			for (m = 0; m < c->mw_n; m++) {
 				const struct mapwrite *w = &c->mw[m];
 				struct dline d = { sb->fepoch, sb->entry_idx };
 
+				if (w->entry_idx < sb->entry_idx &&
+				    sb->entry_idx - w->entry_idx < before)
+					before = sb->entry_idx - w->entry_idx;
+				if (w->entry_idx > sb->entry_idx &&
+				    w->entry_idx - sb->entry_idx < after)
+					after = w->entry_idx - sb->entry_idx;
 				if (w->entry_idx <= lo || w->entry_idx >= sb->entry_idx)
 					continue;
 				n++;
 				if (!durable_by(w->fepoch, w->entry_idx, w->fua, &d))
 					late++;
+			}
+			/*
+			 * The snapshot's own map blocks are the writes next to its
+			 * base move.  If the nearest one follows it, they went out
+			 * after the base -- the previous snapshot's map blocks
+			 * between the two base moves must not stand in for them.
+			 */
+			/* ... unless that write is the unmount's rewrite: the
+			 * superblock goes out again with the same base after it */
+			if (n && after < before) {
+				uint64_t at = sb->entry_idx + after;
+				size_t q;
+
+				for (q = k + 1; q < c->sbw_n; q++) {
+					if (c->sbw[q].entry_idx <= at)
+						continue;
+					if (c->sbw[q].sequence == sb->sequence &&
+					    c->sbw[q].base == sb->base)
+						after = UINT64_MAX;
+					break;
+				}
+				if (after < before)
+					n = 0;
 			}
 			if (!n || late) {
 				st->violations++;
@@ -2539,8 +2570,8 @@ static void check_i4(struct ctx *c, struct viol_out *v, struct i4stat *st)
 					       ",\"map_writes\":%zu,\"not_durable\":%zu}",
 					       n ? "map blocks not durable before the superblock"
 						   " moved the map log's base" :
-						   "the map log's base moved with no map block"
-						   " written since the superblock before",
+						   "the map log's base moved before its snapshot's"
+						   " map blocks were written",
 					       sb->entry_idx, sb->base, n, late);
 			}
 			prev_base = sb->base;

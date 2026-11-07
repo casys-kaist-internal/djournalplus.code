@@ -171,6 +171,12 @@ want_has '"i4_base_moves":1' "  ...one base move checked"
 run i4-base-early tau-ext4 --check I1,I4
 want_rc 2 "I4: the base moved before the map blocks"
 want_has '"invariant":"I4"' "  ...reported as I4"
+run i4-base-twice-ok tau-ext4 --check I1,I4
+want_rc 0 "I4: two snapshots, each with its map blocks first"
+want_has '"i4_base_moves":2' "  ...both base moves checked"
+run i4-base-twice-early tau-ext4 --check I1,I4
+want_rc 2 "I4: two early snapshots: the first one's map blocks do not cover the second"
+want_has '"i4_violations":2' "  ...both flagged"
 run i4-reuse-ok tau-ext4 --check I1,I4
 want_rc 0 "I4: a claimed segment reused after its FREE"
 want_has '"i4_segment_reuses":3' "  ...its descriptor, data and commit blocks reused"

@@ -592,6 +592,18 @@ def build_i234(kind, path):
         if kind == "i4-base-ok":
             log.barrier(LOG_FLUSH_FLAG)
             log.write(TAU_SB_LBA, tau_superblock(sequence=1, base=5), flags=LOG_FUA_FLAG)
+    elif kind in ("i4-base-twice-ok", "i4-base-twice-early"):
+        # two snapshots in one mount: the second one's map blocks must not be
+        # vouched for by the first one's, which (early) follow its base move
+        jb = tx(log, 42, jb, [5000], tail=(42, TAU_SEG_PBA))
+        for base in (5, 9):
+            log.barrier(LOG_FLUSH_FLAG)
+            if kind == "i4-base-twice-early":
+                log.write(TAU_SB_LBA, tau_superblock(sequence=1, base=base), flags=LOG_FUA_FLAG)
+            log.write(TAU_SB_LBA + 1, tau_segment_map([TAU_SEG_PBA]), flags=LOG_FUA_FLAG)
+            if kind == "i4-base-twice-ok":
+                log.write(TAU_SB_LBA, tau_superblock(sequence=1, base=base), flags=LOG_FUA_FLAG)
+            jb = tx(log, 43 + base, jb, [5001 + base], tail=(43 + base, jb))
     elif kind in ("i4-reuse-ok", "i4-reuse-nofree"):
         # the segment was claimed on the map log; its next owner writes it
         # again -- only after a FREE naming it is complete
@@ -636,6 +648,7 @@ if __name__ == "__main__":
                          "i5-jbd2-ok|i5-jbd2-split|i5-tau-ok|i5-tau-split|"
                          "claim-ok|claim-late|i2-ok|i2-uncovered|i2-handoff|"
                          "i3-ok|i3-late|tailblk-bad|i4-base-ok|i4-base-early|"
-                         "i4-reuse-ok|i4-reuse-nofree|"
+                         "i4-reuse-ok|i4-reuse-nofree|i4-base-twice-ok|"
+                         "i4-base-twice-early|"
                          "datalog|atomslog|unit} <out>")
     build(sys.argv[1], sys.argv[2])
