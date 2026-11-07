@@ -29,6 +29,8 @@ SCRATCH="${SCRATCH:-$HERE/vm_imgs/torner-scratch.raw}"
 SCRATCH_SIZE="${SCRATCH_SIZE:-32G}"
 SRCDISK="${SRCDISK:-$HERE/vm_imgs/torner-src.raw}"
 ROOTFS="${ROOTFS:-$HERE/vm_imgs/qemu-image_2404.qcow2}"
+# more kernel command line, e.g. tau_journal.tau_shrink_seeks=32
+KCMDLINE="${KCMDLINE:-}"
 
 # tools/bin's build if there is one, else the one on PATH
 if [ -z "${QEMU:-}" ]; then
@@ -90,7 +92,7 @@ EOF
 exec "$QEMU" \
 	-kernel "$KERNEL/arch/x86/boot/bzImage" \
 	-initrd "$INITRD" \
-	-append "root=/dev/sda rw console=ttyS0" \
+	-append "root=/dev/sda rw console=ttyS0${KCMDLINE:+ $KCMDLINE}" \
 	-cpu host \
 	-smp "cpus=$CORES" \
 	-m "$MEM" \

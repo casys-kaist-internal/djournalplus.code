@@ -155,16 +155,38 @@ fs_max_jobs() {
 	esac
 }
 
+# Every ext4 is made without lazy init (the user, 11-08). With it, ext4lazyinit
+# zeroes the inode tables after the mount, with a bare flush per group, inside
+# the run window, and those flushes can cover an ordering bug: tau_segmap_fua_only
+# showed on tau-ext4 only without them (11-07). TORNER_EXT4_LAZYINIT=1 formats
+# as every capture before 11-08 did.
+EXT4_NOLAZY=lazy_itable_init=0,lazy_journal_init=0
+ext4_opts() {	# <mkfs options>: the same with EXT4_NOLAZY in their -E list
+	local o="$1"
+	if [ "${TORNER_EXT4_LAZYINIT:-0}" = 1 ]; then echo "$o"; return; fi
+	case "$o" in
+	*lazy_itable_init*|*lazy_journal_init*) echo "$o" ;;
+	# mke2fs keeps only the last -E: a second one would drop tau_segsize
+	*"-E "*) echo "${o/-E /-E $EXT4_NOLAZY,}" ;;
+	*) echo "${o:+$o }-E $EXT4_NOLAZY" ;;
+	esac
+}
+
 fs_setup() {
 	local fs="$1" dev="$2"
 
 	fs_mount_opts "$fs" || return 1
 	case "$fs" in
-	ext4|ext4-data|ext4-dioread-lock|ext4-nodelalloc)	mkfs.ext4 -q -F "$dev" ;;
+	ext4|ext4-data|ext4-dioread-lock|ext4-nodelalloc|tau-ext4)
+		# for capture.json: the options beyond -q -F (-b 4096 for tau)
+		FS_MKFS_DESC=$(ext4_opts "$([ "$fs" = tau-ext4 ] && echo "${TORNER_TAU_MKFS_OPTS:-}")") ;;
+	esac
+	case "$fs" in
+	ext4|ext4-data|ext4-dioread-lock|ext4-nodelalloc)	mkfs.ext4 -q -F $FS_MKFS_DESC "$dev" ;;
 	# the tau superblock check requires 4 KiB blocks.  TORNER_TAU_MKFS_OPTS
 	# reaches the tau journal's geometry, e.g. "-E tau_segsize=1m" (ext4) or
 	# "-l tjsegsize=1m" (xfs): small segments make reuse reachable
-	tau-ext4)	mkfs.ext4 -q -F -b 4096 ${TORNER_TAU_MKFS_OPTS:-} "$dev" ;;
+	tau-ext4)	mkfs.ext4 -q -F -b 4096 $FS_MKFS_DESC "$dev" ;;
 	xfs)		mkfs.xfs -f -q "$dev" ;;
 	tau-xfs)	mkfs.xfs -f -q ${TORNER_TAU_MKFS_OPTS:-} "$dev" ;;
 	btrfs)		mkfs.btrfs -f -q "$dev" ;;

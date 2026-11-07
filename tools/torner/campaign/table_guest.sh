@@ -17,12 +17,21 @@
 #   GEN_EXTRA        more `torner gen` arguments for every capture: --fdatasync
 #                    (an overwrite's record then takes its own flush, no host commit)
 #   TAG              suffix of the capture names
+#   CAPTURE_NOSYNC   [1] unmount with no sync before it; 0 syncs first (before 11-08)
+#   TORNER_EXT4_LAZYINIT  [0] every ext4 made with lazy init off; 1 on (before 11-08)
+#   CAP_RESERVE_MB   guest memory held back as 2 MiB hugepages during each capture
+#                    only (given back before explore): the capture then runs short
+#                    of memory, so reclaim runs and asks the tau shrinker
 # A tau capture also leaves tau-probe.txt: its run's probe counters, i.e. how often
 # a reuse found its segment's free not yet on the map log, and how often a writer
 # waited for journal space.  They show whether the cell reached those paths at all.
 # tau-probe-samples.txt has them every 0.2 s, with whether torner gen was running:
 # gen fills the file before its timed run, and explore crashes only inside that
 # run, so cell_csv.py counts the run's own reuses from the samples.
+# capture.json says how often reclaim asked the tau shrinker while gen ran: calls
+# of its count and scan callbacks (shrink_count, shrink_scan), from the function
+# profiler. Reclaim scans a shrinker in proportion to 1/seeks (tau_shrink_seeks),
+# and every scan kicks a checkpoint.
 # Ends with "===== done".
 set -u
 T=~/torner; S=$T/scripts; C=$T/campaign; W=/mnt/scratch; P=/sys/module/tau_journal/parameters
@@ -31,6 +40,8 @@ LIMIT_ATOM=${LIMIT_ATOM:-1000}; LIMIT_EPOCH=${LIMIT_EPOCH:-1000}
 PREFER_SPLIT=${PREFER_SPLIT:-0}; CAP_PARAM=${CAP_PARAM:-}; EXPLORE_PARAM=${EXPLORE_PARAM:-}
 STRATS=${STRATS:-row}
 TAU_SEG=${TAU_SEG:-2m}; GEN_EXTRA=${GEN_EXTRA:-}; TAG=${TAG:-}
+CAPTURE_NOSYNC=${CAPTURE_NOSYNC:-1}; TORNER_EXT4_LAZYINIT=${TORNER_EXT4_LAZYINIT:-0}
+CAP_RESERVE_MB=${CAP_RESERVE_MB:-0}
 SYS=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 MK=/mnt/scratch/stock/etc/mke2fs.conf
 CSV=$W/table.csv
@@ -127,6 +138,10 @@ probes_sample() {
 }
 
 echo "===== start $(uname -r) $(uname -v)  $(date +%T)"
+echo "cmdline: $(cat /proc/cmdline)  tau_shrink_seeks: $(cat $P/tau_shrink_seeks 2>/dev/null || echo -)"
+echo "captures: unmount $([ "$CAPTURE_NOSYNC" = 1 ] && echo "with no sync" || echo "after a sync")," \
+	"ext4 lazy init $([ "$TORNER_EXT4_LAZYINIT" = 1 ] && echo on || echo off)$([ "$CAP_RESERVE_MB" -gt 0 ] &&
+	echo ", $CAP_RESERVE_MB MiB held back while gen runs")"
 [ -s $CSV ] || python3 $C/cell_csv.py --header > $CSV
 for cell in $CELLS; do
 	fs=${cell%%:*} row=${cell#*:}
@@ -144,7 +159,7 @@ for cell in $CELLS; do
 			{ echo "unknown profile $prof"; continue; }
 		name=$fs-$row-$prof${TAG:+-$TAG}; D=$W/cap-$name
 		sudo rm -rf $D
-		echo "===== $name capture $(date +%T)${CAP_PARAM:+  $CAP_PARAM}${EXPLORE_PARAM:+  explore $EXPLORE_PARAM}${GEN_EXTRA:+  gen $GEN_EXTRA}"
+		echo "===== $name capture $(date +%T)${CAP_PARAM:+  $CAP_PARAM}${EXPLORE_PARAM:+  explore $EXPLORE_PARAM}${GEN_EXTRA:+  gen $GEN_EXTRA}$([ "$CAP_RESERVE_MB" -gt 0 ] && echo "  reserve ${CAP_RESERVE_MB} MiB")"
 		undo=
 		if [ -n "$CAP_PARAM" ]; then
 			undo=$(setps "$CAP_PARAM") || { echo "cell skipped"; continue; }
@@ -152,7 +167,8 @@ for cell in $CELLS; do
 		spid=
 		case $fs in tau-*) probes_zero; probes_sample $W/$name-probe-samples.txt & spid=$! ;; esac
 		sudo env PATH=$path MKE2FS_CONFIG=$MK TORNER_TAU_MKFS_OPTS="$mkfs" \
-			CAPTURE_NOSYNC=${CAPTURE_NOSYNC:-0} $S/capture.sh --workdir $D \
+			CAPTURE_NOSYNC=$CAPTURE_NOSYNC TORNER_EXT4_LAZYINIT=$TORNER_EXT4_LAZYINIT \
+			TORNER_RESERVE_MB=$CAP_RESERVE_MB $S/capture.sh --workdir $D \
 			--fs $fs --threads 1 --fsync-every 1 $args --gen-args "$gen" \
 			> $W/$name-capture.log 2>&1
 		rc=$?
@@ -166,7 +182,7 @@ for cell in $CELLS; do
 		esac
 		[ -z "$undo" ] || setps "$undo" >/dev/null
 		echo "capture rc=$rc  $(grep -m1 -oE 'mkfs.ext4=[^ ]*|mkfs.xfs=[^ ]*' $D/capture.json 2>/dev/null)"
-		grep -E "application writes" $W/$name-capture.log
+		grep -E "application writes|tau shrinker during gen|holding back" $W/$name-capture.log
 		[ $rc = 0 ] || continue
 		# what the cell is, for cell_csv.py run again later on the host
 		printf '{"row":"%s","profile":"%s","tag":"%s","cap_param":"%s","explore_param":"%s","gen_extra":"%s"}\n' \

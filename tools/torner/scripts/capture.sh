@@ -17,6 +17,17 @@
 #
 # Needs root for losetup/dmsetup/mount.  Everything it creates lives under
 # --workdir and is torn down on exit; no persistent device is touched.
+#
+# Environment:
+#   CAPTURE_NOSYNC [1]   unmount with no sync(2) before it; 0 syncs first, as
+#                        every capture before 11-08 did
+#   TORNER_EXT4_LAZYINIT [0]  every ext4 made with lazy init off; 1 on (fsmap.sh)
+#   TORNER_TAU_MKFS_OPTS the tau journal's mkfs options (fsmap.sh)
+#   TORNER_RESERVE_MB    guest memory held back as 2 MiB hugepages while gen
+#                        runs, so that reclaim runs and asks the tau shrinker
+# capture.json records the unmount sync, the mkfs options, the kernel command
+# line and the tau module's parameters, and how often reclaim called the tau
+# shrinker during gen (its count and scan callbacks, the function profiler).
 
 set -u
 
@@ -103,7 +114,10 @@ done
 die() { echo "capture.sh: $*" >&2; exit 1; }
 say() { echo "[capture] $*" >&2; }
 
+TR=/sys/kernel/tracing; SHRINK=""; RESERVED=0
 cleanup() {
+	[ "$RESERVED" = 0 ] || echo 0 > /proc/sys/vm/nr_hugepages
+	[ -z "$SHRINK" ] || { echo 0 > $TR/function_profile_enabled; echo > $TR/set_ftrace_filter; }
 	[ "$KEEP_STACK" = 1 ] && return
 	fs_is_zfs "$FS" && fs_zfs_export
 	[ -n "$MNT" ] && mountpoint -q "$MNT" && umount "$MNT" 2>/dev/null
@@ -204,6 +218,32 @@ say "running torner gen: mode=$MODE threads=$THREADS unit=$UNIT pages=$PAGES dur
 # --mark-dev stamps the progress-log position into the log stream.  Replayed
 # states need it to know which progress records they are answerable for; see
 # the comment on emit_mark() in gen.c.
+#
+# While gen runs: count the tau shrinker's callbacks (only those two functions
+# are profiled; an empty filter would profile every function, so no filter, no
+# profile), and hold TORNER_RESERVE_MB back as hugepages -- given back when gen
+# ends, before the unmount and loginv. Reclaim scans a shrinker in proportion
+# to 1/seeks, and each tau scan kicks a checkpoint.
+SHRINK_FNS="tau_journal_shrink_count tau_journal_shrink_scan"
+[ -d /sys/module/tau_journal ] && [ ! -e $TR/function_profile_enabled ] &&
+	mount -t tracefs nodev $TR 2>/dev/null
+if [ -d /sys/module/tau_journal ] && [ -e $TR/function_profile_enabled ]; then
+	echo 0 > $TR/function_profile_enabled
+	echo "$SHRINK_FNS" > $TR/set_ftrace_filter 2>/dev/null
+	if [ "$(sort $TR/set_ftrace_filter | tr '\n' ' ')" = "$SHRINK_FNS " ]; then
+		SHRINK=on; echo 1 > $TR/function_profile_enabled	# enabling resets the counts
+	else
+		echo > $TR/set_ftrace_filter; say "no function profile of the tau shrinker"
+	fi
+fi
+if [ "${TORNER_RESERVE_MB:-0}" -gt 0 ]; then
+	sync; echo 3 > /proc/sys/vm/drop_caches
+	[ -w /proc/sys/vm/compact_memory ] && echo 1 > /proc/sys/vm/compact_memory
+	echo $((TORNER_RESERVE_MB / 2)) > /proc/sys/vm/nr_hugepages
+	RESERVED=$(( $(cat /proc/sys/vm/nr_hugepages) * 2 ))
+	say "holding back $RESERVED of $TORNER_RESERVE_MB MiB as hugepages while gen runs:" \
+		"MemAvailable $(awk '/^MemAvailable/ {print int($2 / 1024)}' /proc/meminfo) MiB"
+fi
 GEN_JSON=$("$TORNER" gen --file "$MNT/torner.dat" --progress-log "$LOOP_PROG" \
 	--progress-direct --run-id "$RUN_ID" --mode "$MODE" --threads "$THREADS" \
 	--pages "$PAGES" --unit "$UNIT" --duration "$DURATION" \
@@ -211,11 +251,24 @@ GEN_JSON=$("$TORNER" gen --file "$MNT/torner.dat" --progress-log "$LOOP_PROG" \
 	--mark-dev "$DM_NAME" --mark-every "$MARK_EVERY" $UNTORN $GEN_ARGS) \
 	|| die "torner gen failed"
 echo "$GEN_JSON"
+[ "$RESERVED" = 0 ] || echo 0 > /proc/sys/vm/nr_hugepages
+SHRINK_COUNT=""; SHRINK_SCAN=""
+if [ -n "$SHRINK" ]; then
+	echo 0 > $TR/function_profile_enabled
+	read -r SHRINK_COUNT SHRINK_SCAN < <(cat $TR/trace_stat/function* | awk '
+		$1 == "tau_journal_shrink_count" { c += $2 }
+		$1 == "tau_journal_shrink_scan" { s += $2 }
+		END { print c + 0, s + 0 }')
+	echo > $TR/set_ftrace_filter; SHRINK=""
+	say "the tau shrinker during gen: count called $SHRINK_COUNT times, scan $SHRINK_SCAN"
+fi
 
-# CAPTURE_NOSYNC=1 unmounts straight after the workload: then the file system's
-# own unmount writes everything out, with no sync(2) -- whose writeback and final
-# flush can cover what unmount would otherwise leave unflushed -- before it.
-[ "${CAPTURE_NOSYNC:-0}" = 1 ] || sync
+# Unmount straight after the workload (the user, 11-08: every capture): the file
+# system's own unmount writes everything out, with no sync(2) before it -- whose
+# writeback and final flush can cover what unmount would otherwise leave
+# unflushed. CAPTURE_NOSYNC=0 syncs first, as every capture before 11-08 did.
+UMOUNT_SYNC=0; [ "${CAPTURE_NOSYNC:-1}" = 1 ] || UMOUNT_SYNC=1
+[ $UMOUNT_SYNC = 0 ] || sync
 if fs_is_zfs "$FS"; then
 	fs_zfs_export || die "zpool export"
 else
@@ -237,10 +290,17 @@ echo "$STAT"
 TOOLS=$(for t in mkfs.ext4 mkfs.xfs e2fsck xfs_repair; do
 	printf '%s=%s ' "$t" "$(command -v $t)"; done)
 fs_is_zfs "$FS" && TOOLS="$TOOLS zpool=$(command -v zpool) $(zfs version 2>/dev/null | tr '\n' ' ')"
+# the tau module's settings during the run (kernel command line ones such as
+# tau_shrink_seeks, a control's switch), not its probe counters
+TAU_PARAMS=$(cd /sys/module/tau_journal/parameters 2>/dev/null && for p in *; do
+	case $p in tau_probe_*) ;; *) printf '%s=%s ' "$p" "$(cat "$p" 2>/dev/null)" ;; esac; done)
 cat > "$WORKDIR/capture.json" <<EOF
 {"fs":"$FS","mode":"$MODE","threads":$THREADS,"pages":$PAGES,"unit":$UNIT,
  "kernel":"$(uname -r) $(uname -v)","mount_opts":"$FS_MOUNT_OPTS",
- "mkfs_opts":"${TORNER_TAU_MKFS_OPTS:-${FS_MKFS_DESC:-}}","tools":"${TOOLS% }",
+ "mkfs_opts":"${FS_MKFS_DESC:-${TORNER_TAU_MKFS_OPTS:-}}","tools":"${TOOLS% }",
+ "unmount_sync":$UMOUNT_SYNC,"cmdline":"$(tr -d '"\\' < /proc/cmdline)",
+ "tau_params":"${TAU_PARAMS% }","reserve_mb":$RESERVED,
+ "shrink_count":"$SHRINK_COUNT","shrink_scan":"$SHRINK_SCAN",
  "gen_args":"$GEN_ARGS",
  "duration_s":$DURATION,"fsync_every":$FSYNC_EVERY,"run_id":$RUN_ID,
  "dev_size":"$DEV_SIZE","write_cache":"$WC","file":"torner.dat",

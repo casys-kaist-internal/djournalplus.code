@@ -434,7 +434,8 @@ capture) while I1's attribution stays silent (no block missing) — which is why
 (a) is checked on its own; `tau_segmap_fua_only` fails I2 at the unmount
 snapshot on tau-xfs (4 and 20 blocks).  On tau-ext4 it shows only with
 `MKFS_OPTS="-E tau_segsize=2m,lazy_itable_init=0,lazy_journal_init=0"` and
-`CAPTURE_NOSYNC=1` (16 blocks each; 0 without the knob): otherwise
+`CAPTURE_NOSYNC=1` (16 blocks each; 0 without the knob), the capture defaults
+from 2026-11-08 (The harness, below): otherwise
 ext4lazyinit's zeroing (a bare flush per inode table group) and the `sync`
 before unmount flush the last home writes first, and the final checkpoint has
 nothing left.  Those ext4-side flushes make writes durable earlier than tau
@@ -661,6 +662,32 @@ table in four VMs (the tau tree for the tau columns, `build_basevm.sh`'s build o
 the performance baseline for the others) and `cell_csv.py` / `paper_table.py`
 summarize it.  Baseline columns are formatted with the stock e2fsprogs/xfsprogs
 of `bench/workspace/stock`, tau columns with the forks.
+
+**Capture settings from 2026-11-08** (the user's decision): every ext4, tau and
+baseline alike, is made with `lazy_itable_init=0,lazy_journal_init=0` (merged
+into the one `-E` list, since mke2fs keeps only the last `-E`), and the capture
+unmounts with no `sync` before it.  Before, ext4lazyinit's zeroing (a bare
+flush per inode table group, inside the run window) and the sync's writeback
+and flush made writes durable earlier than the file system orders them; the
+loginv paragraph above has the control that showed it.  `TORNER_EXT4_LAZYINIT=1`
+and `CAPTURE_NOSYNC=0` capture as before.  `capture.json` records both
+(`mkfs_opts`, `unmount_sync`), the kernel command line and the tau module's
+parameters (`tau_params`), and table.csv has them as columns
+(`unmount_sync`, `seeks`); `summary.md` lists the settings of every capture it
+merges, since earlier captures differ.
+
+On tau, `capture.sh` also counts how often reclaim called the tau shrinker
+while gen ran (`shrink_count`: its count callback, reclaim asking;
+`shrink_scan`: its scan callback, each a checkpoint kick), with the function
+profiler on just those two functions.  Reclaim scans a shrinker in proportion
+to 1/seeks, so this is where `tau_shrink_seeks` shows.  `TORNER_RESERVE_MB`
+(`CAP_RESERVE_MB` in table.sh, `reserve=` in a full.sh entry) holds that much
+guest memory back as 2 MiB hugepages while gen runs, after dropping the page
+cache, and gives it back before the unmount: a 10 GiB guest otherwise reclaims
+only by accident, once earlier cells' explores have filled its page cache.
+`KCMDLINE` adds to every VM's kernel command line (`table.sh`,
+`tools/crashmonkey/run_tau_suite.sh`), and the boot log shows
+`/proc/cmdline` and `tau_shrink_seeks`.
 
 The input surface is explored by `scripts/fuzz.py`, which drives the two
 scripts above in a loop:

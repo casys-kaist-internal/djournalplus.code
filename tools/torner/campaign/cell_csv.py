@@ -42,6 +42,14 @@ capture.json, atoms.json, states-<strategy>.jsonl -- and says, for that
                   transaction; on ext4/xfs with no data journal it is the bio,
                   and i5_split counts writes spanning more than one
 
+  unmount_sync    capture.json: 1 when a sync(2) came before the unmount (every
+                  capture before 11-08), 0 when not; blank: not recorded
+  seeks           tau_shrink_seeks during the capture (capture.json's tau_params)
+  shrink_count, shrink_scan   calls of the tau shrinker's callbacks while gen
+                  ran: how often reclaim asked, and how often it scanned (each
+                  scan kicks a checkpoint); blank: not recorded
+  reserve_mb      memory held back as hugepages while gen ran (set-reclaim)
+
 A 2 KiB append alternates a write that starts a block (even page) with one
 inside the block the previous write allocated (odd page); --row ap2k splits
 the per-write counts, and the pages any violation names, that way.
@@ -66,7 +74,8 @@ FIELDS = ("config", "row", "profile", "tag", "kernel", "mount_opts", "mkfs_opts"
           "i1_gate_closed", "i1_violations",
           "i5_checked", "i5_split", "i5_split_run", "i5_partial", "i5_no_unit",
           "i2_blocks", "i2_uncovered", "i2_leads", "i3_tags", "i3_violations",
-          "i4_reuses", "i4_violations")
+          "i4_reuses", "i4_violations",
+          "unmount_sync", "seeks", "shrink_count", "shrink_scan", "reserve_mb")
 
 
 def wilson_hi(k, n, z=1.96):
@@ -212,6 +221,10 @@ def summarize(cap, row, profile):
                capture=os.path.abspath(cap))
     for k in ("one_bio", "split_window", "split_flush", "partial"):
         out[k] = aj.get("shape", {}).get(k, "")
+    tp = dict(x.split("=", 1) for x in cj.get("tau_params", "").split() if "=" in x)
+    out.update(unmount_sync=cj.get("unmount_sync", ""), seeks=tp.get("tau_shrink_seeks", ""),
+               shrink_count=cj.get("shrink_count", ""), shrink_scan=cj.get("shrink_scan", ""),
+               reserve_mb=cj.get("reserve_mb", ""))
 
     states = unmount = unjudged = vc = vs = vd = p3 = p3na = 0
     targeted, torn = set(), set()
@@ -294,6 +307,10 @@ def main():
     if a.header:
         w.writeheader()
     for cap in a.captures:
+        # a capture that failed (torner gen, say) leaves its directory with no capture.json
+        if not os.path.exists(os.path.join(cap, "capture.json")):
+            print("cell_csv: %s: no capture.json (the capture failed), skipped" % cap, file=sys.stderr)
+            continue
         w.writerow(summarize(cap, a.row, a.profile))
 
 

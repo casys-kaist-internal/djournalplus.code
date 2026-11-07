@@ -6,8 +6,14 @@
 #   usage: table.sh <kernel tree> <out dir>
 #   env:   CELLS (required), PROFILES, LIMIT_ATOM, LIMIT_EPOCH, PREFER_SPLIT,
 #          CAP_PARAM, EXPLORE_PARAM, TAU_SEG, MKFS_OPTS, GEN_EXTRA, TAG,
-#          STRATS (row | none: capture only | a list), CAPTURE_NOSYNC (1: unmount
-#          with no sync before it) -- passed to table_guest.sh
+#          STRATS (row | none: capture only | a list), CAPTURE_NOSYNC [1: unmount
+#          with no sync before it; 0: sync first, as before 11-08],
+#          TORNER_EXT4_LAZYINIT [0: every ext4 made with lazy init off; 1: on,
+#          as before 11-08], CAP_RESERVE_MB: guest memory held back as hugepages
+#          during each capture, so reclaim runs and asks the tau shrinker
+#          -- passed to table_guest.sh
+#          KCMDLINE: more kernel command line (tau_journal.tau_shrink_seeks=32);
+#          the guest's /proc/cmdline must show it
 #          PORT [5556], GDB_PORT [1236], NAME [table]: two calls with different
 #          ones run side by side; DEADLINE_MIN [600]; MEM [16G]
 #          ZFS_KIT: build_zfs.sh's kit (spl/zfs modules for the basevm kernel,
@@ -62,11 +68,11 @@ OV=$OVDIR/$NAME-overlay.qcow2; SD=$SCR/$NAME-scratch.raw
 rm -f "$OV" "$SD"
 qemu-img create -q -f qcow2 -b "$BASE" -F qcow2 "$OV" || exit 1
 
-echo "===== boot $(date '+%F %T')  $KV"
+echo "===== boot $(date '+%F %T')  $KV${KCMDLINE:+  cmdline +$KCMDLINE}"
 echo "cells: $CELLS"
 echo "base: $BASE"
 INITRD=$V/initrd.img-6.8.0tjournal+ ROOTFS=$OV SCRATCH=$SD SCRATCH_SIZE=24G \
-	SSH_PORT=$PORT GDB_PORT=$GDB_PORT TAUFS_KERNEL=$KD MEM=${MEM:-16G} \
+	SSH_PORT=$PORT GDB_PORT=$GDB_PORT TAUFS_KERNEL=$KD MEM=${MEM:-16G} KCMDLINE="${KCMDLINE:-}" \
 	sg kvm -c "bash $R/tools/qemu/run_vm_torner.sh" > "$OUT/console.log" 2>&1 < /dev/null &
 qpid=$!
 # whatever ends the run, the VM goes down and its overlay and scratch go away
@@ -130,15 +136,24 @@ done
 /mnt/scratch/stock/bin/mkfs.xfs -V; /mnt/scratch/stock/bin/mke2fs -V 2>&1 | head -1
 cat /sys/block/vda/queue/write_cache
 df -h /mnt/scratch | tail -1
+echo "cmdline: $(cat /proc/cmdline)"
+if [ -e /sys/module/tau_journal/parameters/tau_shrink_seeks ]; then
+	echo "tau_shrink_seeks: $(cat /sys/module/tau_journal/parameters/tau_shrink_seeks)"
+fi
 EOF
 rc=$?; cat "$OUT/setup.log"; [ $rc = 0 ] || die "guest setup failed"
+if [ -n "${KCMDLINE:-}" ]; then
+	grep "^cmdline: " "$OUT/setup.log" | grep -qF -- " $KCMDLINE" ||
+		die "the guest's command line does not have $KCMDLINE"
+fi
 
 g "setsid nohup env CELLS='$CELLS' PROFILES='${PROFILES:-quiet busy}' \
 	LIMIT_ATOM=${LIMIT_ATOM:-1000} LIMIT_EPOCH=${LIMIT_EPOCH:-1000} \
 	PREFER_SPLIT=${PREFER_SPLIT:-0} CAP_PARAM='${CAP_PARAM:-}' EXPLORE_PARAM='${EXPLORE_PARAM:-}' \
 	TAU_SEG='${TAU_SEG:-2m}' \
 	MKFS_OPTS='${MKFS_OPTS:-}' GEN_EXTRA='${GEN_EXTRA:-}' \
-	TAG='${TAG:-}' STRATS='${STRATS:-row}' CAPTURE_NOSYNC='${CAPTURE_NOSYNC:-0}' \
+	TAG='${TAG:-}' STRATS='${STRATS:-row}' CAPTURE_NOSYNC='${CAPTURE_NOSYNC:-1}' \
+	TORNER_EXT4_LAZYINIT='${TORNER_EXT4_LAZYINIT:-0}' CAP_RESERVE_MB='${CAP_RESERVE_MB:-0}' \
 	bash ~/torner/campaign/table_guest.sh > /mnt/scratch/table_guest.log 2>&1 < /dev/null &"
 deadline=$(( $(date +%s) + ${DEADLINE_MIN:-600} * 60 ))
 while :; do
