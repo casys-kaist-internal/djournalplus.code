@@ -407,6 +407,70 @@ def build_atomslog(path):
     log.dump(path)
 
 
+# ---- I5: one application write against the durable units ------------------
+#
+# A 16 KiB unit (page 0, version 1) of four 4 KiB sectors, journaled either in
+# one transaction or split across two.  On ext4 data=journal the unit is the
+# jbd2 transaction, on tau the tau transaction.
+
+JBD2_SB_LBA = 2000
+JBD2_INCOMPAT = 0x12            # CSUM_V3 | 64BIT, as ext4 with metadata_csum mounts it
+
+
+def jbd2_superblock(incompat=JBD2_INCOMPAT):
+    b = bytearray(FSBLK)
+    struct.pack_into(">III", b, 0, TAU_MAGIC, 4, 0)       # SUPERBLOCK_V2
+    struct.pack_into(">III", b, 12, FSBLK, 1024, 1)       # blocksize, maxlen, first
+    struct.pack_into(">I", b, 0x28, incompat)
+    return bytes(b)
+
+
+def jbd2_descriptor(tid, homes):
+    """tag3 (16 bytes: blocknr, flags be32, blocknr_high, checksum), the UUID
+    after the first tag, a 4-byte tail."""
+    b = bytearray(FSBLK)
+    struct.pack_into(">III", b, 0, TAU_MAGIC, 1, tid)
+    off = 12
+    for i, blk in enumerate(homes):
+        flags = (8 if i == len(homes) - 1 else 0) | (2 if i else 0)
+        struct.pack_into(">IIII", b, off, blk & 0xFFFFFFFF, flags, blk >> 32, 0)
+        off += 16
+        if not i:
+            off += 16
+    return bytes(b)
+
+
+def build_i5(kind, path):
+    log = Log()
+    unit = [torner_sector(0, 1, k) for k in range(4)]
+    if kind.startswith("i5-jbd2"):
+        log.write(JBD2_SB_LBA, jbd2_superblock(0))       # mke2fs: no features yet
+        log.write(JBD2_SB_LBA, jbd2_superblock())        # the mount sets them
+        groups = [[0, 1], [2, 3]] if kind == "i5-jbd2-split" else [[0, 1, 2, 3]]
+        jb = JBD2_SB_LBA + 1
+        for tid, g in enumerate(groups, 1):
+            log.write(jb, jbd2_descriptor(tid, [6000 + k for k in g]))
+            for n, k in enumerate(g):
+                log.write(jb + 1 + n, unit[k])
+            log.barrier(LOG_FLUSH_FLAG)
+            log.write(jb + 1 + len(g), jbd2_commit(tid), flags=LOG_FUA_FLAG)
+            jb += 2 + len(g)
+    else:
+        log.write(TAU_SB_LBA, tau_superblock())
+        log.write(TAU_SB_LBA + 1, tau_segment_map([TAU_SEG_PBA]))
+        groups = [[0, 1], [2, 3]] if kind == "i5-tau-split" else [[0, 1, 2, 3]]
+        jb = TAU_SEG_PBA
+        for seq, g in enumerate(groups, 42):
+            log.write(jb, tau_descriptor(seq=seq, ino=12, tags=[5000 + k for k in g]))
+            for n, k in enumerate(g):
+                log.write(jb + 1 + n, unit[k])
+            log.barrier(LOG_FLUSH_FLAG)
+            log.write(jb + 1 + len(g), tau_commit(seq=seq, ino=12, epoch=0),
+                      flags=LOG_FUA_FLAG)
+            jb += 2 + len(g)
+    log.dump(path)
+
+
 def build_unit(path):
     """One intact unit for the sector round-trip test: page 0, version 1."""
     with open(path, "wb") as f:
@@ -420,6 +484,8 @@ def build(kind, path):
         build_atomslog(path)
     elif kind == "unit":
         build_unit(path)
+    elif kind.startswith("i5-"):
+        build_i5(kind, path)
     else:
         build_tau(kind, path)
 
@@ -429,5 +495,6 @@ if __name__ == "__main__":
         raise SystemExit("usage: mklog.py {good|no-barrier|no-flags|fua-not-flush|"
                          "gated-ok|gated-late|gate-closed|xfs-gated-ok|"
                          "fua-first|fua-first-nofree|home-ok|home-late|"
+                         "i5-jbd2-ok|i5-jbd2-split|i5-tau-ok|i5-tau-split|"
                          "datalog|atomslog|unit} <out>")
     build(sys.argv[1], sys.argv[2])

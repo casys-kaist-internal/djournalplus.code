@@ -118,8 +118,19 @@ struct appsec {
 	uint64_t version;
 	uint64_t entry_idx;
 	uint64_t epoch;
+	uint64_t fepoch;
+	uint64_t lba;		/* the block it sits in */
 	uint32_t sector_idx;
 	uint32_t spu;
+};
+
+/* A block write that belongs to a durable unit, for I5: a tau transaction
+ * (unit = its commit's index in jb[]) or a jbd2 transaction (unit = its tid,
+ * entry = where its descriptor was logged). */
+struct owner {
+	uint64_t lba;
+	uint64_t entry_idx;
+	uint64_t unit;
 };
 
 struct region {
@@ -154,6 +165,14 @@ struct ctx {
 	struct hcommit *hc;	size_t hc_n, hc_cap;
 	struct segfree *sf;	size_t sf_n, sf_cap;
 	struct appsec *as;	size_t as_n, as_cap;
+	struct owner *own;	size_t own_n, own_cap;	/* I5: block writes -> unit */
+
+	/* ext4 data=journal: the jbd2 journal, for I5 */
+	int	 have_jgeom;
+	uint64_t jsb_lba, jmaxlen, jfirst;
+	uint32_t jincompat;
+	uint64_t n_jdesc, n_jcommit;
+	int64_t	 begin_entry;	/* the torner:begin mark: gen's timed run starts */
 
 	uint64_t entries, epochs, last_epoch;
 	uint64_t fepochs, last_fepoch;
@@ -277,6 +296,8 @@ static int is_tau_superblock(const uint8_t *b, uint64_t *seg_size)
 	return 1;
 }
 
+static void find_jbd2_sb(struct ctx *c, const uint8_t *b, uint64_t lba);
+
 static int is_map_block(const struct ctx *c, uint64_t lba)
 {
 	return c->have_geom && lba > c->sb_lba && lba <= c->sb_lba + c->map_nr;
@@ -301,6 +322,10 @@ static void pass_sb(struct ctx *c, const uint8_t *buf, uint64_t bytes,
 
 		if (be32_at(b, TAU_HDR_OFF_MAGIC) != TAU_MAGIC_NUMBER)
 			continue;
+		if (c->dia == DIA_JBD2) {
+			find_jbd2_sb(c, b, lba);
+			continue;
+		}
 		if (!is_tau_superblock(b, &segsz))
 			continue;
 		if (!c->have_geom) {
@@ -412,24 +437,55 @@ static void as_add(struct ctx *c, const struct appsec *a)
 	c->as[c->as_n++] = *a;
 }
 
-/* Recognise a torner data sector and pull out what bio containment needs. */
-static int parse_appsec(const uint8_t *b, struct appsec *a)
+static void own_add(struct ctx *c, uint64_t lba, uint64_t idx, uint64_t unit)
 {
-	uint64_t magic;
-	uint32_t spu, ssz;
+	GROW(c->own, c->own_n, c->own_cap, 4096);
+	c->own[c->own_n].lba = lba;
+	c->own[c->own_n].entry_idx = idx;
+	c->own[c->own_n].unit = unit;
+	c->own_n++;
+}
 
-	memcpy(&magic, b + 0, 8);
-	if (magic != TORNER_SECTOR_MAGIC)
-		return 0;
-	memcpy(&a->page_id, b + 8, 8);
-	memcpy(&a->version, b + 16, 8);
-	memcpy(&a->sector_idx, b + 36, 4);
-	memcpy(&spu, b + 40, 4);
-	memcpy(&ssz, b + 44, 4);
-	if (!spu || spu > TORNER_MAX_SECTORS_PER_UNIT || a->sector_idx >= spu)
-		return 0;
-	a->spu = spu;
-	return 1;
+/*
+ * The workload's sectors in one payload.  A sector of an atomic unit can be
+ * smaller than a block (a 2 KiB append uses 512-byte sectors), so look at
+ * every 512-byte boundary, not only at block starts, and take a sector only
+ * if it verifies as atoms takes it (src/atoms.c, scan_entries): header sane,
+ * CRC over the sector, fill matching its version.  A copy that did not fully
+ * land fails to verify and is not counted.
+ */
+static void scan_appsecs(struct ctx *c, const uint8_t *buf, uint64_t bytes,
+			 uint64_t first_lba, uint64_t idx, uint64_t fepoch)
+{
+	uint64_t off = 0;
+
+	while (off + sizeof(struct torner_sector_hdr) <= bytes) {
+		struct torner_sector_hdr hdr, h;
+		struct appsec a;
+
+		memcpy(&hdr, buf + off, sizeof(hdr));
+		if (hdr.magic != TORNER_SECTOR_MAGIC ||
+		    hdr.sector_size < 512 || hdr.sector_size > TORNER_DEF_SECTOR ||
+		    hdr.sector_size % 512 || off + hdr.sector_size > bytes ||
+		    torner_verify_sector(buf + off, hdr.sector_size, hdr.page_id,
+					 hdr.sector_idx, 0, &h) != TORNER_SEC_OK ||
+		    !h.sectors_per_unit ||
+		    h.sectors_per_unit > TORNER_MAX_SECTORS_PER_UNIT ||
+		    h.sector_idx >= h.sectors_per_unit) {
+			off += 512;
+			continue;
+		}
+		a.page_id = h.page_id;
+		a.version = h.version;
+		a.sector_idx = h.sector_idx;
+		a.spu = h.sectors_per_unit;
+		a.entry_idx = idx;
+		a.epoch = c->epochs;
+		a.fepoch = fepoch;
+		a.lba = first_lba + off / c->fsblk;
+		as_add(c, &a);
+		off += h.sector_size;
+	}
 }
 
 static int appsec_cmp(const void *x, const void *y)
@@ -551,6 +607,118 @@ static void scan_xlog(struct ctx *c, const uint8_t *buf, uint64_t bytes,
 	}
 }
 
+/*
+ * ext4 data=journal: jbd2's own journal, for I5.  The superblock
+ * (include/linux/jbd2.h: blocktype 3 or 4, s_blocksize@12, s_maxlen@16,
+ * s_first@20, s_feature_incompat@0x28 in a V2 one) sits at journal block 0;
+ * an internal journal that mke2fs laid out contiguously then occupies
+ * [superblock, superblock + s_maxlen).  tau's superblock has the same shape
+ * but a non-zero s_segment_size, which jbd2 leaves in its padding.
+ */
+#define JBD2_DESCRIPTOR_TYPE		1
+#define JBD2_SB_V1			3
+#define JBD2_SB_V2			4
+#define JBD2_SB_OFF_INCOMPAT		0x28
+#define JBD2_INCOMPAT_64BIT		0x2
+#define JBD2_INCOMPAT_CSUM_V2		0x8
+#define JBD2_INCOMPAT_CSUM_V3		0x10
+#define JBD2_FLAG_SAME_UUID		2
+#define JBD2_FLAG_LAST_TAG		8
+#define JBD2_HDR_SIZE			12
+
+static void find_jbd2_sb(struct ctx *c, const uint8_t *b, uint64_t lba)
+{
+	uint32_t bt = be32_at(b, TAU_HDR_OFF_BLOCKTYPE);
+
+	if (bt != JBD2_SB_V1 && bt != JBD2_SB_V2)
+		return;
+	if (be32_at(b, TAU_SB_OFF_BLOCKSIZE) != c->fsblk ||
+	    !be32_at(b, TAU_SB_OFF_MAXLEN) ||
+	    be32_at(b, TAU_SB_OFF_SEGMENT_SIZE))
+		return;
+	/*
+	 * The last write of it counts: mke2fs leaves the features 0 and the
+	 * mount sets the ones the tags depend on (ext4 turns on CSUM_V3 and
+	 * 64BIT with metadata_csum, which makes every tag 16 bytes), before any
+	 * descriptor is written.
+	 */
+	if (c->have_jgeom && lba != c->jsb_lba)
+		return;
+	c->jsb_lba = lba;
+	c->jmaxlen = be32_at(b, TAU_SB_OFF_MAXLEN);
+	c->jfirst = be32_at(b, TAU_SB_OFF_FIRST);
+	c->jincompat = bt == JBD2_SB_V2 ? be32_at(b, JBD2_SB_OFF_INCOMPAT) : 0;
+	if (!c->jfirst || c->jfirst >= c->jmaxlen)
+		c->jfirst = 1;
+	c->have_jgeom = 1;
+}
+
+/* fs/jbd2/journal.c:2692, journal_tag_bytes() */
+static size_t jbd2_tag_bytes(uint32_t incompat)
+{
+	size_t sz = 12;		/* sizeof(journal_block_tag_t) */
+
+	if (incompat & JBD2_INCOMPAT_CSUM_V3)
+		return 16;	/* sizeof(journal_block_tag3_t) */
+	if (incompat & JBD2_INCOMPAT_CSUM_V2)
+		sz += 2;
+	return (incompat & JBD2_INCOMPAT_64BIT) ? sz : sz - 4;
+}
+
+static int in_jbd2(const struct ctx *c, uint64_t lba)
+{
+	return c->have_jgeom && lba >= c->jsb_lba && lba < c->jsb_lba + c->jmaxlen;
+}
+
+/*
+ * A jbd2 descriptor names, tag by tag, the journal blocks that follow it, so
+ * each of them gets the descriptor's tid -- walked as jbd2's recovery walks it
+ * (fs/jbd2/recovery.c, count_tags: tags to the block tail, a UUID after any
+ * tag without SAME_UUID, LAST_TAG ending the list; t_flags read as the be16 at
+ * offset 6, the low half of tag3's be32), wrapping from s_maxlen to s_first.
+ */
+static void scan_jbd2(struct ctx *c, const uint8_t *buf, uint64_t bytes,
+		      uint64_t first_lba, uint64_t idx)
+{
+	uint64_t off;
+
+	for (off = 0; off + c->fsblk <= bytes; off += c->fsblk) {
+		const uint8_t *b = buf + off;
+		uint64_t lba = first_lba + off / c->fsblk;
+		size_t tb, end, t;
+		uint64_t jb, k = 0;
+		uint32_t bt;
+
+		if (!in_jbd2(c, lba) || lba == c->jsb_lba ||
+		    be32_at(b, TAU_HDR_OFF_MAGIC) != TAU_MAGIC_NUMBER)
+			continue;
+		bt = be32_at(b, TAU_HDR_OFF_BLOCKTYPE);
+		if (bt == JBD2_COMMIT_BLOCK_TYPE)
+			c->n_jcommit++;
+		if (bt != JBD2_DESCRIPTOR_TYPE)
+			continue;
+		c->n_jdesc++;
+		tb = jbd2_tag_bytes(c->jincompat);
+		end = c->fsblk - ((c->jincompat & (JBD2_INCOMPAT_CSUM_V2 |
+						   JBD2_INCOMPAT_CSUM_V3)) ? 4 : 0);
+		jb = lba - c->jsb_lba;
+		for (t = JBD2_HDR_SIZE; t + tb <= end; ) {
+			uint16_t fl = be16_at(b, t + 6);
+			uint64_t x = jb + 1 + k++;
+
+			while (x >= c->jmaxlen)
+				x = x - c->jmaxlen + c->jfirst;
+			own_add(c, c->jsb_lba + x, idx,
+				be32_at(b, TAU_HDR_OFF_SEQUENCE));
+			t += tb;
+			if (!(fl & JBD2_FLAG_SAME_UUID))
+				t += 16;
+			if (fl & JBD2_FLAG_LAST_TAG)
+				break;
+		}
+	}
+}
+
 /* Pass 3 -- classify blocks, record journal-region writes and host commits. */
 static void pass_classify(struct ctx *c, const uint8_t *buf, uint64_t bytes,
 			  uint64_t first_lba, uint64_t idx, uint64_t fepoch,
@@ -560,11 +728,15 @@ static void pass_classify(struct ctx *c, const uint8_t *buf, uint64_t bytes,
 
 	if (c->host == HOST_XFS)
 		scan_xlog(c, buf, bytes, idx, fepoch);
+	scan_appsecs(c, buf, bytes, first_lba, idx, fepoch);
+	if (c->dia == DIA_JBD2) {
+		scan_jbd2(c, buf, bytes, first_lba, idx);
+		return;
+	}
 
 	for (off = 0; off + c->fsblk <= bytes; off += c->fsblk) {
 		const uint8_t *b = buf + off;
 		uint64_t lba = first_lba + off / c->fsblk;
-		struct appsec a;
 		struct jblk j;
 		uint32_t bt;
 		int mine;
@@ -572,12 +744,6 @@ static void pass_classify(struct ctx *c, const uint8_t *buf, uint64_t bytes,
 		mine = in_journal(c, lba);
 		if (mine)
 			wr_add(&c->jw, &c->jw_n, &c->jw_cap, lba, idx, fepoch, fua);
-
-		if (parse_appsec(b, &a)) {
-			a.entry_idx = idx;
-			a.epoch = c->epochs;
-			as_add(c, &a);
-		}
 
 		if (is_map_block(c, lba)) {
 			track_map_block(c, b, lba);
@@ -729,6 +895,16 @@ static int walk(struct ctx *c, int fd, const struct log_write_super_d *sup,
 		flags = ent.flags;
 		bytes = ent.nr_sectors * (uint64_t)c->sectorsize;
 
+		/* gen marks where its timed run starts, the only part explore
+		 * crashes in; a mark keeps its text in its own header sector */
+		if (count && (flags & LOG_MARK_FLAG) && c->begin_entry < 0) {
+			size_t len = ent.data_len;
+
+			if (len > c->sectorsize - sizeof(ent))
+				len = c->sectorsize - sizeof(ent);
+			if (memmem(w->hdr + sizeof(ent), len, "torner:begin", 12))
+				c->begin_entry = (int64_t)(c->entries - 1);
+		}
 		if (count) {
 			if (flags & LOG_FLUSH_FLAG)	c->n_flush++;
 			if (flags & LOG_FUA_FLAG)	c->n_fua++;
@@ -1122,7 +1298,8 @@ static void add_journal_blocks(struct ctx *c, struct vlist *l, struct i1stat *st
  * of the commit's segment, commit).  A transaction is (inode, serial,
  * sequence).
  */
-static void check_i1(struct ctx *c, struct viol_out *v, struct i1stat *st)
+static void check_i1(struct ctx *c, struct viol_out *v, struct i1stat *st,
+		     int report)
 {
 	size_t *dix, *cix, *cpos, nd = 0, nc = 0, i, k;
 	uint64_t *homes = NULL;
@@ -1283,6 +1460,10 @@ static void check_i1(struct ctx *c, struct viol_out *v, struct i1stat *st)
 		}
 		st->blocks += vl.n;
 		st->home_blocks += n_home;
+		/* for I5: these writes are this transaction's */
+		for (k = 0; k < vl.n; k++)
+			if (vl.b[k].w)
+				own_add(c, vl.b[k].w->lba, vl.b[k].w->entry_idx, i);
 
 		/* judged on the record's own flush */
 		judge(vl.b, vl.n, cm->fepoch, &n_unordered, &n_missing, &w);
@@ -1321,7 +1502,7 @@ static void check_i1(struct ctx *c, struct viol_out *v, struct i1stat *st)
 		st->viol++;
 		if (!cm->commit_epoch_field && !(cm->commit_flags & TAU_COMMIT_F_ISIZE))
 			st->viol_ungated++;
-		if (viol_begin(v)) {
+		if (report && viol_begin(v)) {
 			printf("{\"invariant\":\"I1\""
 			       ",\"detail\":\"%s\""
 			       ",\"gate\":\"%s\""
@@ -1369,6 +1550,208 @@ static void check_i1(struct ctx *c, struct viol_out *v, struct i1stat *st)
 	free(dix);
 	free(cix);
 	free(cpos);
+}
+
+/* ---- I5 ------------------------------------------------------------------ */
+
+static int own_cmp(const void *x, const void *y)
+{
+	const struct owner *a = x, *b = y;
+
+	if (a->lba != b->lba)
+		return a->lba < b->lba ? -1 : 1;
+	if (a->entry_idx != b->entry_idx)
+		return a->entry_idx < b->entry_idx ? -1 : 1;
+	return 0;
+}
+
+/*
+ * The durable unit the block write (lba, entry) belongs to.  On tau it is the
+ * transaction whose I1 reconstruction took exactly that write.  On jbd2 it is
+ * the descriptor naming that journal block, logged nearest to the write: a
+ * commit writes its descriptors and their blocks together, and a journal
+ * block is reused only a full journal later.
+ */
+static int unit_of(const struct ctx *c, uint64_t lba, uint64_t entry,
+		   uint64_t *unit)
+{
+	size_t l = 0, r = c->own_n;
+	uint64_t bestd = UINT64_MAX;
+	int found = 0;
+
+	while (l < r) {
+		size_t mid = l + (r - l) / 2;
+
+		if (c->own[mid].lba < lba)
+			l = mid + 1;
+		else
+			r = mid;
+	}
+	for (; l < c->own_n && c->own[l].lba == lba; l++) {
+		const struct owner *o = &c->own[l];
+		uint64_t d = o->entry_idx > entry ? o->entry_idx - entry
+						  : entry - o->entry_idx;
+
+		if (c->dia == DIA_TAU) {
+			if (o->entry_idx == entry) {
+				*unit = o->unit;
+				return 1;
+			}
+			continue;
+		}
+		if (d < bestd) {
+			bestd = d;
+			*unit = o->unit;
+			found = 1;
+		}
+	}
+	return found;
+}
+
+struct i5stat {
+	uint64_t checked, split, partial, unjournaled;
+	uint64_t split_run, partial_run;	/* ... starting in gen's timed run */
+};
+
+struct upair {
+	uint64_t unit;
+	uint32_t sidx;
+};
+
+static int upair_cmp(const void *x, const void *y)
+{
+	const struct upair *a = x, *b = y;
+
+	if (a->unit != b->unit)
+		return a->unit < b->unit ? -1 : 1;
+	return a->sidx < b->sidx ? -1 : a->sidx > b->sidx;
+}
+
+/*
+ * I5 -- an application atomic write is contained in one durable unit: some
+ * single unit carries every sector of it.  The unit is the jbd2 transaction on
+ * ext4 data=journal and the tau transaction on tau (CRASH_TODO §3.5); a write
+ * whose sectors only some units carry between them, or some no unit carries
+ * at all, can be left half replayed.  Only the copies a unit carries count --
+ * a checkpoint's write home belongs to none.
+ *
+ * This is ext4 data=journal's commit-induced split, read off the log: its
+ * data goes through the journal page by page, so a commit not caused by the
+ * write's own fsync can close a transaction with half of it.
+ */
+static void check_i5_units(struct ctx *c, struct viol_out *v, struct i5stat *st)
+{
+	struct upair *pr = NULL;
+	size_t prcap = 0, i, j;
+	const char *unit = c->dia == DIA_TAU ? "tau transaction" : "jbd2 transaction";
+
+	qsort(c->own, c->own_n, sizeof(*c->own), own_cmp);
+	qsort(c->as, c->as_n, sizeof(*c->as), appsec_cmp);
+
+	for (i = 0; i < c->as_n; i = j) {
+		uint64_t page = c->as[i].page_id, ver = c->as[i].version;
+		uint32_t spu = c->as[i].spu;
+		uint64_t full = spu >= 64 ? ~0ULL : (1ULL << spu) - 1;
+		uint64_t allmask = 0, efirst = UINT64_MAX, elast = 0;
+		uint64_t ffirst = UINT64_MAX, flast = 0;
+		size_t n = 0, k, nunits = 0;
+		int contained = 0;
+
+		for (j = i; j < c->as_n && c->as[j].page_id == page &&
+			    c->as[j].version == ver; j++) {
+			uint64_t u;
+
+			if (!unit_of(c, c->as[j].lba, c->as[j].entry_idx, &u))
+				continue;
+			if (n == prcap) {
+				prcap = prcap ? prcap * 2 : 64;
+				pr = xrealloc(pr, prcap * sizeof(*pr));
+			}
+			pr[n].unit = u;
+			pr[n++].sidx = c->as[j].sector_idx;
+			allmask |= 1ULL << c->as[j].sector_idx;
+			if (c->as[j].entry_idx < efirst)
+				efirst = c->as[j].entry_idx;
+			if (c->as[j].entry_idx > elast)
+				elast = c->as[j].entry_idx;
+			if (c->as[j].fepoch < ffirst)
+				ffirst = c->as[j].fepoch;
+			if (c->as[j].fepoch > flast)
+				flast = c->as[j].fepoch;
+		}
+		if (!n) {
+			st->unjournaled++;
+			if (c->debug) {
+				size_t q;
+
+				fprintf(stderr, "loginv: page %" PRIu64 " v%" PRIu64
+					" in no unit; its copies:", page, ver);
+				for (q = i; q < j; q++)
+					fprintf(stderr, " [lba %" PRIu64 " entry %" PRIu64
+						" sidx %u]", c->as[q].lba,
+						c->as[q].entry_idx, c->as[q].sector_idx);
+				fprintf(stderr, "\n");
+			}
+			continue;
+		}
+		st->checked++;
+		qsort(pr, n, sizeof(*pr), upair_cmp);
+		for (k = 0; k < n; ) {
+			uint64_t mask = 0;
+			size_t m = k;
+
+			while (m < n && pr[m].unit == pr[k].unit)
+				mask |= 1ULL << pr[m++].sidx;
+			nunits++;
+			if ((mask & full) == full)
+				contained = 1;
+			k = m;
+		}
+		if (contained)
+			continue;
+		if (nunits < 2) {
+			/*
+			 * One unit holds part of it and no unit the rest.  On
+			 * tau the rest reached home from the page cache through
+			 * the checkpoint of an older transaction, with no journal
+			 * copy of its own; how recovery treats that copy is the
+			 * file's tail rule (I2's territory), which a block log
+			 * does not settle.  Counted, not judged.  On jbd2 every
+			 * data block goes through the journal, so it is judged.
+			 */
+			st->partial++;
+			if (c->begin_entry >= 0 && efirst >= (uint64_t)c->begin_entry)
+				st->partial_run++;
+			if (c->dia == DIA_TAU)
+				continue;
+		} else {
+			st->split++;
+			if (c->begin_entry >= 0 && efirst >= (uint64_t)c->begin_entry)
+				st->split_run++;
+		}
+		if (!viol_begin(v))
+			continue;
+		printf("{\"invariant\":\"I5\""
+		       ",\"detail\":\"application atomic write not contained in one %s\""
+		       ",\"kind\":\"%s\""
+		       ",\"page_id\":%" PRIu64 ",\"version\":%" PRIu64
+		       ",\"sectors\":%u,\"sectors_in_units\":%d,\"units\":%zu",
+		       unit, nunits < 2 ? "partial" : "split",
+		       page, ver, spu, __builtin_popcountll(allmask & full), nunits);
+		if (c->dia == DIA_TAU)
+			printf(",\"inode\":%" PRIu64 ",\"sequence_first\":%u"
+			       ",\"sequence_last\":%u",
+			       c->jb[pr[0].unit].inode_number,
+			       c->jb[pr[0].unit].sequence,
+			       c->jb[pr[n - 1].unit].sequence);
+		else
+			printf(",\"tid_first\":%" PRIu64 ",\"tid_last\":%" PRIu64,
+			       pr[0].unit, pr[n - 1].unit);
+		printf(",\"entry_first\":%" PRIu64 ",\"entry_last\":%" PRIu64
+		       ",\"epoch_first\":%" PRIu64 ",\"epoch_last\":%" PRIu64 "}",
+		       efirst, elast, ffirst, flast);
+	}
+	free(pr);
 }
 
 /*
@@ -1511,10 +1894,14 @@ int torner_loginv(int argc, char **argv)
 	uint64_t max_viol = 64;
 	uint64_t i5_checked = 0, i5_split = 0, i5_max_entries = 0;
 	int want_i5;
-	int fd = -1, i, rc = 1, stat_only = 0, want_i1;
+	int fd = -1, i, rc = 1, stat_only = 0, want_i1, need_txs;
+	struct i5stat s5;
 
 	memset(&c, 0, sizeof(c));
 	memset(&st, 0, sizeof(st));
+	memset(&s5, 0, sizeof(s5));
+	torner_crc32_init();
+	c.begin_entry = -1;
 	c.fsblk = TAU_BLOCK_SIZE;
 	c.debug = getenv("TORNER_LOGINV_DEBUG") != NULL;
 
@@ -1624,7 +2011,9 @@ int torner_loginv(int argc, char **argv)
 	}
 	if (walk(&c, fd, &sup, pass_classify, 1, &wb))
 		goto out;
-	if (want_i1 && c.home_n) {
+	/* I5 on tau needs the transactions I1 rebuilds, HOME blocks and all */
+	need_txs = c.dia == DIA_TAU && (want_i1 || want_i5);
+	if (need_txs && c.home_n) {
 		c.homeset_n = c.home_n;
 		c.homeset = xrealloc(NULL, c.homeset_n * sizeof(*c.homeset));
 		memcpy(c.homeset, c.home, c.homeset_n * sizeof(*c.homeset));
@@ -1647,9 +2036,10 @@ int torner_loginv(int argc, char **argv)
 	       ",\"fepochs\":%" PRIu64
 	       ",\"flush\":%" PRIu64 ",\"fua\":%" PRIu64 ",\"discard\":%" PRIu64
 	       ",\"mark\":%" PRIu64 ",\"metadata\":%" PRIu64
-	       ",\"data_bytes\":%" PRIu64 ",\"sectorsize\":%u}",
+	       ",\"data_bytes\":%" PRIu64 ",\"sectorsize\":%u"
+	       ",\"begin_entry\":%" PRId64 "}",
 	       c.entries, c.epochs, c.fepochs, c.n_flush, c.n_fua, c.n_discard,
-	       c.n_mark, c.n_meta, c.bytes_data, c.sectorsize);
+	       c.n_mark, c.n_meta, c.bytes_data, c.sectorsize, c.begin_entry);
 
 	printf(",\"journal\":{\"superblock_lba\":%" PRIu64
 	       ",\"segment_blocks\":%" PRIu64 ",\"map_blocks\":%" PRIu64
@@ -1662,6 +2052,13 @@ int torner_loginv(int argc, char **argv)
 	       c.sb_lba, c.seg_blks, c.map_nr, c.nregions,
 	       c.n_desc, c.n_commit, c.n_revoke, c.n_maplog, c.sf_n,
 	       c.home_n, c.hc_n, c.n_foreign);
+	if (c.dia == DIA_JBD2)
+		printf(",\"jbd2\":{\"superblock_lba\":%" PRIu64 ",\"maxlen\":%" PRIu64
+		       ",\"first\":%" PRIu64 ",\"incompat\":%u"
+		       ",\"descriptors\":%" PRIu64 ",\"commits\":%" PRIu64
+		       ",\"tagged_blocks\":%zu}",
+		       c.jsb_lba, c.jmaxlen, c.jfirst, c.jincompat, c.n_jdesc,
+		       c.n_jcommit, c.own_n);
 
 	/*
 	 * Refuse rather than report a clean run when the log cannot support a
@@ -1685,6 +2082,13 @@ int torner_loginv(int argc, char **argv)
 		rc = 1;
 		goto out;
 	}
+	if (c.dia == DIA_JBD2 && want_i5 && !c.have_jgeom) {
+		printf(",\"usable\":false,\"reason\":\"config is ext4-data but no"
+		       " jbd2 journal superblock is in the stream\"");
+		printf(",\"checks\":{},\"violations\":[]}\n");
+		rc = 1;
+		goto out;
+	}
 	printf(",\"usable\":true");
 
 	/*
@@ -1697,19 +2101,24 @@ int torner_loginv(int argc, char **argv)
 	       ",\"I3\":\"not_implemented\",\"I4\":\"not_implemented\""
 	       ",\"I5\":\"%s\",\"bio_containment\":\"%s\"}",
 	       c.dia != DIA_TAU ? "not_applicable" : (want_i1 ? "run" : "skipped"),
-	       /* I5 needs per-config durable units; only the no-data-journal
-		* case is covered, where the bio is the durable unit. */
-	       c.dia == DIA_NONE ? (want_i5 ? "run" : "skipped") : "not_implemented",
+	       /* the durable unit: the bio with no data journal, the jbd2
+		* transaction on ext4 data=journal, the tau transaction; ZFS's
+		* transaction group is out of scope */
+	       c.dia == DIA_COW ? "not_implemented" : (want_i5 ? "run" : "skipped"),
 	       want_i5 ? "run" : "skipped");
 	if (want_i1)
 		printf(",\"i1_model\":\"%s\"", c.i1_strict ? "strict" : "gated");
 
 	viol_open(&v, max_viol);
-	if (want_i1)
-		check_i1(&c, &v, &st);
-	if (want_i5)
+	if (need_txs)
+		check_i1(&c, &v, &st, want_i1);
+	if (want_i5) {
+		/* on a stock FS the bio is the unit: bio containment is I5 */
 		check_bio_containment(&c, &v, &i5_checked, &i5_split,
 				      &i5_max_entries);
+		if (c.dia == DIA_TAU || c.dia == DIA_JBD2)
+			check_i5_units(&c, &v, &s5);
+	}
 	viol_close(&v);
 
 	printf(",\"coverage\":{\"i1_transactions_checked\":%" PRIu64
@@ -1730,13 +2139,21 @@ int torner_loginv(int argc, char **argv)
 	       ",\"i1_violations_ungated\":%" PRIu64
 	       ",\"app_writes_checked\":%" PRIu64
 	       ",\"app_writes_spanning_multiple_bios\":%" PRIu64
-	       ",\"max_bios_per_app_write\":%" PRIu64 "}",
+	       ",\"max_bios_per_app_write\":%" PRIu64
+	       ",\"i5_writes_checked\":%" PRIu64
+	       ",\"i5_writes_split\":%" PRIu64
+	       ",\"i5_writes_partial\":%" PRIu64
+	       ",\"i5_writes_in_no_unit\":%" PRIu64
+	       ",\"i5_writes_split_in_run\":%" PRIu64
+	       ",\"i5_writes_partial_in_run\":%" PRIu64 "}",
 	       st.checked, st.skipped_nodesc + st.skipped_multiseg,
 	       st.skipped_nodesc, st.skipped_multiseg, st.blocks,
 	       st.home_blocks, st.missing, st.ambiguous, st.home_ambiguous,
 	       st.two_segment, st.own, st.gated,
 	       st.gate_closed, st.strict, st.viol, st.viol_ungated,
-	       i5_checked, i5_split, i5_max_entries);
+	       i5_checked, i5_split, i5_max_entries,
+	       s5.checked, s5.split, s5.partial, s5.unjournaled,
+	       s5.split_run, s5.partial_run);
 	printf(",\"violation_count\":%" PRIu64 "}\n", v.n);
 
 	rc = v.n ? 2 : 0;
@@ -1754,6 +2171,7 @@ out:
 	free(c.as);
 	free(c.regions);
 	free(c.idx2pba);
+	free(c.own);
 	if (fd >= 0)
 		close(fd);
 	return rc;

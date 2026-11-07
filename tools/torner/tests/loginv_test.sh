@@ -127,6 +127,27 @@ want_rc 2 "a HOME block logged after the record trips I1"
 want_has '"data_home":1' "  ...reported as the HOME block"
 want_has '"data_lba":7000' "  ...at its home address"
 
+# I5: an application write contained in one durable unit.  ext4 data=journal
+# journals page by page, so a commit can close a jbd2 transaction with half
+# of a 16 KiB write in it; the tags of jbd2's descriptors say which blocks a
+# transaction holds.  The features come from the mount's superblock write, not
+# mke2fs's (which has none, and would size every tag wrong).
+run i5-jbd2-ok ext4-data --check I5
+want_rc 0 "ext4-data: a write inside one jbd2 transaction passes I5"
+want_has '"i5_writes_checked":1' "  ...and was checked"
+run i5-jbd2-split ext4-data --check I5
+want_rc 2 "ext4-data: a write split across two jbd2 transactions trips I5"
+want_has '"kind":"split"' "  ...as a split"
+want_has '"tid_first":1,"tid_last":2' "  ...naming both transactions"
+
+run i5-tau-ok tau-ext4 --check I1,I5
+want_rc 0 "tau: a write inside one tau transaction passes I5"
+run i5-tau-split tau-ext4 --check I1,I5
+want_rc 2 "tau: a write split across two tau transactions trips I5"
+want_has '"invariant":"I5"' "  ...reported as I5"
+want_has '"sequence_first":42,"sequence_last":43' "  ...naming both transactions"
+want_has '"i1_violations":0' "  ...while both transactions pass I1"
+
 echo
 printf 'passed %d, failed %d\n' "$pass" "$fail"
 [ "$fail" = 0 ]

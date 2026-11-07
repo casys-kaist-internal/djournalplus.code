@@ -9,7 +9,7 @@ Crash-atomicity test suite for tauJournal. Implements the T2/T3 plan in
 | §2.1 `atomicw` | `torner gen` | done |
 | §2.2 `atomchk` | `torner check` | done |
 | — | `torner tear` | done (self-test for `check`) |
-| §3 `tau-loginv` | `torner loginv` | parser + epochs + **gated I1** (FLUSH epochs; the host commit a flush-less record names; HOME blocks); I2–I5 not implemented |
+| §3 `tau-loginv` | `torner loginv` | parser + epochs + **gated I1** (FLUSH epochs; the host commit a flush-less record names; HOME blocks) + **I5** (one durable unit: bio / jbd2 transaction / tau transaction); I2–I4 not implemented |
 | — | `torner atoms` | done: follows every application write through the log, FS-agnostic |
 | §4 `tau-replay` | `torner replay` | 4 of 5 epoch strategies + `torn-entry`; write-aimed `atom-order`/`atom-reorder`/`atom-tear`; `targeted` not implemented |
 | §6 `report.py` | `scripts/report.py` | Table 1, per-write table, write shapes, state coverage; T1/T3 tables have no input |
@@ -307,8 +307,8 @@ and defaults to the numeric `--run-id`.
 ## `torner loginv`
 
 ```
-torner loginv --log <logdev> [--config tau-ext4|tau-xfs|ext4-data]
-              [--check I1] [--i1-strict] [--fsblock 4096] [--stat-only]
+torner loginv --log <logdev> [--config tau-ext4|tau-xfs|ext4-data|ext4|xfs]
+              [--check I1[,I5]] [--i1-strict] [--fsblock 4096] [--stat-only]
 ```
 
 Parses a `dm-log-writes` log and decides ordering invariants without crashing
@@ -378,6 +378,35 @@ of I1 passed by skipping 99.8% of its transactions:
   previous owner's write of the same block is never taken.  More than one write
   inside an ownership is counted (`i1_blocks_ambiguous`).  A HOME block is
   looked for after the file's previous commit.
+
+**I5** — an application atomic write is contained in one durable unit: some
+single unit carries every sector of it.  The unit depends on the configuration:
+the bio on a file system with no data journal (bio containment, below), the
+jbd2 transaction on ext4 `data=journal`, the tau transaction on tau.  The
+workload's sectors are found by content, at every 512-byte boundary (a 2 KiB
+append has 512-byte sectors) and verified as `atoms` verifies them.  A jbd2
+transaction holds the journal blocks its descriptors' tags name (walked as
+jbd2's recovery walks them, wrapping at `s_maxlen`); the tag size depends on
+the journal features, which have to come from the superblock the mount wrote —
+mke2fs's has none, and reading it sizes every tag wrong.  A tau transaction
+holds the writes its I1 reconstruction took, HOME blocks included.
+
+A write whose sectors two or more units carry between them, and none whole, is
+a violation (`"kind":"split"`) — ext4 `data=journal`'s commit-induced split,
+read off the log.  On jbd2, a write one unit carries only in part (the rest in
+no unit) is one too (`"partial"`); on tau that shape is a version that reached
+home from the page cache through the checkpoint of an older transaction,
+without a journal copy of its own, and how recovery treats it is the file's
+tail rule, so it is counted (`i5_writes_partial`) and not judged.
+`i5_writes_in_no_unit` counts writes no unit carries at all, and
+`*_in_run` the splits that start inside gen's timed run (after its
+`torner:begin` mark), the only part `explore` crashes in.
+
+On the 2026-10-20 table's `ext4-data` captures, I5 finds 7-9 split writes in
+each busy multi-block cell (ap16k, hole, prealloc, ow16k) and none in the 4 KiB
+rows; the 6 in ow16k quiet are all in the prefill, before the timed run, which
+is why its crash states found no tear.  On the 70 tau captures of 2026-11-07
+(#397): 470,475 writes checked, 0 split.
 
 Two things about identifying tau's blocks are not obvious, and both were learned
 from a real capture rather than from the headers:
