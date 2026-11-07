@@ -27,9 +27,11 @@ export VM_NUMA=${VM_NUMA:-1}
 # ssh that reads stdin swallows the rest of that list, silently running only the
 # first item (xfs-hold-test.sh ran one config out of three this way).  No caller
 # feeds vm_ssh on stdin.
+# TAU_SEGSIZE (e.g. 16m): every guest command gets it, for guest/common.sh's mkfs
+VM_ENV=${TAU_SEGSIZE:+export TAU_SEGSIZE=$TAU_SEGSIZE;}
 vm_ssh() {
 	ssh -n -p "$SSH_PORT" $SSH_KEY_ARGS -o BatchMode=yes -o StrictHostKeyChecking=no \
-	    -o ConnectTimeout=5 "$SSH_HOST" "$@"
+	    -o ConnectTimeout=5 "$SSH_HOST" $VM_ENV "$@"
 }
 
 # timeout(1) execs its argument, so it cannot run a shell function: spell the
@@ -41,7 +43,7 @@ vm_ssh() {
 vm_ssh_timeout() {
 	local t=$1; shift
 	timeout "$t" ssh -n -p "$SSH_PORT" $SSH_KEY_ARGS -o BatchMode=yes \
-	    -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$SSH_HOST" "$@"
+	    -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$SSH_HOST" $VM_ENV "$@"
 }
 
 vm_scp() {

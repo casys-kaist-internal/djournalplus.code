@@ -17,6 +17,20 @@ MKE2FS=${MKE2FS:-$TAU_SRCTREE/e2fsprogs/misc/mke2fs}
 E2FSCK=${E2FSCK:-$TAU_SRCTREE/e2fsprogs/e2fsck/e2fsck}
 XFS_REPAIR=${XFS_REPAIR:-$TAU_SRCTREE/xfsprogs-dev/repair/xfs_repair}
 
+# TAU_SEGSIZE (e.g. 16m, passed on by the host's vm_ssh): the segment size of
+# every mkfs that names none, through a stub that survives sudo (mkfs-seg.sh)
+seg_stub() {
+	local f=$TAU_BIN/seg/$1-$TAU_SEGSIZE
+	case $2 in "$TAU_BIN"/seg/*) echo "$2"; return ;; esac
+	mkdir -p "$TAU_BIN/seg" &&
+		printf '#!/bin/bash\nexec %s %s %s %s "$@"\n' "$TAU_BIN/guest/mkfs-seg.sh" "$1" "$TAU_SEGSIZE" "$2" > "$f.$$" &&
+		chmod +x "$f.$$" && mv -f "$f.$$" "$f" && echo "$f"
+}
+if [ -n "${TAU_SEGSIZE:-}" ]; then
+	MKFS_XFS=$(seg_stub xfs "$MKFS_XFS")
+	MKE2FS=$(seg_stub ext4 "$MKE2FS")
+fi
+
 TAUWRITE=$TAU_BIN/tauwrite
 TAUWRITE_NOFSYNC=$TAU_BIN/tauwrite_nofsync
 TAURACE=$TAU_BIN/taurace
