@@ -21,8 +21,8 @@
 #   ZFS        one dataset, ashift=12, recordsize=16K, compression=off,
 #              atime=off, ZIL on the same device (ARC as the host sets it)
 # and on the tau kernel (6.8.0tjournal+), as the database tau runs (common.sh):
-#   tau-EXT4   tau mke2fs from codes/, mount tjournal,tjournal_size=$TAU_JOURNAL_GB
-#   tau-XFS    tau mkfs.xfs -l tjmaxsize=1G, mount tjournal (journal up to 32 GiB)
+#   tau-EXT4   tau mke2fs from codes/ (segments $TAU_SEGSIZE), mount tjournal,tjournal_size=$TAU_JOURNAL_GB
+#   tau-XFS    tau mkfs.xfs -l tjsegsize=$TAU_SEGSIZE,tjmaxsize=32G, mount tjournal (journal up to 32 GiB)
 # where atomicw opens the files with O_TAU_UNTORN (--tau; it refuses to run
 # when the kernel accepts O_DIRECT with that flag, i.e. tau is not active).
 #
@@ -83,8 +83,8 @@ fs_make() {
     EXT4_Raw)  stock_mke2fs -q -t ext4 -E lazy_itable_init=0,lazy_journal_init=0 -F "$DEVICE" ;;
     EXT4_Data) stock_mke2fs -q -t ext4 -J size=40000 -E lazy_itable_init=0,lazy_journal_init=0 -F "$DEVICE" ;;
     XFS_Raw)   stock_mkfs_xfs -q -f "$DEVICE" ;;
-    tau-EXT4)  sudo "$TAUFS_E2FSPROGS/misc/mke2fs" -q -t ext4 -E lazy_itable_init=0,lazy_journal_init=0 -F "$DEVICE" ;;
-    tau-XFS)   sudo "$TAUFS_XFSPROGS/mkfs/mkfs.xfs" -q -f -l tjmaxsize=1G "$DEVICE" ;;
+    tau-EXT4)  sudo "$TAUFS_E2FSPROGS/misc/mke2fs" -q -t ext4 -E lazy_itable_init=0,lazy_journal_init=0${TAU_SEGSIZE:+,tau_segsize=$TAU_SEGSIZE} -F "$DEVICE" ;;
+    tau-XFS)   sudo "$TAUFS_XFSPROGS/mkfs/mkfs.xfs" -q -f -l ${TAU_SEGSIZE:+tjsegsize=$TAU_SEGSIZE,}tjmaxsize=32G "$DEVICE" ;;
     ZFS)
       sudo wipefs -a "$DEVICE" >/dev/null
       sudo zpool create -f -o ashift=12 -O recordsize=16K -O compression=off -O atime=off \

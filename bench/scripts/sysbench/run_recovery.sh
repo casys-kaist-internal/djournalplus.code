@@ -49,7 +49,7 @@ IMAGE_KEY=$(main_image_key)
 BACKUP_DIR=$TAU_BACKUP_ROOT/sysbench/$DBMS
 DBNAME="main_t${TABLE}"
 for FS in $FS_GROUPS; do
-  [[ -f "$BACKUP_DIR/${FS}_${IMAGE_KEY}.img" ]] || { echo "❌ Missing image $BACKUP_DIR/${FS}_${IMAGE_KEY}.img"; exit 1; }
+  [[ -f "$(fs_image $FS "$IMAGE_KEY" "$BACKUP_DIR")" ]] || { echo "❌ Missing image $(fs_image $FS "$IMAGE_KEY" "$BACKUP_DIR")"; exit 1; }
   case $FS in zfs*|btrfs*) echo "❌ $FS: the going-down ioctl is for ext4 and XFS"; exit 1 ;; esac
 done
 OUT="$TAU_RESULTS/recovery/$DBMS/$(date +%Y%m%d_%H%M%S)"

@@ -63,7 +63,7 @@ export VM_MEM=64G VM_NUMA=1 VM_HUGEPAGES=1 BOOT_TIMEOUT=${BOOT_TIMEOUT:-300}
 export VM_QEMU_DIR=${VM_QEMU_DIR:-$W/tools/qemu/qemu-7.2.1/build-numa}
 export VM_IMAGE=${VM_IMAGE:-vm_imgs/r2-guest.qcow2}
 for FS in $FS_GROUPS; do
-  [[ -f "$BACKUP_DIR/${FS}_${IMAGE_KEY}.img" ]] || { echo "❌ Missing image $BACKUP_DIR/${FS}_${IMAGE_KEY}.img"; exit 1; }
+  [[ -f "$(fs_image $FS "$IMAGE_KEY" "$BACKUP_DIR")" ]] || { echo "❌ Missing image $(fs_image $FS "$IMAGE_KEY" "$BACKUP_DIR")"; exit 1; }
   [[ "$FS" != *tau* || -f "$TAU_INITRD" ]] || { echo "❌ no τ initrd $TAU_INITRD"; exit 1; }
 done
 [[ "$(cat /sys/bus/pci/devices/$BDF/device 2>/dev/null)" ]] || { echo "❌ no PCI device $BDF"; exit 1; }

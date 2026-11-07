@@ -278,26 +278,28 @@ create_backup_fs_image()
   local FS=$1
   local KEY=$2
   local BACKUP_DIR=$3
+  local img
+  img=$(fs_image $FS "$KEY" "$BACKUP_DIR")
   case $FS in
     ext4|ext4-dj10|ext4-dj20|ext4-dj40|ext4-tau)
-      sudo partclone.ext4 -c -s $DEVICE -o "$BACKUP_DIR/${FS}_${KEY}.img"
+      sudo partclone.ext4 -c -s $DEVICE -o "$img"
       ;;
     xfs|xfs-cow|xfs-tau)
-      sudo partclone.xfs -c -s $DEVICE -o "$BACKUP_DIR/${FS}_${KEY}.img"
+      sudo partclone.xfs -c -s $DEVICE -o "$img"
       ;;
     btrfs|btrfs-nodatacow)
-      sudo partclone.btrfs -c -s $DEVICE -o "$BACKUP_DIR/${FS}_${KEY}.img"
+      sudo partclone.btrfs -c -s $DEVICE -o "$img"
       ;;
     zfs)
       mount_fs $FS $MOUNT_DIR
       sudo zfs snapshot zfspool@pgbackup
-      sudo sh -c "zfs send zfspool@pgbackup > '$BACKUP_DIR/${FS}_${KEY}.img'"
+      sudo sh -c "zfs send zfspool@pgbackup > '$img'"
       umount_fs $MOUNT_DIR
       ;;
     zfs-8k|zfs-16k)  # replication stream: keeps recordsize and compression
       mount_fs $FS $MOUNT_DIR
       sudo zfs snapshot -r zfspool@pgbackup
-      sudo sh -c "zfs send -R zfspool@pgbackup > '$BACKUP_DIR/${FS}_${KEY}.img'"
+      sudo sh -c "zfs send -R zfspool@pgbackup > '$img'"
       umount_fs $MOUNT_DIR
     ;;
     *)
@@ -309,6 +311,8 @@ restore_filesystem() {
   local FS=$1
   local KEY=$2
   local BACKUP_DIR=$3
+  local img
+  img=$(fs_image $FS "$KEY" "$BACKUP_DIR")
   warning
   # Every run starts from the same SSD state: trim the whole test device first,
   # so nothing written by earlier runs is still valid inside the SSD (garbage
@@ -335,20 +339,20 @@ restore_filesystem() {
 
   case $FS in
     ext4|ext4-dj10|ext4-dj20|ext4-dj40|ext4-tau)
-      sudo partclone.ext4 -r -s $BACKUP_DIR/${FS}_${KEY}.img -o $TAU_DEVICE
+      sudo partclone.ext4 -r -s "$img" -o $TAU_DEVICE
       ;;
     xfs|xfs-cow|xfs-tau)
-      sudo partclone.xfs -r -s $BACKUP_DIR/${FS}_${KEY}.img -o $TAU_DEVICE
+      sudo partclone.xfs -r -s "$img" -o $TAU_DEVICE
       ;;
     btrfs|btrfs-nodatacow)
-      sudo partclone.btrfs -r -s $BACKUP_DIR/${FS}_${KEY}.img -o $TAU_DEVICE
+      sudo partclone.btrfs -r -s "$img" -o $TAU_DEVICE
       ;;
     zfs|zfs-4k|zfs-8k|zfs-16k)
       do_mkfs $FS $DEVICE
       # zfs-8k/16k: the replication stream brings zfspool/log with it
       sudo zfs destroy zfspool/log 2>/dev/null || true
       mount_fs $FS $MOUNT_DIR
-      sudo sh -c "zfs receive -F zfspool < '$BACKUP_DIR/${FS}_${KEY}.img'"
+      sudo sh -c "zfs receive -F zfspool < '$img'"
       umount_fs $MOUNT_DIR
       ;;
     *)
@@ -376,10 +380,19 @@ main_rows_per_table () {
 MAIN_TABLES=16
 MAIN_ROWS_PER_TABLE=32000000
 
-# TAU_SEGSIZE: the tau images made with that journal segment size (do_mkfs)
+# TAU_SEGSIZE: the journal segment size of the tau file systems (do_mkfs). Every
+# bench uses 16m (2026-11-08); set it empty for mkfs's 128 MiB.
+TAU_SEGSIZE=${TAU_SEGSIZE-16m}
 # TAU_IMGTAG: another image of the same kind, <fs>_<key>_<tag>.img
 main_image_key () {
-  echo "t${MAIN_TABLES}_r${MAIN_ROWS_PER_TABLE}${TAU_SEGSIZE:+_seg$TAU_SEGSIZE}${TAU_IMGTAG:+_$TAU_IMGTAG}"
+  echo "t${MAIN_TABLES}_r${MAIN_ROWS_PER_TABLE}${TAU_IMGTAG:+_$TAU_IMGTAG}"
+}
+
+# fs_image <fs> <key> <dir>: the image file; a tau image's name ends in its segment size
+fs_image () {
+  local seg=
+  case $1 in *-tau) seg=${TAU_SEGSIZE:+_seg$TAU_SEGSIZE} ;; esac
+  echo "$3/${1}_$2$seg.img"
 }
 
 # /proc/diskstats lines of the test device (sector = 512 B), taken before and

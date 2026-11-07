@@ -35,8 +35,8 @@ fi
 
 for FS in ${TARGET_FILESYSTEM}; do
   # partclone will not overwrite an image; fail before the hour of loading
-  if [ -e "$BACKUP_DIR/${FS}_$(main_image_key).img" ]; then
-    echo "❌ $BACKUP_DIR/${FS}_$(main_image_key).img exists; move it away first"
+  if [ -e "$(fs_image $FS "$(main_image_key)" $BACKUP_DIR)" ]; then
+    echo "❌ $(fs_image $FS "$(main_image_key)" $BACKUP_DIR) exists; move it away first"
     exit 1
   fi
 done
@@ -151,7 +151,7 @@ for FS in ${TARGET_FILESYSTEM}; do
     sleep 1
     create_backup_fs_image $FS "$(main_image_key)" $BACKUP_DIR
 
-    echo "[✓] Done: $BACKUP_DIR/${FS}_$(main_image_key).img"
+    echo "[✓] Done: $(fs_image $FS "$(main_image_key)" $BACKUP_DIR)"
   done
   echo "=== FS: $FS Done ==="
   if [ "$FS" == "zfs" ] || [[ "$FS" == zfs-* ]]; then

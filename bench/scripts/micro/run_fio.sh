@@ -19,10 +19,10 @@
 #   XFS_App    XFS_Raw's file system, per-thread doublewrite file [app]    base kernel
 #   EXT4_Data  stock mke2fs -J size=40000 (40,000 MB), data=journal   base kernel
 #   ZFS        ashift=12, recordsize=16K, compression=off, atime=off  base kernel
-#   tau-EXT4   tau mke2fs from codes/, mount tjournal,tjournal_size=$TAU_JOURNAL_GB;
+#   tau-EXT4   tau mke2fs from codes/ (segments $TAU_SEGSIZE), mount tjournal,tjournal_size=$TAU_JOURNAL_GB;
 #              fio opens its files with O_TAU_UNTORN through tau_preload.so
-#   tau-XFS    tau mkfs.xfs -l tjmaxsize=${TAU_JOURNAL_GB}G (one tau journal
-#              map block holds 32 GiB: the default 1G stops tau-XFS at 32 GiB),
+#   tau-XFS    tau mkfs.xfs -l tjsegsize=$TAU_SEGSIZE,tjmaxsize=${TAU_JOURNAL_GB}G (tjmaxsize
+#              sizes the map, 256 segments a block: the default 1G stops tau-XFS at 256 segments),
 #              mount tjournal,tjournal_size=$TAU_JOURNAL_GB
 #
 # Experiments (EXPS, in this order per configuration):
@@ -170,9 +170,9 @@ fs_make() {
     EXT4_Data) stock_mke2fs -q -t ext4 -J size=40000 -E "$ext" -F "$DEVICE" ;;
     XFS_Raw|XFS_App) stock_mkfs_xfs -q -f "${xk[@]}" "$DEVICE" ;;
     tau-EXT4)
-      sudo "$TAUFS_E2FSPROGS/misc/mke2fs" -q -t ext4 -E "$ext" -F "$DEVICE" ;;
+      sudo "$TAUFS_E2FSPROGS/misc/mke2fs" -q -t ext4 -E "$ext${TAU_SEGSIZE:+,tau_segsize=$TAU_SEGSIZE}" -F "$DEVICE" ;;
     tau-XFS)
-      sudo "$TAUFS_XFSPROGS/mkfs/mkfs.xfs" -q -f "${xk[@]}" -l tjmaxsize=${TAU_JOURNAL_GB}G "$DEVICE" ;;
+      sudo "$TAUFS_XFSPROGS/mkfs/mkfs.xfs" -q -f "${xk[@]}" -l ${TAU_SEGSIZE:+tjsegsize=$TAU_SEGSIZE,}tjmaxsize=${TAU_JOURNAL_GB}G "$DEVICE" ;;
     ZFS)
       sudo wipefs -a "$DEVICE" >/dev/null
       sudo zpool create -f -o ashift=12 -O recordsize=16K -O compression=off -O atime=off \

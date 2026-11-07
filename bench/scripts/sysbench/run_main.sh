@@ -184,10 +184,10 @@ fi
 
 TABLE=$MAIN_TABLES
 ROWS=$MAIN_ROWS_PER_TABLE
-IMAGE_KEY="t${TABLE}_r${IMAGE_ROWS:-$ROWS}${TAU_SEGSIZE:+_seg$TAU_SEGSIZE}${TAU_IMGTAG:+_$TAU_IMGTAG}"   # main_image_key, or VARIANT=empty's
+IMAGE_KEY="t${TABLE}_r${IMAGE_ROWS:-$ROWS}${TAU_IMGTAG:+_$TAU_IMGTAG}"   # main_image_key, or VARIANT=empty's
 BACKUP_DIR=$TAU_BACKUP_ROOT/sysbench/$DBMS
 
-echo "=== Starting sysbench benchamrk: DBMS=$DBMS, image=$IMAGE_KEY${VARIANT:+, variant=$VARIANT} ==="
+echo "=== Starting sysbench benchamrk: DBMS=$DBMS, image=$IMAGE_KEY${TAU_SEGSIZE:+ (tau: segments $TAU_SEGSIZE)}${VARIANT:+, variant=$VARIANT} ==="
 echo "=== WORKLOADS=${WORKLOADS[*]}, THREADS_LIST=${THREADS_LIST[*]} (last x$LAST_POINT_RUNS) ==="
 
 for WORKLOAD in "${WORKLOADS[@]}"; do
@@ -198,8 +198,8 @@ for WORKLOAD in "${WORKLOADS[@]}"; do
 done
 n_blocks=0
 for FS in $FS_GROUPS; do
-  if [ ! -f "$BACKUP_DIR/${FS}_${IMAGE_KEY}.img" ]; then
-    echo "❌ Missing image $BACKUP_DIR/${FS}_${IMAGE_KEY}.img (run create_image.sh $DBMS)"
+  if [ ! -f "$(fs_image $FS "$IMAGE_KEY" $BACKUP_DIR)" ]; then
+    echo "❌ Missing image $(fs_image $FS "$IMAGE_KEY" $BACKUP_DIR) (run create_image.sh $DBMS)"
     exit 1
   fi
   if [[ " $FS_FPWON " =~ " $FS " ]]; then n_blocks=$((n_blocks + ${#WORKLOADS[@]})); fi
@@ -368,7 +368,7 @@ for WORKLOAD in "${WORKLOADS[@]}"; do
         [[ ! " $FS_FPWOFF " =~ " $FS " ]] && continue
       fi
       BLOCK="${DBMS}_${WORKLOAD}_${FS}${VARIANT:+-$VARIANT}_fpw_${FPW}_t${TABLE}"
-      echo "=== $BLOCK: restoring ${FS}_${IMAGE_KEY} on $DEVICE ==="
+      echo "=== $BLOCK: restoring $(basename "$(fs_image $FS "$IMAGE_KEY" $BACKUP_DIR)") on $DEVICE ==="
       echo "protocol: trim_before_restore=${TAU_TRIM_BEFORE_RESTORE:-1}" \
         "fill_before_restore=${TAU_FILL_BEFORE_RESTORE:-0} no_discard=${TAU_NO_DISCARD:-0}" \
         "pg_pre_checkpoint=$PG_PRE_CHECKPOINT fixed_seed=$SB_FIXED_SEED prewrite_redo=${MY_PREWRITE_REDO:-0}" \
