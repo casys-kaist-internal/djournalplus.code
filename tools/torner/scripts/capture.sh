@@ -212,7 +212,10 @@ GEN_JSON=$("$TORNER" gen --file "$MNT/torner.dat" --progress-log "$LOOP_PROG" \
 	|| die "torner gen failed"
 echo "$GEN_JSON"
 
-sync
+# CAPTURE_NOSYNC=1 unmounts straight after the workload: then the file system's
+# own unmount writes everything out, with no sync(2) -- whose writeback and final
+# flush can cover what unmount would otherwise leave unflushed -- before it.
+[ "${CAPTURE_NOSYNC:-0}" = 1 ] || sync
 if fs_is_zfs "$FS"; then
 	fs_zfs_export || die "zpool export"
 else

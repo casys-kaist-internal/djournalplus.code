@@ -151,7 +151,8 @@ for cell in $CELLS; do
 		fi
 		spid=
 		case $fs in tau-*) probes_zero; probes_sample $W/$name-probe-samples.txt & spid=$! ;; esac
-		sudo env PATH=$path MKE2FS_CONFIG=$MK TORNER_TAU_MKFS_OPTS="$mkfs" $S/capture.sh --workdir $D \
+		sudo env PATH=$path MKE2FS_CONFIG=$MK TORNER_TAU_MKFS_OPTS="$mkfs" \
+			CAPTURE_NOSYNC=${CAPTURE_NOSYNC:-0} $S/capture.sh --workdir $D \
 			--fs $fs --threads 1 --fsync-every 1 $args --gen-args "$gen" \
 			> $W/$name-capture.log 2>&1
 		rc=$?

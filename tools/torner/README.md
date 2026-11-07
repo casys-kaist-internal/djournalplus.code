@@ -432,7 +432,17 @@ fails I2 (50,954 of 54,804 blocks) and I3 (72 of 72 tags) besides I1;
 blocks); `tau_reuse_flush_only` fails I4 on every reuse (15,809-21,881 per
 capture) while I1's attribution stays silent (no block missing) — which is why
 (a) is checked on its own; `tau_segmap_fua_only` fails I2 at the unmount
-snapshot on tau-xfs (4 and 20 blocks) and shows nothing on tau-ext4.
+snapshot on tau-xfs (4 and 20 blocks).  On tau-ext4 it shows only with
+`MKFS_OPTS="-E tau_segsize=2m,lazy_itable_init=0,lazy_journal_init=0"` and
+`CAPTURE_NOSYNC=1` (16 blocks each; 0 without the knob): otherwise
+ext4lazyinit's zeroing (a bare flush per inode table group) and the `sync`
+before unmount flush the last home writes first, and the final checkpoint has
+nothing left.  Those ext4-side flushes make writes durable earlier than tau
+orders them, during the timed run too, so they weaken every tau-ext4 ordering
+check.  With `tau_maplog_len=8` (a snapshot every few log blocks) the base
+rule, the wrap rule and owners in map blocks are exercised mid-run (6-9 base
+moves, 30-46 overwrites, 11-14 owners per capture): 0 violations, and with
+`tau_maplog_early_base` every base move fails.
 
 **I5** — an application atomic write is contained in one durable unit: some
 single unit carries every sector of it.  The unit depends on the configuration:
