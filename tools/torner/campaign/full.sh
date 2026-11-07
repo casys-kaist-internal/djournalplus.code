@@ -144,6 +144,20 @@ if i1:
         print("  %-9s %-10s %-6s %-22s %s/%s  missing %s  own %s / host %s / never %s  violations %s  %s" % (
             r["config"], r["row"], r["profile"], r["tag"], r["i1_checked"], r["i1_skipped"],
             r["i1_missing"], r["i1_own"], r["i1_gated"], r["i1_gate_closed"], nv, verdict))
+# I5 from the same loginv.json: is each application write inside one durable
+# unit -- a tau or jbd2 transaction, the bio with no data journal.  tau must
+# have no split; ext4 data=journal's splits are its commit-induced tears.
+i5 = [r for r in csv.DictReader(open(sys.argv[1])) if r.get("i5_checked")]
+if i5:
+    print("\nI5 per cell (each application write inside one durable unit): writes, split"
+          " (in gen's timed run), partial, in no unit; the bio where there is no data journal")
+    for r in i5:
+        ns = int(r["i5_split"] or 0)
+        tau = r["config"].startswith("tau-")
+        verdict = ("VIOLATIONS" if ns else "passes") if tau else ("splits" if ns else "none split")
+        print("  %-9s %-10s %-6s %-22s writes %-6s split %s (run %s)  partial %s  no unit %s  %s" % (
+            r["config"], r["row"], r["profile"], r["tag"], r["i5_checked"], ns,
+            r["i5_split_run"] or "-", r["i5_partial"] or "-", r["i5_no_unit"] or "-", verdict))
 PYEOF
 } > "$OUT/summary.md"
 cat "$OUT/summary.md"

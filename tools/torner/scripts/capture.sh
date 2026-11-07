@@ -69,7 +69,7 @@ usage: capture.sh --workdir DIR [options]
 
 Artifacts land in DIR: base.img, log.img, progress.img, capture.json,
 atoms.json (how each application write reached the device; torner atoms),
-loginv.json (tau: gated I1 over every record; torner loginv)
+loginv.json (gated I1 over every tau record, I5 over every write; torner loginv)
 EOF
 	exit 1
 }
@@ -250,26 +250,41 @@ if [ "$STAT_RC" != 0 ]; then
 	exit 1
 fi
 
-# Gated I1 over every record in the log (torner loginv, README): a verdict
-# that needs no crash state.  A violation is recorded, not a failed capture --
-# the record_fua_only control is meant to have them.
+# The static invariants over the whole log (torner loginv, README): gated I1
+# over every tau record, and I5 -- each application write inside one durable
+# unit (a tau or jbd2 transaction; the bio where there is no data journal).
+# A violation is recorded, not a failed capture: the record_fua_only control
+# and ext4 data=journal are meant to have them.
+LI_CHECK=
 case "$FS" in
-tau-*)
-	"$TORNER" loginv --log "$LOG" --config "$FS" --check I1 \
+tau-*)		LI_CHECK=I1,I5 ;;
+ext4*|xfs)	LI_CHECK=I5 ;;
+esac
+if [ -n "$LI_CHECK" ]; then
+	"$TORNER" loginv --log "$LOG" --config "$FS" --check "$LI_CHECK" \
 		--max-violations 8 > "$WORKDIR/loginv.json"
 	LI_RC=$?
 	[ -s "$WORKDIR/loginv.json" ] && python3 - "$WORKDIR/loginv.json" "$LI_RC" <<'PYEOF' >&2
 import json, sys
-c = json.load(open(sys.argv[1])).get("coverage", {})
-print("[capture] gated I1 (exit %s): records checked %d, skipped %d, blocks missing %d;"
-      " ordered by own flush %d, by host commit %d, gate never open %d; violations %d"
-      % (sys.argv[2], c.get("i1_transactions_checked", 0),
-         c.get("i1_transactions_skipped", 0), c.get("i1_blocks_missing", 0),
-         c.get("i1_ordered_own_flush", 0), c.get("i1_ordered_by_host_commit", 0),
-         c.get("i1_gate_never_open", 0), c.get("i1_violations", 0)))
+j = json.load(open(sys.argv[1]))
+c, ck = j.get("coverage", {}), j.get("checks", {})
+if ck.get("I1") == "run":
+    print("[capture] gated I1 (exit %s): records checked %d, skipped %d, blocks missing %d;"
+          " ordered by own flush %d, by host commit %d, gate never open %d; violations %d"
+          % (sys.argv[2], c.get("i1_transactions_checked", 0),
+             c.get("i1_transactions_skipped", 0), c.get("i1_blocks_missing", 0),
+             c.get("i1_ordered_own_flush", 0), c.get("i1_ordered_by_host_commit", 0),
+             c.get("i1_gate_never_open", 0), c.get("i1_violations", 0)))
+if j.get("config", "").startswith(("tau-", "ext4-data")):
+    print("[capture] I5 (one transaction per write): writes %d, split %d (in the timed run %d),"
+          " partial %d, in no unit %d" % (c.get("i5_writes_checked", 0),
+          c.get("i5_writes_split", 0), c.get("i5_writes_split_in_run", 0),
+          c.get("i5_writes_partial", 0), c.get("i5_writes_in_no_unit", 0)))
+elif ck.get("I5") == "run":
+    print("[capture] I5 (one bio per write): writes %d, over more than one bio %d"
+          % (c.get("app_writes_checked", 0), c.get("app_writes_spanning_multiple_bios", 0)))
 PYEOF
-	;;
-esac
+fi
 
 # How each application write reached the device -- one bio, or in pieces --
 # read off the log by content alone.  This is what the atom-* strategies plan

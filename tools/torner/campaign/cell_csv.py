@@ -30,6 +30,12 @@ capture.json, atoms.json, states-<strategy>.jsonl -- and says, for that
                   no write in the log, records ordered by their own flush, by the
                   host commit they name, whose host commit never came, and
                   violations (torner README, `torner loginv`)
+  i5_*            loginv.json: I5, each application write inside one durable
+                  unit -- writes checked, split across units (and how many of
+                  those start in gen's timed run), held in part (tau: counted,
+                  not judged), in no unit.  The unit is the tau or jbd2
+                  transaction; on ext4/xfs with no data journal it is the bio,
+                  and i5_split counts writes spanning more than one
 
 A 2 KiB append alternates a write that starts a block (even page) with one
 inside the block the previous write allocated (odd page); --row ap2k splits
@@ -52,7 +58,8 @@ FIELDS = ("config", "row", "profile", "tag", "kernel", "mount_opts", "mkfs_opts"
           "upper95", "kinds", "witness", "capture",
           "reused", "reuse_flush", "reused_win", "reuse_flush_win",
           "i1_checked", "i1_skipped", "i1_missing", "i1_own", "i1_gated",
-          "i1_gate_closed", "i1_violations")
+          "i1_gate_closed", "i1_violations",
+          "i5_checked", "i5_split", "i5_split_run", "i5_partial", "i5_no_unit")
 
 
 def wilson_hi(k, n, z=1.96):
@@ -136,11 +143,24 @@ def probes(cap, duration):
 
 
 def loginv_i1(cap):
-    """capture.sh's gated I1 verdict (loginv.json), tau captures from 11-07 on."""
+    """capture.sh's loginv verdicts (loginv.json), captures from 11-07 on."""
     try:
-        c = json.load(open(os.path.join(cap, "loginv.json"))).get("coverage", {})
+        j = json.load(open(os.path.join(cap, "loginv.json")))
     except (OSError, ValueError):
         return {}
+    c, ck, out = j.get("coverage", {}), j.get("checks", {}), {}
+    if ck.get("I5") == "run":
+        if j.get("config", "").startswith(("tau-", "ext4-data")):
+            out.update(i5_checked=c.get("i5_writes_checked", ""),
+                       i5_split=c.get("i5_writes_split", ""),
+                       i5_split_run=c.get("i5_writes_split_in_run", ""),
+                       i5_partial=c.get("i5_writes_partial", ""),
+                       i5_no_unit=c.get("i5_writes_in_no_unit", ""))
+        else:   # no data journal: the bio is the unit
+            out.update(i5_checked=c.get("app_writes_checked", ""),
+                       i5_split=c.get("app_writes_spanning_multiple_bios", ""))
+    if ck.get("I1") != "run":
+        return out
     keys = (("i1_checked", "i1_transactions_checked"),
             ("i1_skipped", "i1_transactions_skipped"),
             ("i1_missing", "i1_blocks_missing"),
@@ -148,7 +168,8 @@ def loginv_i1(cap):
             ("i1_gated", "i1_ordered_by_host_commit"),
             ("i1_gate_closed", "i1_gate_never_open"),
             ("i1_violations", "i1_violations"))
-    return {k: c.get(src, "") for k, src in keys}
+    out.update({k: c.get(src, "") for k, src in keys})
+    return out
 
 
 def summarize(cap, row, profile):
