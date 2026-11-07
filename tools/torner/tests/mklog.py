@@ -43,14 +43,17 @@ FSBLK = 4096
 SPB = FSBLK // SECTORSIZE          # sectors per fs block
 
 
-def tau_superblock():
+def tau_superblock(sequence=0, base=0):
     """s_blocksize@12 and s_segment_size@92; jbd2 leaves the latter zero, which
-    is the only field that tells the two superblocks apart."""
+    is the only field that tells the two superblocks apart.  s_sequence@24 is
+    the mount, s_maplog_base@0x68 how far the map blocks hold the map log."""
     b = bytearray(FSBLK)
     struct.pack_into(">III", b, 0, TAU_MAGIC, 4, 0)
     struct.pack_into(">I", b, 12, FSBLK)          # s_blocksize
     struct.pack_into(">I", b, 16, 2)              # s_maxlen: sb + one map block
+    struct.pack_into(">I", b, 24, sequence)       # s_sequence
     struct.pack_into(">I", b, 92, TAU_SEG_SIZE)   # s_segment_size
+    struct.pack_into(">Q", b, 0x68, base)         # s_maplog_base
     return bytes(b)
 
 
@@ -94,7 +97,8 @@ def tau_descriptor(seq, ino, tags, next_segment=0, serial=1, home=()):
     return bytes(b)
 
 
-def tau_commit(seq, ino, epoch, next_segment=0, serial=1, flags=0, maplog=(0, 0)):
+def tau_commit(seq, ino, epoch, next_segment=0, serial=1, flags=0, maplog=(0, 0),
+               tail=None, jgen=1):
     b = bytearray(FSBLK)
     struct.pack_into(">IIII", b, 0, TAU_MAGIC, TAU_COMMIT_BLOCK, seq, 0)
     struct.pack_into(">Q", b, 16, ino)
@@ -106,6 +110,23 @@ def tau_commit(seq, ino, epoch, next_segment=0, serial=1, flags=0, maplog=(0, 0)
         flags |= 0x4                               # TAU_COMMIT_F_MAPLOG
         struct.pack_into(">I", b, 40, flags)
         struct.pack_into(">QI", b, 80, maplog[0], maplog[1])   # h_maplog, h_maplog_nr
+    if tail is not None:
+        flags |= 0x1                               # TAU_COMMIT_F_TAIL
+        struct.pack_into(">I", b, 40, flags)
+        struct.pack_into(">I", b, 44, jgen)        # h_jgen
+        struct.pack_into(">I", b, 60, tail[0])     # h_tail_tid
+        struct.pack_into(">Q", b, 64, tail[1])     # h_tail_blk
+    return bytes(b)
+
+
+def tau_revoke(seq, tags, flags=1):
+    """A revoke block: h_num_tags@12, h_flags@16 (1 = SCOPED), then
+    {t_scope be64, t_pblocknr be64} tags from offset 32."""
+    b = bytearray(FSBLK)
+    struct.pack_into(">IIII", b, 0, TAU_MAGIC, 3, seq, len(tags))
+    struct.pack_into(">Q", b, 16, flags)
+    for i, (scope, pblk) in enumerate(tags):
+        struct.pack_into(">QQ", b, 32 + i * 16, scope, pblk)
     return bytes(b)
 
 
@@ -501,6 +522,91 @@ def build_i5(kind, path):
     log.dump(path)
 
 
+# ---- I2, I3, I4 ---------------------------------------------------------------
+
+def tx(log, seq, at, tags, commit_flags=LOG_FUA_FLAG, tail=None, revoke=None):
+    """Descriptor at @at, one journal block per tag, an optional revoke block,
+    then a FLUSH and the commit (PREFLUSH|FUA, as dm logs it); returns the next
+    free journal block."""
+    log.write(at, tau_descriptor(seq=seq, ino=12, tags=tags))
+    for n in range(len(tags)):
+        log.write(at + 1 + n, bytes(FSBLK))
+    nxt = at + 1 + len(tags)
+    if revoke:
+        log.write(nxt, tau_revoke(seq, revoke))
+        nxt += 1
+    log.barrier(LOG_FLUSH_FLAG)
+    log.write(nxt, tau_commit(seq=seq, ino=12, epoch=0, tail=tail),
+              flags=commit_flags)
+    return nxt + 1
+
+
+def build_i234(kind, path):
+    # mkfs writes the superblock and the map; the mount writes the superblock
+    # again with the next s_sequence, its records carry it as h_jgen
+    log = Log()
+    log.write(TAU_SB_LBA, tau_superblock(sequence=0))
+    log.write(TAU_SB_LBA + 1, tau_segment_map([TAU_SEG_PBA]))
+    log.write(TAU_SB_LBA, tau_superblock(sequence=1), flags=LOG_FUA_FLAG)
+    jb = TAU_SEG_PBA
+    if kind in ("i2-ok", "i2-uncovered", "i2-handoff"):
+        # tx 42 journals home block 5000; tx 43's record moves the tail past
+        # 42 (or, handoff, tx 43 journals 5000 again and tx 44's tail passes
+        # only 42).  By then 5000 must be durable at home, or held by 43.
+        jb = tx(log, 42, jb, [5000], tail=(42, TAU_SEG_PBA))
+        if kind == "i2-ok":
+            log.write(5000, bytes(FSBLK))                # the checkpoint
+        if kind == "i2-handoff":
+            first43 = jb
+            jb = tx(log, 43, jb, [5000], tail=(42, TAU_SEG_PBA))
+            jb = tx(log, 44, jb, [6000], tail=(43, first43))
+        else:
+            jb = tx(log, 43, jb, [6000], tail=(43, jb))
+        if kind == "i2-uncovered":
+            log.write(5000, bytes(FSBLK))                # too late
+            log.barrier(LOG_FLUSH_FLAG)
+    elif kind in ("i3-ok", "i3-late"):
+        # 42 journals 5000; then 5000 is rewritten in place, and 43 carries
+        # the scoped tag (5000, scope 42) for it: the home write must be
+        # durable before 43 can count.
+        first = jb
+        jb = tx(log, 42, jb, [5000], tail=(42, first))
+        if kind == "i3-ok":
+            log.write(5000, bytes(FSBLK))
+        jb = tx(log, 43, jb, [6000], tail=(42, first), revoke=[(42, 5000)])
+        if kind == "i3-late":
+            log.write(5000, bytes(FSBLK))
+            log.barrier(LOG_FLUSH_FLAG)
+    elif kind == "tailblk-bad":
+        # the record names tx 42's first block wrongly
+        jb = tx(log, 42, jb, [5000], tail=(42, TAU_SEG_PBA + 7))
+    elif kind in ("i4-base-ok", "i4-base-early"):
+        # a snapshot: map blocks PREFLUSH|FUA, then the superblock moves the
+        # base (FUA).  The early-base control moves it first.
+        jb = tx(log, 42, jb, [5000], tail=(42, TAU_SEG_PBA))
+        if kind == "i4-base-early":
+            log.barrier(LOG_FLUSH_FLAG)
+            log.write(TAU_SB_LBA, tau_superblock(sequence=1, base=5), flags=LOG_FUA_FLAG)
+        log.barrier(LOG_FLUSH_FLAG)
+        log.write(TAU_SB_LBA + 1, tau_segment_map([TAU_SEG_PBA]), flags=LOG_FUA_FLAG)
+        if kind == "i4-base-ok":
+            log.barrier(LOG_FLUSH_FLAG)
+            log.write(TAU_SB_LBA, tau_superblock(sequence=1, base=5), flags=LOG_FUA_FLAG)
+    elif kind in ("i4-reuse-ok", "i4-reuse-nofree"):
+        # the segment was claimed on the map log; its next owner writes it
+        # again -- only after a FREE naming it is complete
+        log.write(9200, maplog_claim(1, [(0, TAU_SEG_PBA)]))
+        jb = tx(log, 42, TAU_SEG_PBA, [5000], tail=(42, TAU_SEG_PBA))
+        log.write(5000, bytes(FSBLK))
+        log.barrier(LOG_FLUSH_FLAG)
+        if kind == "i4-reuse-ok":
+            log.write(9100, maplog_free(2, [(0, TAU_SEG_PBA)]), flags=LOG_FUA_FLAG)
+        tx(log, 50, TAU_SEG_PBA, [5001], tail=(50, TAU_SEG_PBA))
+    else:
+        raise SystemExit("unknown kind %s" % kind)
+    log.dump(path)
+
+
 def build_unit(path):
     """One intact unit for the sector round-trip test: page 0, version 1."""
     with open(path, "wb") as f:
@@ -516,6 +622,8 @@ def build(kind, path):
         build_unit(path)
     elif kind.startswith("i5-"):
         build_i5(kind, path)
+    elif kind.startswith(("i2-", "i3-", "i4-", "tailblk")):
+        build_i234(kind, path)
     else:
         build_tau(kind, path)
 
@@ -526,6 +634,8 @@ if __name__ == "__main__":
                          "gated-ok|gated-late|gate-closed|xfs-gated-ok|"
                          "fua-first|fua-first-nofree|home-ok|home-late|"
                          "i5-jbd2-ok|i5-jbd2-split|i5-tau-ok|i5-tau-split|"
-                         "claim-ok|claim-late|"
+                         "claim-ok|claim-late|i2-ok|i2-uncovered|i2-handoff|"
+                         "i3-ok|i3-late|tailblk-bad|i4-base-ok|i4-base-early|"
+                         "i4-reuse-ok|i4-reuse-nofree|"
                          "datalog|atomslog|unit} <out>")
     build(sys.argv[1], sys.argv[2])

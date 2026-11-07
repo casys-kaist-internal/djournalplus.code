@@ -9,7 +9,7 @@ Crash-atomicity test suite for tauJournal. Implements the T2/T3 plan in
 | §2.1 `atomicw` | `torner gen` | done |
 | §2.2 `atomchk` | `torner check` | done |
 | — | `torner tear` | done (self-test for `check`) |
-| §3 `tau-loginv` | `torner loginv` | parser + epochs + **gated I1** (FLUSH epochs; the host commit a flush-less record names; HOME blocks) + **I5** (one durable unit: bio / jbd2 transaction / tau transaction); I2–I4 not implemented |
+| §3 `tau-loginv` | `torner loginv` | parser + epochs + **gated I1** (FLUSH epochs; the host commit a flush-less record names; HOME blocks; map log claims) + **I2** (the tail) + **I3** (scoped revoke tags) + **I4** (the segment map log) + **I5** (one durable unit: bio / jbd2 transaction / tau transaction); the truncate, unlink and inode-reuse rules wait for a gen that makes them |
 | — | `torner atoms` | done: follows every application write through the log, FS-agnostic |
 | §4 `tau-replay` | `torner replay` | 4 of 5 epoch strategies + `torn-entry`; write-aimed `atom-order`/`atom-reorder`/`atom-tear`; `targeted` not implemented |
 | §6 `report.py` | `scripts/report.py` | Table 1, per-write table, write shapes, state coverage; T1/T3 tables have no input |
@@ -308,7 +308,7 @@ and defaults to the numeric `--run-id`.
 
 ```
 torner loginv --log <logdev> [--config tau-ext4|tau-xfs|ext4-data|ext4|xfs]
-              [--check I1[,I5]] [--i1-strict] [--fsblock 4096] [--stat-only]
+              [--check I1[,I2,I3,I4,I5]] [--i1-strict] [--fsblock 4096] [--stat-only]
 ```
 
 Parses a `dm-log-writes` log and decides ordering invariants without crashing
@@ -381,6 +381,58 @@ of I1 passed by skipping 99.8% of its transactions:
   previous owner's write of the same block is never taken.  More than one write
   inside an ownership is counted (`i1_blocks_ambiguous`).  A HOME block is
   looked for after the file's previous commit.
+
+**I2, I3, I4** come from the kernel session's rules for #397 (2026-11-07),
+read against `taudocs/paper/architecture.md` §10.3 and §17.  They need I1's
+transactions, so they run with it.
+
+**I2 — the tail.**  A record whose `h_tail_tid` is past tx T (`tid_gt`, per
+file and mount: inode, serial, `h_jgen`) ends T's replay; so does a `FREE`
+dropping one of T's segments, or a snapshot dropping one once the superblock
+moves `s_maplog_base` past it (recovery applies log blocks past the base over
+the map blocks).  By the earliest of these — a record judged as gated I1 judges
+it, the earliest that can count among those passing T — every home block T
+journaled must be covered: a home write of it after T's first block, durable by
+then (from any engine: it carries T's version or newer), or a later
+transaction of the file that journaled it again, not passed itself and valid
+by then (the handoff).  HOME tags owe nothing.  A truncate's conditional tags
+and an unlinked file are the other two ways out; until a gen makes them, a
+block a conditional tag of the file names, in T or later, is counted as
+`i2_deferred`.  Counted, not judged: a home write of one of T's journal blocks
+before T's record is valid (`i2_leads`; with `tau_defer_txdirty_cpflush` on the
+kernel session expects none), and a block covered at the base write but not at
+the snapshot's map block (`i2_snapshot_leads`).  `h_tail_blk` is checked
+structurally: the first block of tx `h_tail_tid`.
+
+**I3 — scoped revoke tags.**  A scoped tag (pblk, scope S) in record C stands
+in for in-place data written over the file's last journal copy of pblk.  With
+J the newest transaction of the file at or before S holding such a copy (none:
+the tag is vacuous), the last home write of pblk after J's record (failing
+that, the first after C) must be durable by the time C can count — or a
+transaction of the file in (S, C] journaled pblk again (an undo block hit by a
+write journaled whole goes back into the running transaction, tag still
+queued); a file's records become valid in tid order.  Conditional tags and the
+revoke-range path are counted only.
+
+**I4 — the segment map log**, per mount: a segment whose publication is in the
+log — a claim, or the first map block naming it — is written again by its next
+owner only after a completed `FREE` naming it, or a snapshot whose base passed
+the claim (each journal block is written once per ownership, so a second write
+of one marks a reuse); a snapshot writes every map block before the superblock
+moves the base, and a log block is overwritten only once its mount's base
+passed its seq; a map block names an owner only for a segment whose claim's
+record can count already.
+
+On the 2026-11-07 captures of #397 (62 main and variant cells) and of #388 (56):
+0 violations and 0 leads in I2, I3 and I4; `h_tail_blk` right in all 150,633
+records.  The controls, each on ow16k, tau-ext4 and tau-xfs, quiet and busy,
+capture only (`STRATS=none`, 2026-11-07-tau397-maplogctl): `record_fua_only`
+fails I2 (50,954 of 54,804 blocks) and I3 (72 of 72 tags) besides I1;
+`tau_maplog_early_base` fails I4 in all four (the base moved before the map
+blocks); `tau_reuse_flush_only` fails I4 on every reuse (15,809-21,881 per
+capture) while I1's attribution stays silent (no block missing) — which is why
+(a) is checked on its own; `tau_segmap_fua_only` fails I2 at the unmount
+snapshot on tau-xfs (4 and 20 blocks) and shows nothing on tau-ext4.
 
 **I5** — an application atomic write is contained in one durable unit: some
 single unit carries every sector of it.  The unit depends on the configuration:

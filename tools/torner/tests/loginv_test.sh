@@ -137,6 +137,47 @@ run claim-late
 want_rc 2 "a claim block logged after the record trips I1"
 want_has '"data_lba":9200' "  ...naming the claim block"
 
+# I2: a record whose tail passes tx T ends T's replay, so every home block T
+# journaled must then be durable at home, or held by a later transaction the
+# tail has not passed (the handoff).
+run i2-ok tau-ext4 --check I1,I2
+want_rc 0 "I2: the tail passes a tx whose home block was flushed first"
+want_has '"i2_covered_home":1' "  ...covered by its home write"
+run i2-uncovered tau-ext4 --check I1,I2
+want_rc 2 "I2: the tail passes a tx whose home block is not durable"
+want_has '"invariant":"I2"' "  ...reported as I2"
+want_has '"pblk":5000' "  ...naming the block"
+run i2-handoff tau-ext4 --check I1,I2
+want_rc 0 "I2: a later tx inside the tail holds the block (handoff)"
+want_has '"i2_covered_handoff":1' "  ...counted as a handoff"
+run tailblk-bad tau-ext4 --check I1,I2
+want_rc 2 "h_tail_blk must name the first block of the tail transaction"
+want_has '"invariant":"tail_blk"' "  ...reported as tail_blk"
+
+# I3: a scoped revoke tag stands in for in-place data: that home write first,
+# then the record carrying the tag.
+run i3-ok tau-ext4 --check I1,I3
+want_rc 0 "I3: the in-place write is durable before the tag's record"
+want_has '"i3_covered_home":1' "  ...and was checked"
+run i3-late tau-ext4 --check I1,I3
+want_rc 2 "I3: the in-place write lands after the tag's record"
+want_has '"invariant":"I3"' "  ...reported as I3"
+
+# I4: the map log.  A snapshot's map blocks before the superblock moves the
+# base; a claimed segment reused only after a FREE naming it.
+run i4-base-ok tau-ext4 --check I1,I4
+want_rc 0 "I4: map blocks, then the base"
+want_has '"i4_base_moves":1' "  ...one base move checked"
+run i4-base-early tau-ext4 --check I1,I4
+want_rc 2 "I4: the base moved before the map blocks"
+want_has '"invariant":"I4"' "  ...reported as I4"
+run i4-reuse-ok tau-ext4 --check I1,I4
+want_rc 0 "I4: a claimed segment reused after its FREE"
+want_has '"i4_segment_reuses":3' "  ...its descriptor, data and commit blocks reused"
+run i4-reuse-nofree tau-ext4 --check I1,I4
+want_rc 2 "I4: a claimed segment reused with no FREE on the log"
+want_has '"claim_seq":1' "  ...naming the claim"
+
 # I5: an application write contained in one durable unit.  ext4 data=journal
 # journals page by page, so a commit can close a jbd2 transaction with half
 # of a 16 KiB write in it; the tags of jbd2's descriptors say which blocks a

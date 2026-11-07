@@ -86,7 +86,10 @@
  * descriptor keeps h_generation. */
 #define TAU_REVOKE_OFF_NUM_TAGS		12
 #define TAU_REVOKE_META_SIZE		32	/* sizeof(revoke_block_meta_t) */
-#define TAU_REVOKE_TAG_SIZE		16	/* {t_lblocknr be64, t_pblocknr be64} */
+#define TAU_REVOKE_TAG_SIZE		16	/* {t_scope be64, t_pblocknr be64} (#397) */
+#define TAU_REVOKE_OFF_FLAGS		16	/* h_flags, be64 (tau.h:306) */
+#define TAU_REVOKE_F_SCOPED		0x1	/* tags carry t_scope */
+#define TAU_REVOKE_F_COND		0x2	/* tags hold only if the host freed the block */
 
 /*
  * include/linux/tau_journal.h:75-79, __packed: {be32, be32, be16} == 10 bytes.
@@ -124,6 +127,7 @@
  * these 0 and the kernel fills them at mount.
  */
 #define TAU_SB_OFF_MAPLOG_PBA	0x60	/* s_maplog_pba, be64 */
+#define TAU_SB_OFF_MAPLOG_BASE	0x68	/* s_maplog_base, be64: the map holds the log up to it */
 #define TAU_SB_OFF_MAPLOG_LEN	0x70	/* s_maplog_len, be32 */
 
 /*
@@ -139,6 +143,7 @@
 #define TAU_MAPLOG_CLAIM	1
 #define TAU_MAPLOG_FREE		2
 #define TAU_MAPLOG_OFF_SEQ	8	/* h_seq, be64 */
+#define TAU_MAPLOG_OFF_JGEN	16	/* h_jgen, be32: the mount that wrote it */
 #define TAU_MAPLOG_OFF_KIND	20	/* h_kind, be16 */
 #define TAU_MAPLOG_OFF_NR	22	/* h_nr, be16 */
 #define TAU_MAPLOG_HDR_SIZE	32	/* sizeof(struct tau_maplog_head) */
@@ -160,6 +165,10 @@
  * and count only if the record does (fs/taujournal/journal.c,
  * tau_maplog_claim).
  */
+#define TAU_COMMIT_OFF_JGEN		44	/* h_jgen, be32: the mount's journal generation */
+#define TAU_COMMIT_OFF_TAIL_TID		60	/* h_tail_tid, be32 */
+#define TAU_COMMIT_OFF_TAIL_BLK		64	/* h_tail_blk, be64 */
+#define TAU_COMMIT_F_TAIL		0x1	/* h_jgen / h_tail_* are valid */
 #define TAU_COMMIT_OFF_MAPLOG		80	/* h_maplog, be64 */
 #define TAU_COMMIT_OFF_MAPLOG_NR	88	/* h_maplog_nr, be32 */
 #define TAU_COMMIT_F_MAPLOG		0x4

@@ -76,6 +76,11 @@ struct jblk {
 	uint64_t commit_epoch_field;	/* commit blocks: h_epoch */
 	uint64_t maplog_seq;		/* commit blocks: its first claim, h_maplog */
 	uint32_t maplog_nr;		/* ... and how many (TAU_COMMIT_F_MAPLOG) */
+	uint64_t tail_blk;		/* commit blocks: h_tail_blk */
+	uint32_t tail_tid;		/* ... h_tail_tid */
+	uint32_t jgen;			/* ... h_jgen */
+	uint32_t jtag_first;		/* descriptors: their journal tags, c->jtag[] */
+	uint32_t jtag_n;
 	uint32_t blocktype;
 	uint32_t sequence;
 	uint32_t commit_flags;		/* commit blocks: h_flags */
@@ -100,6 +105,68 @@ struct hcommit {
 	uint64_t fepoch;
 };
 
+/* A revoke tag, from a revoke block written at (lba, entry). */
+struct rtag {
+	uint64_t lba;
+	uint64_t entry_idx;
+	uint64_t scope;
+	uint64_t pblk;
+	uint32_t flags;		/* the block's h_flags: TAU_REVOKE_F_* */
+};
+
+static int rt_cmp(const void *x, const void *y);
+
+/* A write of the tau superblock: where the map log's base was. */
+struct sbwrite {
+	uint64_t entry_idx;
+	uint64_t fepoch;
+	uint64_t base;
+	uint32_t sequence;	/* s_sequence: the mount (= its records' h_jgen) */
+	uint8_t	 fua;
+};
+
+/* A write of one segment map block, and the owned entries it names. */
+struct mapwrite {
+	uint64_t entry_idx;
+	uint64_t fepoch;
+	uint32_t ent_first;	/* c->ment[] */
+	uint32_t ent_n;
+	uint8_t	 fua;
+};
+
+struct mapent {
+	uint64_t pba;
+	uint64_t ino;
+};
+
+/* One entry of a map log CLAIM block: segment pba entered by ino. */
+struct claiment {
+	uint64_t pba;
+	uint64_t ino;
+	uint64_t seq;
+	uint64_t entry_idx;
+};
+
+/* A write of one map log block (any kind), for the wrap rule. */
+struct mlwrite {
+	uint64_t lba;
+	uint64_t seq;
+	uint64_t entry_idx;
+	uint32_t jgen;		/* h_jgen: the mount that wrote it */
+};
+
+/* A transaction I1 reconstructed, for I2 and I3. */
+struct txinfo {
+	size_t	 ci;		/* its commit in jb[] */
+	uint64_t first_entry;	/* the earliest write of its own blocks */
+	uint64_t first_lba;	/* its first block: its first descriptor */
+	long	 seg[2];	/* the commit's segment, and the first one if two */
+	uint32_t jt_first;	/* the home blocks of its journal copies, c->txjt[] */
+	uint32_t jt_n;
+	uint32_t rt_first;	/* its revoke tags, indices into c->rt[], c->txrt[] */
+	uint32_t rt_n;
+};
+
 /* The write of one map log CLAIM block, by its h_seq. */
 struct claimw {
 	uint64_t seq;
@@ -111,6 +178,7 @@ struct segfree {
 	uint64_t pba;
 	uint64_t seq;		/* the map log block's h_seq */
 	uint64_t entry_idx;
+	uint64_t fepoch;
 };
 
 /*
@@ -173,6 +241,19 @@ struct ctx {
 	struct hcommit *hc;	size_t hc_n, hc_cap;
 	struct segfree *sf;	size_t sf_n, sf_cap;
 	struct claimw *cw;	size_t cw_n, cw_cap;
+	uint64_t *jtag;		size_t jtag_n, jtag_cap;	/* journal tags' home blocks */
+	struct rtag *rt;	size_t rt_n, rt_cap;
+	struct sbwrite *sbw;	size_t sbw_n, sbw_cap;
+	struct mapwrite *mw;	size_t mw_n, mw_cap;
+	struct mapent *ment;	size_t ment_n, ment_cap;
+	struct claiment *ce;	size_t ce_n, ce_cap;
+	struct mlwrite *mlw;	size_t mlw_n, mlw_cap;
+	uint64_t *idx2ino;	/* map entry -> its owner, as the log goes */
+	struct txinfo *tx;	size_t tx_n, tx_cap;
+	uint64_t *txjt;		size_t txjt_n, txjt_cap;
+	size_t	 *txrt;		size_t txrt_n, txrt_cap;
+	size_t	 *txof;		/* commit in jb[] -> its tx[], or SIZE_MAX */
+	size_t	 *cix, *cpos, nc;	/* commits by (inode, serial, entry) */
 	struct appsec *as;	size_t as_n, as_cap;
 	struct owner *own;	size_t own_n, own_cap;	/* I5: block writes -> unit */
 
@@ -431,12 +512,14 @@ static void hc_add(struct ctx *c, uint64_t key, uint64_t idx, uint64_t fepoch)
 	c->hc_n++;
 }
 
-static void sf_add(struct ctx *c, uint64_t pba, uint64_t seq, uint64_t idx)
+static void sf_add(struct ctx *c, uint64_t pba, uint64_t seq, uint64_t idx,
+		   uint64_t fepoch)
 {
 	GROW(c->sf, c->sf_n, c->sf_cap, 256);
 	c->sf[c->sf_n].pba = pba;
 	c->sf[c->sf_n].seq = seq;
 	c->sf[c->sf_n].entry_idx = idx;
+	c->sf[c->sf_n].fepoch = fepoch;
 	c->sf_n++;
 }
 
@@ -522,6 +605,8 @@ static void parse_tags(struct ctx *c, const uint8_t *b, struct jblk *j)
 
 	j->home_first = (uint32_t)c->home_n;
 	j->home_n = 0;
+	j->jtag_first = (uint32_t)c->jtag_n;
+	j->jtag_n = 0;
 	while (off + TAU_TAG_SIZE <= end) {
 		uint64_t blk = ((uint64_t)be32_at(b, off + TAU_TAG_OFF_HIGH) << 32) |
 			       be32_at(b, off + TAU_TAG_OFF_BLOCKNR);
@@ -533,6 +618,11 @@ static void parse_tags(struct ctx *c, const uint8_t *b, struct jblk *j)
 			GROW(c->home, c->home_n, c->home_cap, 1024);
 			c->home[c->home_n++] = blk;
 			j->home_n++;
+		} else {
+			/* a journal copy standing for home block blk */
+			GROW(c->jtag, c->jtag_n, c->jtag_cap, 1024);
+			c->jtag[c->jtag_n++] = blk;
+			j->jtag_n++;
 		}
 		off += TAU_TAG_SIZE;
 		if (!(fl & TAU_TAG_SAME_UUID))
@@ -542,14 +632,55 @@ static void parse_tags(struct ctx *c, const uint8_t *b, struct jblk *j)
 	}
 }
 
-/* A write of the segment map, in log order: which segment each entry names. */
-static void track_map_block(struct ctx *c, const uint8_t *b, uint64_t lba)
+/*
+ * A write of the segment map, in log order: which segment each entry names,
+ * and for whom.  An entry that stops naming its owner is a snapshot dropping
+ * that segment, which ends its ownership as a FREE does (fs/taujournal/
+ * journal.c: a snapshot is all map blocks PREFLUSH|FUA, waited, before the
+ * superblock moves s_maplog_base).
+ */
+static void track_map_block(struct ctx *c, const uint8_t *b, uint64_t lba,
+			    uint64_t idx, uint64_t fepoch, int fua)
 {
 	size_t base = (size_t)(lba - c->sb_lba - 1) * TAU_SEGMENT_ENT_MAX;
+	struct mapwrite m;
 	uint32_t e;
 
-	for (e = 0; e < TAU_SEGMENT_ENT_MAX && base + e < c->idx_n; e++)
-		c->idx2pba[base + e] = be64_at(b, (size_t)e * 16);
+	memset(&m, 0, sizeof(m));
+	m.entry_idx = idx;
+	m.fepoch = fepoch;
+	m.fua = fua ? 1 : 0;
+	m.ent_first = (uint32_t)c->ment_n;
+	for (e = 0; e < TAU_SEGMENT_ENT_MAX && base + e < c->idx_n; e++) {
+		uint64_t pba = be64_at(b, (size_t)e * 16);
+		uint64_t ino = be64_at(b, (size_t)e * 16 + 8);
+		uint64_t opba = c->idx2pba[base + e], oino = c->idx2ino[base + e];
+
+		/* the owner it named is gone: the segment's ownership ended */
+		if (opba && oino && (pba != opba || ino != oino))
+			sf_add(c, opba, UINT64_MAX - idx, idx, fepoch);
+		/* a segment the map names before any claim of it in the log was
+		 * published there: for I4 (a), a claim at this write (seq 0) */
+		if (pba && !opba) {
+			GROW(c->ce, c->ce_n, c->ce_cap, 256);
+			c->ce[c->ce_n].pba = pba;
+			c->ce[c->ce_n].ino = 0;
+			c->ce[c->ce_n].seq = 0;
+			c->ce[c->ce_n].entry_idx = idx;
+			c->ce_n++;
+		}
+		c->idx2pba[base + e] = pba;
+		c->idx2ino[base + e] = ino;
+		if (pba && ino) {
+			GROW(c->ment, c->ment_n, c->ment_cap, 256);
+			c->ment[c->ment_n].pba = pba;
+			c->ment[c->ment_n].ino = ino;
+			c->ment_n++;
+			m.ent_n++;
+		}
+	}
+	GROW(c->mw, c->mw_n, c->mw_cap, 16);
+	c->mw[c->mw_n++] = m;
 }
 
 /*
@@ -567,6 +698,12 @@ static void track_maplog_block(struct ctx *c, const uint8_t *b, uint64_t lba,
 
 	if (nr > TAU_MAPLOG_ENT_MAX)
 		return;
+	GROW(c->mlw, c->mlw_n, c->mlw_cap, 256);
+	c->mlw[c->mlw_n].lba = lba;
+	c->mlw[c->mlw_n].seq = seq;
+	c->mlw[c->mlw_n].entry_idx = idx;
+	c->mlw[c->mlw_n].jgen = be32_at(b, TAU_MAPLOG_OFF_JGEN);
+	c->mlw_n++;
 	if (kind == TAU_MAPLOG_CLAIM) {
 		GROW(c->cw, c->cw_n, c->cw_cap, 256);
 		c->cw[c->cw_n].seq = seq;
@@ -582,17 +719,30 @@ static void track_maplog_block(struct ctx *c, const uint8_t *b, uint64_t lba,
 		uint64_t pba = be64_at(b, o + 8);
 
 		if (kind == TAU_MAPLOG_CLAIM) {
-			if (index < c->idx_n)
+			uint64_t ino = be64_at(b, o + 16);
+
+			if (index < c->idx_n) {
 				c->idx2pba[index] = pba;
+				c->idx2ino[index] = ino;
+			}
+			GROW(c->ce, c->ce_n, c->ce_cap, 256);
+			c->ce[c->ce_n].pba = pba;
+			c->ce[c->ce_n].ino = ino;
+			c->ce[c->ce_n].seq = seq;
+			c->ce[c->ce_n].entry_idx = idx;
+			c->ce_n++;
 		} else if (kind == TAU_MAPLOG_FREE) {
 			uint64_t p = pba;
 
-			if (!p && index < c->idx_n) {
+			if (!p && index < c->idx_n)
 				p = c->idx2pba[index];
-				c->idx2pba[index] = 0;
+			if (index < c->idx_n) {
+				if (!pba)
+					c->idx2pba[index] = 0;
+				c->idx2ino[index] = 0;
 			}
 			if (p)
-				sf_add(c, p, seq, idx);
+				sf_add(c, p, seq, idx, fepoch);
 		}
 	}
 }
@@ -765,13 +915,22 @@ static void pass_classify(struct ctx *c, const uint8_t *buf, uint64_t bytes,
 			wr_add(&c->jw, &c->jw_n, &c->jw_cap, lba, idx, fepoch, fua);
 
 		if (is_map_block(c, lba)) {
-			track_map_block(c, b, lba);
+			track_map_block(c, b, lba, idx, fepoch, fua);
 			continue;
 		}
 		if (be32_at(b, TAU_HDR_OFF_MAGIC) != TAU_MAGIC_NUMBER)
 			continue;
-		if (c->have_geom && lba == c->sb_lba)
+		if (c->have_geom && lba == c->sb_lba) {
+			/* where the map log's base was, for I4 */
+			GROW(c->sbw, c->sbw_n, c->sbw_cap, 16);
+			c->sbw[c->sbw_n].entry_idx = idx;
+			c->sbw[c->sbw_n].fepoch = fepoch;
+			c->sbw[c->sbw_n].base = be64_at(b, TAU_SB_OFF_MAPLOG_BASE);
+			c->sbw[c->sbw_n].sequence = be32_at(b, TAU_SB_OFF_SEQUENCE);
+			c->sbw[c->sbw_n].fua = fua ? 1 : 0;
+			c->sbw_n++;
 			continue;
+		}
 		bt = be32_at(b, TAU_HDR_OFF_BLOCKTYPE);
 
 		if (bt == TAU_MAPLOG_BLOCK) {
@@ -817,11 +976,33 @@ static void pass_classify(struct ctx *c, const uint8_t *buf, uint64_t bytes,
 				j.maplog_seq = be64_at(b, TAU_COMMIT_OFF_MAPLOG);
 				j.maplog_nr = be32_at(b, TAU_COMMIT_OFF_MAPLOG_NR);
 			}
+			if (j.commit_flags & TAU_COMMIT_F_TAIL) {
+				j.jgen = be32_at(b, TAU_COMMIT_OFF_JGEN);
+				j.tail_tid = be32_at(b, TAU_COMMIT_OFF_TAIL_TID);
+				j.tail_blk = be64_at(b, TAU_COMMIT_OFF_TAIL_BLK);
+			}
 			c->n_commit++;
 			break;
-		case TAU_REVOKE_BLOCK:
+		case TAU_REVOKE_BLOCK: {
+			uint32_t n = be32_at(b, TAU_REVOKE_OFF_NUM_TAGS), t;
+			uint32_t fl = (uint32_t)be64_at(b, TAU_REVOKE_OFF_FLAGS);
+
+			if (n > (TAU_BLOCK_SIZE - TAU_REVOKE_META_SIZE) / TAU_REVOKE_TAG_SIZE)
+				n = (TAU_BLOCK_SIZE - TAU_REVOKE_META_SIZE) / TAU_REVOKE_TAG_SIZE;
+			for (t = 0; t < n; t++) {
+				size_t o = TAU_REVOKE_META_SIZE + (size_t)t * TAU_REVOKE_TAG_SIZE;
+
+				GROW(c->rt, c->rt_n, c->rt_cap, 256);
+				c->rt[c->rt_n].lba = lba;
+				c->rt[c->rt_n].entry_idx = idx;
+				c->rt[c->rt_n].scope = be64_at(b, o);
+				c->rt[c->rt_n].pblk = be64_at(b, o + 8);
+				c->rt[c->rt_n].flags = fl;
+				c->rt_n++;
+			}
 			c->n_revoke++;
 			break;
+		}
 		default:
 			c->n_foreign++;
 			continue;
@@ -1353,8 +1534,8 @@ static void check_i1(struct ctx *c, struct viol_out *v, struct i1stat *st,
 		     int report)
 {
 	size_t *dix, *cix, *cpos, nd = 0, nc = 0, i, k;
-	uint64_t *homes = NULL;
-	size_t homes_cap = 0;
+	uint64_t *homes = NULL, *jts = NULL;
+	size_t homes_cap = 0, jts_cap = 0;
 	struct vlist vl = { NULL, 0, 0 };
 
 	qsort(c->jw, c->jw_n, sizeof(*c->jw), wr_cmp);
@@ -1363,9 +1544,13 @@ static void check_i1(struct ctx *c, struct viol_out *v, struct i1stat *st,
 	qsort(c->cw, c->cw_n, sizeof(*c->cw), cw_cmp);
 	finish_frees(c);
 
+	qsort(c->rt, c->rt_n, sizeof(*c->rt), rt_cmp);
 	dix = xrealloc(NULL, (c->jb_n + 1) * sizeof(*dix));
 	cix = xrealloc(NULL, (c->jb_n + 1) * sizeof(*cix));
 	cpos = xrealloc(NULL, (c->jb_n + 1) * sizeof(*cpos));
+	c->txof = xrealloc(NULL, (c->jb_n + 1) * sizeof(*c->txof));
+	for (i = 0; i < c->jb_n; i++)
+		c->txof[i] = SIZE_MAX;
 	for (i = 0; i < c->jb_n; i++) {
 		if (c->jb[i].blocktype == TAU_DESCRIPTOR_BLOCK)
 			dix[nd++] = i;
@@ -1377,13 +1562,16 @@ static void check_i1(struct ctx *c, struct viol_out *v, struct i1stat *st,
 	qsort(cix, nc, sizeof(*cix), cix_cmp);
 	for (k = 0; k < nc; k++)
 		cpos[cix[k]] = k;
+	c->cix = cix;
+	c->cpos = cpos;
+	c->nc = nc;
 
 	for (i = 0; i < c->jb_n; i++) {
 		const struct jblk *cm = &c->jb[i];
 		uint64_t home_lo = 0, desc_lo = 0, first = UINT64_MAX;
 		uint64_t first_a = UINT64_MAX, next_a = 0;
 		uint64_t n_home = 0, n_unordered, n_missing, bound;
-		size_t nh = 0, in = 0, l, r, p;
+		size_t nh = 0, in = 0, l, r, p, njt = 0;
 		long cseg, aseg = -1;
 		int odd = 0, ok;
 		const struct hcommit *hcm = NULL;
@@ -1432,6 +1620,7 @@ static void check_i1(struct ctx *c, struct viol_out *v, struct i1stat *st,
 				r = mid;
 		}
 		nh = 0;
+		njt = 0;
 		for (; l < nd; l++) {
 			const struct jblk *d = &c->jb[dix[l]];
 			long ds;
@@ -1467,6 +1656,10 @@ static void check_i1(struct ctx *c, struct viol_out *v, struct i1stat *st,
 					homes = xrealloc(homes, homes_cap * sizeof(*homes));
 				}
 				homes[nh++] = c->home[d->home_first + k];
+			}
+			for (k = 0; k < d->jtag_n; k++) {
+				GROW(jts, njt, jts_cap, 64);
+				jts[njt++] = c->jtag[d->jtag_first + k];
 			}
 		}
 		if (aseg >= 0 && !odd && next_a != c->regions[cseg].start)
@@ -1523,6 +1716,56 @@ static void check_i1(struct ctx *c, struct viol_out *v, struct i1stat *st,
 		for (k = 0; k < vl.n; k++)
 			if (vl.b[k].w)
 				own_add(c, vl.b[k].w->lba, vl.b[k].w->entry_idx, i);
+		/* for I2 and I3: what it journaled, what its revoke blocks say */
+		{
+			struct txinfo tx;
+			size_t q;
+
+			memset(&tx, 0, sizeof(tx));
+			tx.ci = i;
+			tx.first_entry = UINT64_MAX;
+			tx.first_lba = first;
+			tx.seg[0] = cseg;
+			tx.seg[1] = aseg;
+			for (k = 0; k < vl.n; k++)
+				if (vl.b[k].w && vl.b[k].w->entry_idx < tx.first_entry)
+					tx.first_entry = vl.b[k].w->entry_idx;
+			qsort(jts, njt, sizeof(*jts), u64_cmp);
+			tx.jt_first = (uint32_t)c->txjt_n;
+			for (k = 0; k < njt; k++) {
+				if (k && jts[k] == jts[k - 1])
+					continue;
+				GROW(c->txjt, c->txjt_n, c->txjt_cap, 1024);
+				c->txjt[c->txjt_n++] = jts[k];
+				tx.jt_n++;
+			}
+			tx.rt_first = (uint32_t)c->txrt_n;
+			for (k = 0; k < vl.n; k++) {
+				const struct wr *w = vl.b[k].w;
+				size_t lo2 = 0, hi2 = c->rt_n;
+
+				if (!w || vl.b[k].home)
+					continue;
+				while (lo2 < hi2) {
+					size_t mid = lo2 + (hi2 - lo2) / 2;
+
+					if (c->rt[mid].lba < w->lba || (c->rt[mid].lba == w->lba &&
+					    c->rt[mid].entry_idx < w->entry_idx))
+						lo2 = mid + 1;
+					else
+						hi2 = mid;
+				}
+				for (q = lo2; q < c->rt_n && c->rt[q].lba == w->lba &&
+				     c->rt[q].entry_idx == w->entry_idx; q++) {
+					GROW(c->txrt, c->txrt_n, c->txrt_cap, 256);
+					c->txrt[c->txrt_n++] = q;
+					tx.rt_n++;
+				}
+			}
+			GROW(c->tx, c->tx_n, c->tx_cap, 1024);
+			c->txof[i] = c->tx_n;
+			c->tx[c->tx_n++] = tx;
+		}
 
 		/* judged on the record's own flush */
 		judge(vl.b, vl.n, cm->fepoch, &n_unordered, &n_missing, &w);
@@ -1606,9 +1849,785 @@ static void check_i1(struct ctx *c, struct viol_out *v, struct i1stat *st,
 	}
 	free(vl.b);
 	free(homes);
+	free(jts);
 	free(dix);
-	free(cix);
-	free(cpos);
+}
+
+/* ---- I2, I3, I4: the tail, revoke tags, the segment map log -------------- */
+
+/* tid order within one file: tids wrap (fs/taujournal: tid_gt) */
+static int tid_gt32(uint32_t a, uint32_t b)
+{
+	return (int32_t)(a - b) > 0;
+}
+
+/* A point a write has to be durable by: before flush epoch fep, or, written
+ * FUA, logged before entry. */
+struct dline {
+	uint64_t fep;
+	uint64_t entry;
+};
+
+#define DL_NEVER ((struct dline){ UINT64_MAX, UINT64_MAX })
+
+static int dl_never(const struct dline *d)
+{
+	return d->fep == UINT64_MAX;
+}
+
+static int dl_less(const struct dline *a, const struct dline *b)
+{
+	return a->fep != b->fep ? a->fep < b->fep : a->entry < b->entry;
+}
+
+static int durable_by(uint64_t fepoch, uint64_t entry, int fua,
+		      const struct dline *d)
+{
+	return fepoch < d->fep || (fua && entry < d->entry);
+}
+
+/* When a record can count: it and the host commit its h_epoch names durable
+ * (gated I1's bound); never, if that host commit is not in the log. */
+static struct dline record_dline(const struct ctx *c, const struct jblk *cm)
+{
+	struct dline d = { cm->fepoch, cm->entry_idx };
+	const struct hcommit *h;
+
+	if (!cm->commit_epoch_field)
+		return d;
+	h = host_commit(c, cm->commit_epoch_field);
+	if (!h)
+		return DL_NEVER;
+	if (h->fepoch > d.fep)
+		d.fep = h->fepoch;
+	if (h->entry_idx > d.entry)
+		d.entry = h->entry_idx;
+	return d;
+}
+
+/* track_map_block() files a snapshot's drop with a seq no map log block has */
+static int sf_is_snapshot(const struct segfree *f)
+{
+	return f->seq > (UINT64_MAX >> 1);
+}
+
+/* The first FREE, or snapshot drop, of segment @pba logged after entry @e. */
+static const struct segfree *next_free(const struct ctx *c, uint64_t pba,
+				       uint64_t e)
+{
+	size_t a = 0, b = c->sf_n;
+
+	while (a < b) {
+		size_t mid = a + (b - a) / 2;
+		const struct segfree *s = &c->sf[mid];
+
+		if (s->pba < pba || (s->pba == pba && s->entry_idx <= e))
+			a = mid + 1;
+		else
+			b = mid;
+	}
+	return (a < c->sf_n && c->sf[a].pba == pba) ? &c->sf[a] : NULL;
+}
+
+/*
+ * The superblock write that moves s_maplog_base, of mount @gen, first after
+ * entry @e.  Recovery applies the log blocks past the base over the map
+ * blocks, so a snapshot's drop takes effect only there (the kernel session,
+ * 11-07).  A new mount's first write does not move it: that base passes the
+ * previous mount's whole log.
+ */
+static const struct sbwrite *base_move_after(const struct ctx *c, uint64_t e,
+					     uint32_t gen)
+{
+	size_t k;
+
+	for (k = 0; k < c->sbw_n; k++) {
+		const struct sbwrite *sb = &c->sbw[k];
+
+		if (sb->entry_idx > e && sb->sequence == gen && k &&
+		    c->sbw[k - 1].sequence == gen && sb->base > c->sbw[k - 1].base)
+			return sb;
+	}
+	return NULL;
+}
+
+/* (ino, serial, pblk) -> the transactions that journaled pblk, in log order */
+struct jtref {
+	uint64_t ino, serial, pblk, entry;
+	size_t tx;
+};
+
+static int jtref_cmp(const void *x, const void *y)
+{
+	const struct jtref *a = x, *b = y;
+
+	if (a->ino != b->ino) return a->ino < b->ino ? -1 : 1;
+	if (a->serial != b->serial) return a->serial < b->serial ? -1 : 1;
+	if (a->pblk != b->pblk) return a->pblk < b->pblk ? -1 : 1;
+	return a->entry < b->entry ? -1 : a->entry > b->entry;
+}
+
+/* The first jtref of (ino, serial, pblk) logged at or after entry @e. */
+static size_t jtref_lower(const struct jtref *jr, size_t n, uint64_t ino,
+			  uint64_t serial, uint64_t pblk, uint64_t e)
+{
+	struct jtref key = { ino, serial, pblk, e, 0 };
+	size_t l = 0, r = n;
+
+	while (l < r) {
+		size_t mid = l + (r - l) / 2;
+
+		if (jtref_cmp(&jr[mid], &key) < 0)
+			l = mid + 1;
+		else
+			r = mid;
+	}
+	return l;
+}
+
+static int rt_cmp(const void *x, const void *y)
+{
+	const struct rtag *a = x, *b = y;
+
+	if (a->lba != b->lba) return a->lba < b->lba ? -1 : 1;
+	return a->entry_idx < b->entry_idx ? -1 : a->entry_idx > b->entry_idx;
+}
+
+/* Is it the same file of the same mount? */
+static int same_file(const struct jblk *x, const struct jblk *y)
+{
+	return x->inode_number == y->inode_number && x->serial == y->serial &&
+	       x->jgen == y->jgen;
+}
+
+/*
+ * Every journal copy of every reconstructed transaction, and every block a
+ * conditional revoke tag names (with the commit that carries it), keyed by
+ * file and block.  I2 and I3 look copies up here.
+ */
+static void build_refs(struct ctx *c, struct jtref **jrp, size_t *jrn,
+		       struct jtref **cdp, size_t *cdn)
+{
+	struct jtref *jr = NULL, *cd = NULL;
+	size_t jr_n = 0, jr_cap = 0, cd_n = 0, cd_cap = 0, t, k;
+
+	for (t = 0; t < c->tx_n; t++) {
+		const struct txinfo *x = &c->tx[t];
+		const struct jblk *cm = &c->jb[x->ci];
+
+		for (k = 0; k < x->jt_n; k++) {
+			GROW(jr, jr_n, jr_cap, 1024);
+			jr[jr_n] = (struct jtref){ cm->inode_number, cm->serial,
+				c->txjt[x->jt_first + k], cm->entry_idx, t };
+			jr_n++;
+		}
+		for (k = 0; k < x->rt_n; k++) {
+			const struct rtag *rg = &c->rt[c->txrt[x->rt_first + k]];
+
+			if (!(rg->flags & TAU_REVOKE_F_COND))
+				continue;
+			GROW(cd, cd_n, cd_cap, 64);
+			cd[cd_n] = (struct jtref){ cm->inode_number, cm->serial,
+				rg->pblk, cm->entry_idx, t };
+			cd_n++;
+		}
+	}
+	qsort(jr, jr_n, sizeof(*jr), jtref_cmp);
+	qsort(cd, cd_n, sizeof(*cd), jtref_cmp);
+	*jrp = jr;
+	*jrn = jr_n;
+	*cdp = cd;
+	*cdn = cd_n;
+}
+
+struct i2stat {
+	uint64_t txs, never, by_free, by_snapshot, blocks, home, handoff;
+	uint64_t deferred, uncovered, leads, snapshot_leads;
+	uint64_t tailblk_checked, tailblk_bad;
+};
+
+/*
+ * I2 -- the tail.  A record whose h_tail_tid is past tx T (tid_gt) ends T's
+ * replay, and so does a FREE dropping one of T's segments, or a snapshot doing
+ * so once the superblock moves the map log's base past it.  By the earliest of
+ * these, every home block T journaled has to be covered (the kernel session's
+ * rules, 11-07):
+ *  (i)  a home write of it after T's first block, durable by then -- from any
+ *       engine, carrying T's version or newer; or
+ *  (ii) a later transaction of the file that journaled it again, still
+ *       replayed there and itself valid by then (the handoff).
+ * A truncate's conditional tags and an unlinked file are the other two ways
+ * out; no gen here makes them yet, so a block a conditional tag of the file
+ * names, in T or later, is counted as deferred rather than judged.
+ *
+ * Counted, not judged: a home write of one of T's journal blocks before T's
+ * record is valid (with tau_defer_txdirty_cpflush on, expected never: a lead
+ * for the kernel session), and a block covered at the base write but not at
+ * the snapshot's map block (the stricter point).
+ *
+ * And h_tail_blk, structurally: it names the first block of tx h_tail_tid.
+ */
+static void check_i2(struct ctx *c, struct viol_out *v, struct i2stat *st,
+		     const struct jtref *jr, size_t jr_n,
+		     const struct jtref *cd, size_t cd_n)
+{
+	struct dline *dlc = xrealloc(NULL, (c->jb_n + 1) * sizeof(*dlc));
+	struct dline *suf = xrealloc(NULL, (c->nc + 1) * sizeof(*suf));
+	size_t i, k, a, b, t;
+
+	for (i = 0; i < c->jb_n; i++)
+		if (c->jb[i].blocktype == TAU_COMMIT_BLOCK)
+			dlc[i] = record_dline(c, &c->jb[i]);
+	/* when a tail-moving record of the file, this one or later, can count */
+	for (a = 0; a < c->nc; a = b) {
+		for (b = a + 1; b < c->nc &&
+			    same_file(&c->jb[c->cix[a]], &c->jb[c->cix[b]]); b++)
+			;
+		for (k = b; k-- > a; ) {
+			const struct jblk *r = &c->jb[c->cix[k]];
+			struct dline nx = (k + 1 < b) ? suf[k + 1] : DL_NEVER;
+
+			suf[k] = ((r->commit_flags & TAU_COMMIT_F_TAIL) &&
+				  dl_less(&dlc[c->cix[k]], &nx)) ? dlc[c->cix[k]] : nx;
+		}
+	}
+
+	for (t = 0; t < c->tx_n; t++) {
+		const struct txinfo *x = &c->tx[t];
+		const struct jblk *cm = &c->jb[x->ci];
+		size_t p = c->cpos[x->ci], q, bind_rec = SIZE_MAX;
+		struct dline dl = DL_NEVER, mine = dlc[x->ci], snapmap = DL_NEVER;
+		const struct segfree *fr = NULL;
+		int s, snap = 0;
+
+		st->txs++;
+		/* the first record of the file whose tail passes T; the tail
+		 * never moves back, so every later one passes it too */
+		for (q = p + 1; q < c->nc && same_file(cm, &c->jb[c->cix[q]]); q++) {
+			const struct jblk *r = &c->jb[c->cix[q]];
+
+			if ((r->commit_flags & TAU_COMMIT_F_TAIL) &&
+			    tid_gt32(r->tail_tid, cm->sequence)) {
+				dl = suf[q];
+				bind_rec = q;
+				break;
+			}
+		}
+		for (s = 0; s < 2; s++) {
+			const struct segfree *f;
+			struct dline fd;
+
+			if (x->seg[s] < 0)
+				continue;
+			f = next_free(c, c->regions[x->seg[s]].start, cm->entry_idx);
+			if (!f)
+				continue;
+			if (sf_is_snapshot(f)) {
+				const struct sbwrite *sb = base_move_after(c, f->entry_idx,
+									   cm->jgen);
+
+				if (!sb)
+					continue;
+				fd = (struct dline){ sb->fepoch, sb->entry_idx };
+			} else {
+				fd = (struct dline){ f->fepoch, f->entry_idx };
+			}
+			if (dl_less(&fd, &dl)) {
+				dl = fd;
+				fr = f;
+				snap = sf_is_snapshot(f);
+				if (snap)
+					snapmap = (struct dline){ f->fepoch, f->entry_idx };
+			}
+		}
+		if (dl_never(&dl)) {
+			st->never++;
+			continue;
+		}
+		if (fr && snap)
+			st->by_snapshot++;
+		else if (fr)
+			st->by_free++;
+
+		for (k = 0; k < x->jt_n; k++) {
+			uint64_t pb = c->txjt[x->jt_first + k];
+			size_t l = 0, r = c->hw_n, nh = 0, h;
+			int covered = 0, covered_map = 0, handoff = 0;
+			const struct wr *last = NULL;
+
+			st->blocks++;
+			/* a truncate, punch or zero of it, in T or later: deferred */
+			l = jtref_lower(cd, cd_n, cm->inode_number, cm->serial, pb,
+					cm->entry_idx);
+			if (l < cd_n && cd[l].ino == cm->inode_number &&
+			    cd[l].serial == cm->serial && cd[l].pblk == pb) {
+				st->deferred++;
+				continue;
+			}
+			l = 0;
+			while (l < r) {
+				size_t mid = l + (r - l) / 2;
+
+				if (c->hw[mid].lba < pb || (c->hw[mid].lba == pb &&
+				    c->hw[mid].entry_idx <= x->first_entry))
+					l = mid + 1;
+				else
+					r = mid;
+			}
+			for (h = l; h < c->hw_n && c->hw[h].lba == pb; h++) {
+				const struct wr *w = &c->hw[h];
+
+				nh++;
+				last = w;
+				if (durable_by(w->fepoch, w->entry_idx, w->fua, &dl))
+					covered = 1;
+				if (snap && durable_by(w->fepoch, w->entry_idx, w->fua,
+						       &snapmap))
+					covered_map = 1;
+				/* before T's own record could count */
+				if (!dl_never(&mine) && w->entry_idx < mine.entry) {
+					st->leads++;
+					if (c->debug)
+						fprintf(stderr, "loginv: lead: home write of %" PRIu64
+							" at entry %" PRIu64 " before tx %u (ino %" PRIu64
+							") is valid at entry %" PRIu64 "\n", pb,
+							w->entry_idx, cm->sequence, cm->inode_number,
+							mine.entry);
+				}
+			}
+			if (covered) {
+				st->home++;
+				if (snap && !covered_map)
+					st->snapshot_leads++;
+				continue;
+			}
+			/* the handoff: a later transaction of the file has it */
+			for (l = jtref_lower(jr, jr_n, cm->inode_number, cm->serial, pb,
+					     cm->entry_idx + 1);
+			     l < jr_n && jr[l].ino == cm->inode_number &&
+			     jr[l].serial == cm->serial && jr[l].pblk == pb && !handoff; l++) {
+				const struct txinfo *y = &c->tx[jr[l].tx];
+				const struct jblk *cy = &c->jb[y->ci];
+				struct dline yd = dlc[y->ci];
+
+				if (cy->jgen != cm->jgen)
+					continue;
+				if (bind_rec != SIZE_MAX && !fr &&
+				    tid_gt32(c->jb[c->cix[bind_rec]].tail_tid, cy->sequence))
+					continue;	/* passed too: no copy there */
+				if (fr && ((y->seg[0] >= 0 && c->regions[y->seg[0]].start == fr->pba) ||
+					   (y->seg[1] >= 0 && c->regions[y->seg[1]].start == fr->pba)))
+					continue;	/* freed with T */
+				if (!dl_never(&yd) && !dl_less(&dl, &yd))
+					handoff = 1;
+			}
+			if (handoff) {
+				st->handoff++;
+				continue;
+			}
+			st->uncovered++;
+			if (!viol_begin(v))
+				continue;
+			printf("{\"invariant\":\"I2\""
+			       ",\"detail\":\"%s with a block of it neither durable at home nor"
+			       " in a later replayed transaction\""
+			       ",\"inode\":%" PRIu64 ",\"serial\":%" PRIu64 ",\"sequence\":%u"
+			       ",\"commit_entry\":%" PRIu64 ",\"by\":\"%s\""
+			       ",\"bound_epoch\":%" PRIu64 ",\"bound_entry\":%" PRIu64
+			       ",\"pblk\":%" PRIu64 ",\"home_writes\":%zu",
+			       fr ? (snap ? "a snapshot dropped the transaction's segment" :
+					    "a FREE dropped the transaction's segment") :
+				    "a record's tail passed the transaction",
+			       cm->inode_number, cm->serial, cm->sequence, cm->entry_idx,
+			       fr ? (snap ? "snapshot" : "free") : "tail", dl.fep, dl.entry,
+			       pb, nh);
+			if (last)
+				printf(",\"last_home_entry\":%" PRIu64
+				       ",\"last_home_epoch\":%" PRIu64,
+				       last->entry_idx, last->fepoch);
+			printf("}");
+		}
+	}
+
+	/* h_tail_blk: the first block of tx h_tail_tid of the same file; the
+	 * tail is at or before the record's own tx, so look back from it */
+	for (i = 0; i < c->jb_n; i++) {
+		const struct jblk *cm = &c->jb[i];
+		size_t q, tx = SIZE_MAX;
+
+		if (cm->blocktype != TAU_COMMIT_BLOCK ||
+		    !(cm->commit_flags & TAU_COMMIT_F_TAIL))
+			continue;
+		for (q = c->cpos[i] + 1; q-- > 0 && same_file(cm, &c->jb[c->cix[q]]); ) {
+			if (c->jb[c->cix[q]].sequence == cm->tail_tid) {
+				tx = c->txof[c->cix[q]];
+				break;
+			}
+		}
+		if (tx == SIZE_MAX)
+			continue;	/* not in the log, or not reconstructed */
+		st->tailblk_checked++;
+		if (c->tx[tx].first_lba == cm->tail_blk)
+			continue;
+		st->tailblk_bad++;
+		if (viol_begin(v))
+			printf("{\"invariant\":\"tail_blk\",\"detail\":\"h_tail_blk"
+			       " is not the first block of the tail transaction\""
+			       ",\"inode\":%" PRIu64 ",\"sequence\":%u"
+			       ",\"tail_tid\":%u,\"tail_blk\":%" PRIu64
+			       ",\"first_block\":%" PRIu64 "}",
+			       cm->inode_number, cm->sequence, cm->tail_tid,
+			       cm->tail_blk, c->tx[tx].first_lba);
+	}
+	free(dlc);
+	free(suf);
+}
+
+struct i3stat {
+	uint64_t scoped, cond, vacuous, home, copy, violations;
+};
+
+/*
+ * I3 -- a scoped revoke tag (pblk, scope S) in record C stands in for the
+ * in-place data written over the file's last journal copy of pblk.  Let J be
+ * the newest transaction of the file with tid <= S holding a journal copy of
+ * pblk (none: the tag is vacuous).  Then either the last home write of pblk
+ * after J's record (failing that, the first after C) is durable by the time
+ * C can count, or a transaction of the file in (S, C] journaled pblk again --
+ * an undo block hit by a write journaled whole goes back into the running tx
+ * with its tag still queued -- and records of a file become valid in tid
+ * order, so that copy is valid when C is (the kernel session's rules, 11-07).
+ *
+ * Conditional tags (truncate, punch, zero) and the revoke-range path are
+ * counted only: their rules are about the host's free, which no gen makes yet.
+ */
+static void check_i3(struct ctx *c, struct viol_out *v, struct i3stat *st,
+		     const struct jtref *jr, size_t jr_n)
+{
+	size_t t, k;
+
+	for (t = 0; t < c->tx_n; t++) {
+		const struct txinfo *x = &c->tx[t];
+		const struct jblk *cm = &c->jb[x->ci];
+		struct dline dl = record_dline(c, cm);
+
+		for (k = 0; k < x->rt_n; k++) {
+			const struct rtag *rg = &c->rt[c->txrt[x->rt_first + k]];
+			uint32_t S = (uint32_t)rg->scope;
+			const struct jblk *J = NULL;
+			int copy = 0;
+			size_t l, nb, na;
+			const struct wr *w;
+
+			if (rg->flags & TAU_REVOKE_F_COND) {
+				st->cond++;
+				continue;
+			}
+			if (!(rg->flags & TAU_REVOKE_F_SCOPED))
+				continue;
+			st->scoped++;
+			if (dl_never(&dl))
+				continue;	/* no state counts the record */
+			for (l = jtref_lower(jr, jr_n, cm->inode_number, cm->serial,
+					     rg->pblk, 0);
+			     l < jr_n && jr[l].ino == cm->inode_number &&
+			     jr[l].serial == cm->serial && jr[l].pblk == rg->pblk; l++) {
+				const struct jblk *cy = &c->jb[c->tx[jr[l].tx].ci];
+
+				if (cy->jgen != cm->jgen)
+					continue;
+				if (!tid_gt32(cy->sequence, S)) {
+					if (cy->entry_idx < cm->entry_idx)
+						J = cy;	/* the newest so far */
+				} else if (!tid_gt32(cy->sequence, cm->sequence) &&
+					   !dl_never(&(struct dline){ record_dline(c, cy).fep, 0 })) {
+					copy = 1;	/* in (S, C] */
+				}
+			}
+			if (!J) {
+				st->vacuous++;
+				continue;
+			}
+			if (copy) {
+				st->copy++;
+				continue;
+			}
+			w = pick_write(c->hw, c->hw_n, rg->pblk, J->entry_idx + 1,
+				       UINT64_MAX, cm->entry_idx, &nb, &na);
+			if (w && durable_by(w->fepoch, w->entry_idx, w->fua, &dl)) {
+				st->home++;
+				continue;
+			}
+			st->violations++;
+			if (!viol_begin(v))
+				continue;
+			printf("{\"invariant\":\"I3\",\"detail\":\"%s\""
+			       ",\"inode\":%" PRIu64 ",\"serial\":%" PRIu64 ",\"sequence\":%u"
+			       ",\"commit_entry\":%" PRIu64 ",\"bound_epoch\":%" PRIu64
+			       ",\"pblk\":%" PRIu64 ",\"scope\":%u,\"copy_sequence\":%u",
+			       w ? "the in-place data a scoped tag stands in for is not durable"
+				   " before the record carrying it can count" :
+				   "no in-place write of the block a scoped tag stands in for",
+			       cm->inode_number, cm->serial, cm->sequence, cm->entry_idx,
+			       dl.fep, rg->pblk, S, J->sequence);
+			if (w)
+				printf(",\"home_entry\":%" PRIu64 ",\"home_epoch\":%" PRIu64,
+				       w->entry_idx, w->fepoch);
+			printf("}");
+		}
+	}
+}
+
+struct i4stat {
+	uint64_t base_moves, map_writes, overwrites, owners_named, owners_claimed;
+	uint64_t reuses, violations;
+};
+
+static int ce_cmp(const void *x, const void *y)
+{
+	const struct claiment *a = x, *b = y;
+
+	if (a->pba != b->pba) return a->pba < b->pba ? -1 : 1;
+	if (a->ino != b->ino) return a->ino < b->ino ? -1 : 1;
+	return a->entry_idx < b->entry_idx ? -1 : a->entry_idx > b->entry_idx;
+}
+
+static int ce_entry_cmp(const void *x, const void *y)
+{
+	const struct claiment *a = x, *b = y;
+
+	if (a->pba != b->pba) return a->pba < b->pba ? -1 : 1;
+	return a->entry_idx < b->entry_idx ? -1 : a->entry_idx > b->entry_idx;
+}
+
+static int mlw_cmp(const void *x, const void *y)
+{
+	const struct mlwrite *a = x, *b = y;
+
+	if (a->lba != b->lba) return a->lba < b->lba ? -1 : 1;
+	return a->entry_idx < b->entry_idx ? -1 : a->entry_idx > b->entry_idx;
+}
+
+/*
+ * I4 -- the segment map log (the kernel session's rules, 11-07), per mount:
+ *  (a) a segment whose claim reached the log is written by its next owner --
+ *      the same file included -- only after a completed FREE naming it, or a
+ *      snapshot whose base passed the claim.  Each journal block is written
+ *      once per ownership, so a second write of a block marks a reuse.
+ *  (e) a snapshot writes every map block (PREFLUSH|FUA, waited) before the
+ *      superblock moves s_maplog_base; and log block seq s is overwritten, by
+ *      seq s + s_maplog_len, only after the base reached s.
+ *  (f) a map block names an owner only for a segment whose claim's record
+ *      can count already: a snapshot waits until no claim is in flight.
+ * (c) -- a FREE only after its transactions are covered at home -- is I2's
+ * FREE deadline; a give-back's other half (the host writes nothing into the
+ * segment before it) needs a nearly full host FS, and is not checked.
+ */
+static void check_i4(struct ctx *c, struct viol_out *v, struct i4stat *st)
+{
+	struct claiment *cp = NULL;
+	size_t k, m, j, prev_sb = SIZE_MAX, cpn = c->ce_n, r;
+	uint64_t prev_base = 0;
+
+	/* (a) reuse only after a FREE, or a snapshot past the claim */
+	cp = xrealloc(NULL, (cpn + 1) * sizeof(*cp));
+	memcpy(cp, c->ce, cpn * sizeof(*cp));
+	qsort(cp, cpn, sizeof(*cp), ce_entry_cmp);
+	for (r = 0; r < c->nregions; r++) {
+		const struct region *rg = &c->regions[r];
+		size_t l = 0, h = cpn, lo, hi;
+		uint64_t lba;
+
+		while (l < h) {
+			size_t mid = l + (h - l) / 2;
+
+			if (cp[mid].pba < rg->start)
+				l = mid + 1;
+			else
+				h = mid;
+		}
+		if (l >= cpn || cp[l].pba != rg->start)
+			continue;	/* never claimed in this log */
+		lo = l;
+		for (hi = lo; hi < cpn && cp[hi].pba == rg->start; hi++)
+			;
+		for (lba = rg->start; lba < rg->end; lba++) {
+			size_t a = 0, b = c->jw_n, w;
+
+			while (a < b) {
+				size_t mid = a + (b - a) / 2;
+
+				if (c->jw[mid].lba < lba)
+					a = mid + 1;
+				else
+					b = mid;
+			}
+			for (w = a; w + 1 < c->jw_n && c->jw[w + 1].lba == lba; w++) {
+				const struct wr *w1 = &c->jw[w], *w2 = &c->jw[w + 1];
+				const struct claiment *cl = NULL;
+				const struct segfree *f;
+				int ok = 0;
+
+				/* the claim of the ownership w1 belongs to: logged
+				 * before it, or with it -- a claim goes out plain
+				 * with its transaction's blocks, so it can land
+				 * after them in the same flush window */
+				for (j = lo; j < hi && cp[j].entry_idx < w2->entry_idx; j++) {
+					const struct wr *cw = claim_write(c, cp[j].seq);
+
+					if (cp[j].entry_idx <= w1->entry_idx ||
+					    (cw && cw->fepoch <= w1->fepoch))
+						cl = &cp[j];
+				}
+				if (!cl)
+					continue;	/* an ownership the log never published */
+				st->reuses++;
+				f = next_free(c, rg->start, w1->entry_idx);
+				ok = f && !sf_is_snapshot(f) && f->entry_idx < w2->entry_idx;
+				for (m = 1; m < c->sbw_n && !ok; m++)
+					ok = c->sbw[m].entry_idx > w1->entry_idx &&
+					     c->sbw[m].entry_idx < w2->entry_idx &&
+					     c->sbw[m].sequence == c->sbw[m - 1].sequence &&
+					     c->sbw[m].base > c->sbw[m - 1].base &&
+					     c->sbw[m].base >= cl->seq;
+				if (ok)
+					continue;
+				st->violations++;
+				if (viol_begin(v))
+					printf("{\"invariant\":\"I4\",\"detail\":\"a segment whose"
+					       " claim reached the log was written by its next"
+					       " owner with no FREE naming it (or snapshot past"
+					       " the claim) completed first\""
+					       ",\"pba\":%" PRIu64 ",\"lba\":%" PRIu64
+					       ",\"claim_seq\":%" PRIu64 ",\"prev_write_entry\":%"
+					       PRIu64 ",\"reuse_entry\":%" PRIu64 "}",
+					       rg->start, lba, cl->seq, w1->entry_idx,
+					       w2->entry_idx);
+			}
+		}
+	}
+	free(cp);
+
+	/* (e) map blocks before the base, per mount */
+	for (k = 0; k < c->sbw_n; k++) {
+		const struct sbwrite *sb = &c->sbw[k];
+		uint64_t lo = prev_sb == SIZE_MAX ? 0 : c->sbw[prev_sb].entry_idx;
+		size_t n = 0, late = 0;
+
+		if (prev_sb == SIZE_MAX || c->sbw[prev_sb].sequence != sb->sequence) {
+			prev_base = sb->base;	/* a mount: a new log */
+			prev_sb = k;
+			continue;
+		}
+		if (sb->base > prev_base) {
+			st->base_moves++;
+			for (m = 0; m < c->mw_n; m++) {
+				const struct mapwrite *w = &c->mw[m];
+				struct dline d = { sb->fepoch, sb->entry_idx };
+
+				if (w->entry_idx <= lo || w->entry_idx >= sb->entry_idx)
+					continue;
+				n++;
+				if (!durable_by(w->fepoch, w->entry_idx, w->fua, &d))
+					late++;
+			}
+			if (!n || late) {
+				st->violations++;
+				if (viol_begin(v))
+					printf("{\"invariant\":\"I4\",\"detail\":\"%s\""
+					       ",\"superblock_entry\":%" PRIu64 ",\"base\":%" PRIu64
+					       ",\"map_writes\":%zu,\"not_durable\":%zu}",
+					       n ? "map blocks not durable before the superblock"
+						   " moved the map log's base" :
+						   "the map log's base moved with no map block"
+						   " written since the superblock before",
+					       sb->entry_idx, sb->base, n, late);
+			}
+			prev_base = sb->base;
+		}
+		prev_sb = k;
+	}
+
+	/* (e) a log block overwritten only after its mount's base passed it */
+	qsort(c->mlw, c->mlw_n, sizeof(*c->mlw), mlw_cmp);
+	for (k = 1; k < c->mlw_n; k++) {
+		const struct mlwrite *o = &c->mlw[k - 1], *n = &c->mlw[k];
+		int ok = 0;
+
+		if (o->lba != n->lba || o->jgen != n->jgen || n->seq <= o->seq)
+			continue;
+		st->overwrites++;
+		for (m = 0; m < c->sbw_n && !ok; m++)
+			ok = c->sbw[m].entry_idx < n->entry_idx &&
+			     c->sbw[m].sequence == o->jgen && c->sbw[m].base >= o->seq;
+		if (ok)
+			continue;
+		st->violations++;
+		if (viol_begin(v))
+			printf("{\"invariant\":\"I4\",\"detail\":\"a map log block was"
+			       " overwritten before the base reached its seq\""
+			       ",\"lba\":%" PRIu64 ",\"seq\":%" PRIu64 ",\"by_seq\":%" PRIu64
+			       ",\"entry\":%" PRIu64 "}", n->lba, o->seq, n->seq, n->entry_idx);
+	}
+
+	/* (f) owners named by a map block: their claim's record valid first */
+	qsort(c->ce, c->ce_n, sizeof(*c->ce), ce_cmp);
+	for (m = 0; m < c->mw_n; m++) {
+		const struct mapwrite *w = &c->mw[m];
+		struct dline d = { w->fepoch, w->entry_idx };
+
+		st->map_writes++;
+		for (j = 0; j < w->ent_n; j++) {
+			const struct mapent *me = &c->ment[w->ent_first + j];
+			const struct claiment *cl = NULL;
+			const struct jblk *rec = NULL;
+			size_t l = 0, h = c->ce_n, i;
+			struct dline rd;
+
+			st->owners_named++;
+			/* the latest claim of this segment by this owner before it */
+			while (l < h) {
+				size_t mid = l + (h - l) / 2;
+				const struct claiment *x = &c->ce[mid];
+
+				if (x->pba < me->pba || (x->pba == me->pba &&
+				    (x->ino < me->ino || (x->ino == me->ino &&
+				     x->entry_idx < w->entry_idx))))
+					l = mid + 1;
+				else
+					h = mid;
+			}
+			if (l > 0 && c->ce[l - 1].pba == me->pba && c->ce[l - 1].ino == me->ino)
+				cl = &c->ce[l - 1];
+			if (!cl)
+				continue;	/* owned since before the log */
+			st->owners_claimed++;
+			for (i = 0; i < c->jb_n && !rec; i++) {
+				const struct jblk *x = &c->jb[i];
+
+				if (x->blocktype == TAU_COMMIT_BLOCK && x->maplog_nr &&
+				    x->inode_number == me->ino && cl->seq >= x->maplog_seq &&
+				    cl->seq < x->maplog_seq + x->maplog_nr)
+					rec = x;
+			}
+			if (rec) {
+				rd = record_dline(c, rec);
+				if (!dl_never(&rd) && !dl_less(&d, &rd) &&
+				    durable_by(rec->fepoch, rec->entry_idx, rec->fua, &d))
+					continue;
+			}
+			st->violations++;
+			if (viol_begin(v))
+				printf("{\"invariant\":\"I4\",\"detail\":\"%s\""
+				       ",\"map_entry\":%" PRIu64 ",\"pba\":%" PRIu64
+				       ",\"ino\":%" PRIu64 ",\"claim_seq\":%" PRIu64 "}",
+				       rec ? "a map block names an owner before the record of"
+					     " its claim can count" :
+					     "a map block names an owner whose claim no record"
+					     " vouches for",
+				       w->entry_idx, me->pba, me->ino, cl->seq);
+		}
+	}
 }
 
 /* ---- I5 ------------------------------------------------------------------ */
@@ -1931,8 +2950,8 @@ static void usage(void)
 "\n"
 "  --log <path>        dm-log-writes log device or image\n"
 "  --config <c>        tau-ext4 | tau-xfs | ext4-data | ext4[-*] | xfs | zfs*  [tau-ext4]\n"
-"  --check I1[,I5]     invariants to run                   [I1]\n"
-"                      I5 applies to every config; I1 needs a tau journal\n"
+"  --check I1[,I2,I3,I4,I5]  invariants to run             [I1]\n"
+"                      I5 applies to every config; I1-I4 need a tau journal\n"
 "  --i1-strict         I1 on the record's own flush only, ignoring the host\n"
 "                      commit a flush-less record names (the pre-#376 rule)\n"
 "  --fsblock <bytes>   file system block size              [4096]\n"
@@ -1954,11 +2973,20 @@ int torner_loginv(int argc, char **argv)
 	uint64_t i5_checked = 0, i5_split = 0, i5_max_entries = 0;
 	int want_i5;
 	int fd = -1, i, rc = 1, stat_only = 0, want_i1, need_txs;
+	int want_i2, want_i3, want_i4;
+	struct i2stat s2;
+	struct i3stat s3;
+	struct i4stat s4;
+	struct jtref *jr = NULL, *cd = NULL;
+	size_t jr_n = 0, cd_n = 0;
 	struct i5stat s5;
 
 	memset(&c, 0, sizeof(c));
 	memset(&st, 0, sizeof(st));
 	memset(&s5, 0, sizeof(s5));
+	memset(&s2, 0, sizeof(s2));
+	memset(&s3, 0, sizeof(s3));
+	memset(&s4, 0, sizeof(s4));
 	torner_crc32_init();
 	c.begin_entry = -1;
 	c.fsblk = TAU_BLOCK_SIZE;
@@ -2019,6 +3047,9 @@ int torner_loginv(int argc, char **argv)
 		return 1;
 	}
 	want_i1 = !stat_only && c.dia == DIA_TAU && strstr(checks, "I1") != NULL;
+	want_i2 = !stat_only && c.dia == DIA_TAU && strstr(checks, "I2") != NULL;
+	want_i3 = !stat_only && c.dia == DIA_TAU && strstr(checks, "I3") != NULL;
+	want_i4 = !stat_only && c.dia == DIA_TAU && strstr(checks, "I4") != NULL;
 	/* bio containment keys off the workload's own self-describing sectors,
 	 * so it applies to every configuration -- no journal format needed. */
 	want_i5 = !stat_only && (strstr(checks, "I5") != NULL ||
@@ -2064,6 +3095,8 @@ int torner_loginv(int argc, char **argv)
 		c.idx_n = (size_t)c.map_nr * TAU_SEGMENT_ENT_MAX;
 		c.idx2pba = xrealloc(NULL, c.idx_n * sizeof(*c.idx2pba));
 		memset(c.idx2pba, 0, c.idx_n * sizeof(*c.idx2pba));
+		c.idx2ino = xrealloc(NULL, c.idx_n * sizeof(*c.idx2ino));
+		memset(c.idx2ino, 0, c.idx_n * sizeof(*c.idx2ino));
 		if (walk(&c, fd, &sup, pass_map, 0, &wb))
 			goto out;
 		finish_regions(&c);
@@ -2071,11 +3104,19 @@ int torner_loginv(int argc, char **argv)
 	if (walk(&c, fd, &sup, pass_classify, 1, &wb))
 		goto out;
 	/* I5 on tau needs the transactions I1 rebuilds, HOME blocks and all */
-	need_txs = c.dia == DIA_TAU && (want_i1 || want_i5);
-	if (need_txs && c.home_n) {
-		c.homeset_n = c.home_n;
+	need_txs = c.dia == DIA_TAU && (want_i1 || want_i2 || want_i3 || want_i4 ||
+					want_i5);
+	if (need_txs && (c.home_n || c.jtag_n || c.rt_n)) {
+		size_t r;
+
+		/* every block a record vouches for at home: HOME tags, the home
+		 * blocks of journal copies (I2) and of revoke tags (I3) */
+		c.homeset_n = c.home_n + c.jtag_n + c.rt_n;
 		c.homeset = xrealloc(NULL, c.homeset_n * sizeof(*c.homeset));
-		memcpy(c.homeset, c.home, c.homeset_n * sizeof(*c.homeset));
+		memcpy(c.homeset, c.home, c.home_n * sizeof(*c.homeset));
+		memcpy(c.homeset + c.home_n, c.jtag, c.jtag_n * sizeof(*c.homeset));
+		for (r = 0; r < c.rt_n; r++)
+			c.homeset[c.home_n + c.jtag_n + r] = c.rt[r].pblk;
 		qsort(c.homeset, c.homeset_n, sizeof(*c.homeset), u64_cmp);
 		{
 			size_t a, n = 0;
@@ -2156,10 +3197,13 @@ int torner_loginv(int argc, char **argv)
 	 * checker that had nothing to check is the failure this tool exists to
 	 * avoid reporting.
 	 */
-	printf(",\"checks\":{\"I1\":\"%s\",\"I2\":\"not_implemented\""
-	       ",\"I3\":\"not_implemented\",\"I4\":\"not_implemented\""
+	printf(",\"checks\":{\"I1\":\"%s\",\"I2\":\"%s\""
+	       ",\"I3\":\"%s\",\"I4\":\"%s\""
 	       ",\"I5\":\"%s\",\"bio_containment\":\"%s\"}",
 	       c.dia != DIA_TAU ? "not_applicable" : (want_i1 ? "run" : "skipped"),
+	       c.dia != DIA_TAU ? "not_applicable" : (want_i2 ? "run" : "skipped"),
+	       c.dia != DIA_TAU ? "not_applicable" : (want_i3 ? "run" : "skipped"),
+	       c.dia != DIA_TAU ? "not_applicable" : (want_i4 ? "run" : "skipped"),
 	       /* the durable unit: the bio with no data journal, the jbd2
 		* transaction on ext4 data=journal, the tau transaction; ZFS's
 		* transaction group is out of scope */
@@ -2171,6 +3215,14 @@ int torner_loginv(int argc, char **argv)
 	viol_open(&v, max_viol);
 	if (need_txs)
 		check_i1(&c, &v, &st, want_i1);
+	if (want_i2 || want_i3)
+		build_refs(&c, &jr, &jr_n, &cd, &cd_n);
+	if (want_i2)
+		check_i2(&c, &v, &s2, jr, jr_n, cd, cd_n);
+	if (want_i3)
+		check_i3(&c, &v, &s3, jr, jr_n);
+	if (want_i4)
+		check_i4(&c, &v, &s4);
 	if (want_i5) {
 		/* on a stock FS the bio is the unit: bio containment is I5 */
 		check_bio_containment(&c, &v, &i5_checked, &i5_split,
@@ -2205,7 +3257,21 @@ int torner_loginv(int argc, char **argv)
 	       ",\"i5_writes_partial\":%" PRIu64
 	       ",\"i5_writes_in_no_unit\":%" PRIu64
 	       ",\"i5_writes_split_in_run\":%" PRIu64
-	       ",\"i5_writes_partial_in_run\":%" PRIu64 "}",
+	       ",\"i5_writes_partial_in_run\":%" PRIu64
+	       ",\"i2_transactions\":%" PRIu64 ",\"i2_never_passed\":%" PRIu64
+	       ",\"i2_bound_by_free\":%" PRIu64 ",\"i2_bound_by_snapshot\":%" PRIu64
+	       ",\"i2_blocks\":%" PRIu64 ",\"i2_covered_home\":%" PRIu64
+	       ",\"i2_covered_handoff\":%" PRIu64 ",\"i2_deferred\":%" PRIu64
+	       ",\"i2_uncovered\":%" PRIu64 ",\"i2_leads\":%" PRIu64
+	       ",\"i2_snapshot_leads\":%" PRIu64
+	       ",\"tail_blk_checked\":%" PRIu64 ",\"tail_blk_bad\":%" PRIu64
+	       ",\"i3_scoped_tags\":%" PRIu64 ",\"i3_cond_tags\":%" PRIu64
+	       ",\"i3_vacuous\":%" PRIu64 ",\"i3_covered_home\":%" PRIu64
+	       ",\"i3_covered_copy\":%" PRIu64 ",\"i3_violations\":%" PRIu64
+	       ",\"i4_base_moves\":%" PRIu64 ",\"i4_map_writes\":%" PRIu64
+	       ",\"i4_log_overwrites\":%" PRIu64 ",\"i4_owners_named\":%" PRIu64
+	       ",\"i4_owners_claimed\":%" PRIu64 ",\"i4_segment_reuses\":%" PRIu64
+	       ",\"i4_violations\":%" PRIu64 "}",
 	       st.checked, st.skipped_nodesc + st.skipped_multiseg,
 	       st.skipped_nodesc, st.skipped_multiseg, st.blocks,
 	       st.home_blocks, st.missing, st.ambiguous, st.home_ambiguous,
@@ -2213,7 +3279,13 @@ int torner_loginv(int argc, char **argv)
 	       st.gate_closed, st.strict, st.viol, st.viol_ungated,
 	       i5_checked, i5_split, i5_max_entries,
 	       s5.checked, s5.split, s5.partial, s5.unjournaled,
-	       s5.split_run, s5.partial_run);
+	       s5.split_run, s5.partial_run,
+	       s2.txs, s2.never, s2.by_free, s2.by_snapshot, s2.blocks, s2.home,
+	       s2.handoff, s2.deferred, s2.uncovered, s2.leads, s2.snapshot_leads,
+	       s2.tailblk_checked, s2.tailblk_bad,
+	       s3.scoped, s3.cond, s3.vacuous, s3.home, s3.copy, s3.violations,
+	       s4.base_moves, s4.map_writes, s4.overwrites, s4.owners_named,
+	       s4.owners_claimed, s4.reuses, s4.violations);
 	printf(",\"violation_count\":%" PRIu64 "}\n", v.n);
 
 	rc = v.n ? 2 : 0;
@@ -2229,6 +3301,22 @@ out:
 	free(c.hc);
 	free(c.sf);
 	free(c.cw);
+	free(c.jtag);
+	free(c.rt);
+	free(c.sbw);
+	free(c.mw);
+	free(c.ment);
+	free(c.ce);
+	free(c.mlw);
+	free(c.idx2ino);
+	free(c.tx);
+	free(c.txjt);
+	free(c.txrt);
+	free(c.txof);
+	free(c.cix);
+	free(c.cpos);
+	free(jr);
+	free(cd);
 	free(c.as);
 	free(c.regions);
 	free(c.idx2pba);
