@@ -153,6 +153,17 @@
 #define TAU_DESC_SERIAL_FROM_END	8
 #define TAU_COMMIT_OFF_SERIAL		96
 
+/*
+ * fs/taujournal/tau.h:276-277,284 (#397): with TAU_COMMIT_F_MAPLOG the record
+ * names its claims on the segment map log by h_seq: blocks h_maplog ..
+ * h_maplog + h_maplog_nr - 1.  They are written plain with the descriptors
+ * and count only if the record does (fs/taujournal/journal.c,
+ * tau_maplog_claim).
+ */
+#define TAU_COMMIT_OFF_MAPLOG		80	/* h_maplog, be64 */
+#define TAU_COMMIT_OFF_MAPLOG_NR	88	/* h_maplog_nr, be32 */
+#define TAU_COMMIT_F_MAPLOG		0x4
+
 /* fs/taujournal/tau.h:327-329 (#397) */
 #define TAU_TAG_NEW		0x10	/* converted by the host after the record */
 #define TAU_TAG_HOME		0x20	/* written home: takes no journal block */

@@ -74,6 +74,8 @@ struct jblk {
 	uint64_t inode_number;
 	uint64_t serial;	/* the file's number in the mount, 0: none */
 	uint64_t commit_epoch_field;	/* commit blocks: h_epoch */
+	uint64_t maplog_seq;		/* commit blocks: its first claim, h_maplog */
+	uint32_t maplog_nr;		/* ... and how many (TAU_COMMIT_F_MAPLOG) */
 	uint32_t blocktype;
 	uint32_t sequence;
 	uint32_t commit_flags;		/* commit blocks: h_flags */
@@ -96,6 +98,12 @@ struct hcommit {
 	uint64_t key;
 	uint64_t entry_idx;
 	uint64_t fepoch;
+};
+
+/* The write of one map log CLAIM block, by its h_seq. */
+struct claimw {
+	uint64_t seq;
+	struct wr w;
 };
 
 /* A FREE on the segment map log: it ends one ownership of a segment. */
@@ -164,6 +172,7 @@ struct ctx {
 	uint64_t *homeset;	size_t homeset_n;	/* sorted, unique */
 	struct hcommit *hc;	size_t hc_n, hc_cap;
 	struct segfree *sf;	size_t sf_n, sf_cap;
+	struct claimw *cw;	size_t cw_n, cw_cap;
 	struct appsec *as;	size_t as_n, as_cap;
 	struct owner *own;	size_t own_n, own_cap;	/* I5: block writes -> unit */
 
@@ -549,7 +558,8 @@ static void track_map_block(struct ctx *c, const uint8_t *b, uint64_t lba)
  * (fs/taujournal/journal.c, tau_journal_maybe_shrink), so its segment is the
  * one the entry named until then.
  */
-static void track_maplog_block(struct ctx *c, const uint8_t *b, uint64_t idx)
+static void track_maplog_block(struct ctx *c, const uint8_t *b, uint64_t lba,
+			       uint64_t idx, uint64_t fepoch, int fua)
 {
 	uint32_t kind = be16_at(b, TAU_MAPLOG_OFF_KIND);
 	uint32_t nr = be16_at(b, TAU_MAPLOG_OFF_NR), e;
@@ -557,6 +567,15 @@ static void track_maplog_block(struct ctx *c, const uint8_t *b, uint64_t idx)
 
 	if (nr > TAU_MAPLOG_ENT_MAX)
 		return;
+	if (kind == TAU_MAPLOG_CLAIM) {
+		GROW(c->cw, c->cw_n, c->cw_cap, 256);
+		c->cw[c->cw_n].seq = seq;
+		c->cw[c->cw_n].w.lba = lba;
+		c->cw[c->cw_n].w.entry_idx = idx;
+		c->cw[c->cw_n].w.fepoch = fepoch;
+		c->cw[c->cw_n].w.fua = fua ? 1 : 0;
+		c->cw_n++;
+	}
 	for (e = 0; e < nr; e++) {
 		size_t o = TAU_MAPLOG_HDR_SIZE + (size_t)e * TAU_MAPLOG_ENT_SIZE;
 		uint32_t index = be32_at(b, o);
@@ -756,7 +775,7 @@ static void pass_classify(struct ctx *c, const uint8_t *buf, uint64_t bytes,
 		bt = be32_at(b, TAU_HDR_OFF_BLOCKTYPE);
 
 		if (bt == TAU_MAPLOG_BLOCK) {
-			track_maplog_block(c, b, idx);
+			track_maplog_block(c, b, lba, idx, fepoch, fua);
 			c->n_maplog++;
 			continue;
 		}
@@ -794,6 +813,10 @@ static void pass_classify(struct ctx *c, const uint8_t *buf, uint64_t bytes,
 			j.serial = be64_at(b, TAU_COMMIT_OFF_SERIAL);
 			j.commit_epoch_field = be64_at(b, TAU_COMMIT_OFF_EPOCH);
 			j.commit_flags = be32_at(b, TAU_COMMIT_OFF_FLAGS);
+			if (j.commit_flags & TAU_COMMIT_F_MAPLOG) {
+				j.maplog_seq = be64_at(b, TAU_COMMIT_OFF_MAPLOG);
+				j.maplog_nr = be32_at(b, TAU_COMMIT_OFF_MAPLOG_NR);
+			}
 			c->n_commit++;
 			break;
 		case TAU_REVOKE_BLOCK:
@@ -1161,8 +1184,36 @@ static int cix_cmp(const void *x, const void *y)
 	return 0;
 }
 
+static int cw_cmp(const void *x, const void *y)
+{
+	const struct claimw *a = x, *b = y;
+
+	if (a->seq != b->seq)
+		return a->seq < b->seq ? -1 : 1;
+	if (a->w.entry_idx != b->w.entry_idx)
+		return a->w.entry_idx < b->w.entry_idx ? -1 : 1;
+	return 0;
+}
+
+/* The first write of the claim block with h_seq @seq, or NULL. */
+static const struct wr *claim_write(const struct ctx *c, uint64_t seq)
+{
+	size_t l = 0, r = c->cw_n;
+
+	while (l < r) {
+		size_t mid = l + (r - l) / 2;
+
+		if (c->cw[mid].seq < seq)
+			l = mid + 1;
+		else
+			r = mid;
+	}
+	return (l < c->cw_n && c->cw[l].seq == seq) ? &c->cw[l].w : NULL;
+}
+
 struct i1stat {
 	uint64_t checked, skipped_nodesc, skipped_multiseg, two_segment;
+	uint64_t claim_blocks;
 	uint64_t blocks, home_blocks, missing, ambiguous, home_ambiguous;
 	uint64_t own, gated, gate_closed, strict;
 	uint64_t viol, viol_ungated;
@@ -1309,6 +1360,7 @@ static void check_i1(struct ctx *c, struct viol_out *v, struct i1stat *st,
 	qsort(c->jw, c->jw_n, sizeof(*c->jw), wr_cmp);
 	qsort(c->hw, c->hw_n, sizeof(*c->hw), wr_cmp);
 	qsort(c->hc, c->hc_n, sizeof(*c->hc), hc_cmp);
+	qsort(c->cw, c->cw_n, sizeof(*c->cw), cw_cmp);
 	finish_frees(c);
 
 	dix = xrealloc(NULL, (c->jb_n + 1) * sizeof(*dix));
@@ -1457,6 +1509,13 @@ static void check_i1(struct ctx *c, struct viol_out *v, struct i1stat *st,
 				st->home_ambiguous++;
 			vadd(&vl, homes[k], x, 1);
 			n_home++;
+		}
+		/* its claims on the map log count only if it does */
+		for (k = 0; k < cm->maplog_nr && k < 4096; k++) {
+			const struct wr *x = claim_write(c, cm->maplog_seq + k);
+
+			vadd(&vl, x ? x->lba : 0, x, 0);
+			st->claim_blocks++;
 		}
 		st->blocks += vl.n;
 		st->home_blocks += n_home;
@@ -2131,6 +2190,7 @@ int torner_loginv(int argc, char **argv)
 	       ",\"i1_blocks_ambiguous\":%" PRIu64
 	       ",\"i1_home_blocks_ambiguous\":%" PRIu64
 	       ",\"i1_two_segment\":%" PRIu64
+	       ",\"i1_claim_blocks\":%" PRIu64
 	       ",\"i1_ordered_own_flush\":%" PRIu64
 	       ",\"i1_ordered_by_host_commit\":%" PRIu64
 	       ",\"i1_gate_never_open\":%" PRIu64
@@ -2149,7 +2209,7 @@ int torner_loginv(int argc, char **argv)
 	       st.checked, st.skipped_nodesc + st.skipped_multiseg,
 	       st.skipped_nodesc, st.skipped_multiseg, st.blocks,
 	       st.home_blocks, st.missing, st.ambiguous, st.home_ambiguous,
-	       st.two_segment, st.own, st.gated,
+	       st.two_segment, st.claim_blocks, st.own, st.gated,
 	       st.gate_closed, st.strict, st.viol, st.viol_ungated,
 	       i5_checked, i5_split, i5_max_entries,
 	       s5.checked, s5.split, s5.partial, s5.unjournaled,
@@ -2168,6 +2228,7 @@ out:
 	free(c.homeset);
 	free(c.hc);
 	free(c.sf);
+	free(c.cw);
 	free(c.as);
 	free(c.regions);
 	free(c.idx2pba);

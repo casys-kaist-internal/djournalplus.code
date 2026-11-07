@@ -94,7 +94,7 @@ def tau_descriptor(seq, ino, tags, next_segment=0, serial=1, home=()):
     return bytes(b)
 
 
-def tau_commit(seq, ino, epoch, next_segment=0, serial=1, flags=0):
+def tau_commit(seq, ino, epoch, next_segment=0, serial=1, flags=0, maplog=(0, 0)):
     b = bytearray(FSBLK)
     struct.pack_into(">IIII", b, 0, TAU_MAGIC, TAU_COMMIT_BLOCK, seq, 0)
     struct.pack_into(">Q", b, 16, ino)
@@ -102,6 +102,10 @@ def tau_commit(seq, ino, epoch, next_segment=0, serial=1, flags=0):
     struct.pack_into(">Q", b, 32, epoch)           # h_epoch: the host commit it names
     struct.pack_into(">I", b, 40, flags)           # h_flags
     struct.pack_into(">Q", b, 96, serial)          # h_serial
+    if maplog[1]:
+        flags |= 0x4                               # TAU_COMMIT_F_MAPLOG
+        struct.pack_into(">I", b, 40, flags)
+        struct.pack_into(">QI", b, 80, maplog[0], maplog[1])   # h_maplog, h_maplog_nr
     return bytes(b)
 
 
@@ -117,6 +121,15 @@ def xlog_record(cycle, block, at=0):
     boundary): h_magicno, h_cycle, h_version 2, h_len, h_lsn = cycle<<32|block."""
     b = bytearray(FSBLK)
     struct.pack_into(">IIIIQ", b, at, XLOG_MAGIC, cycle, 2, 512, (cycle << 32) | block)
+    return bytes(b)
+
+
+def maplog_claim(seq, ents, ino=12):
+    """A CLAIM block of the segment map log: {e_index, e_pba, e_ino} each."""
+    b = bytearray(FSBLK)
+    struct.pack_into(">IIQIHH", b, 0, TAU_MAGIC, TAU_MAPLOG_BLOCK, seq, 1, 1, len(ents))
+    for i, (index, pba) in enumerate(ents):
+        struct.pack_into(">IIQQ", b, 32 + i * 24, index, 0, pba, ino)
     return bytes(b)
 
 
@@ -268,6 +281,23 @@ def build_tau(kind, path):
         log.write(1000, desc)
         log.write(1001, payload)
         log.barrier(LOG_FLUSH_FLAG)
+        log.dump(path)
+        return
+
+    if kind in ("claim-ok", "claim-late"):
+        # The record names its claim on the map log (h_seq 5, one block):
+        # the segment it entered counts only if the record does, so the claim
+        # has to be durable before the record can count, like its data.
+        log.write(1000, desc)
+        log.write(1001, payload)
+        if kind == "claim-ok":
+            log.write(9200, maplog_claim(5, [(0, TAU_SEG_PBA)]))
+        log.barrier(LOG_FLUSH_FLAG)
+        log.write(1003, tau_commit(seq=42, ino=12, epoch=0, maplog=(5, 1)),
+                  flags=LOG_FUA_FLAG)
+        if kind == "claim-late":
+            log.write(9200, maplog_claim(5, [(0, TAU_SEG_PBA)]))
+            log.barrier(LOG_FLUSH_FLAG)
         log.dump(path)
         return
 
@@ -496,5 +526,6 @@ if __name__ == "__main__":
                          "gated-ok|gated-late|gate-closed|xfs-gated-ok|"
                          "fua-first|fua-first-nofree|home-ok|home-late|"
                          "i5-jbd2-ok|i5-jbd2-split|i5-tau-ok|i5-tau-split|"
+                         "claim-ok|claim-late|"
                          "datalog|atomslog|unit} <out>")
     build(sys.argv[1], sys.argv[2])

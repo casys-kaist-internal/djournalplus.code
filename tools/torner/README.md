@@ -356,7 +356,10 @@ log cannot show is submission order: a `FUA` commit issued concurrently with a
 sequence).  Its blocks are its journal extent — from its first descriptor to
 its commit: descriptors, the data their tags name, revoke blocks — plus every
 block a descriptor tags `TAU_TAG_HOME`: new blocks written straight home,
-which take no journal block.  The journal is written linearly through a
+which take no journal block — plus, when the record names them
+(`TAU_COMMIT_F_MAPLOG`), its claims on the segment map log, the blocks with
+`h_seq` in `[h_maplog, h_maplog + h_maplog_nr)`: the segments it entered count
+only if it does.  The journal is written linearly through a
 segment and on at the start of the next one in the transaction's chain, so a
 transaction that crossed a segment boundary is [first descriptor, end of its
 segment) plus [start of the commit's segment, commit), checked when the first

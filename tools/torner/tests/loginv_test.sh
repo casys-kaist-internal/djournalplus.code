@@ -127,6 +127,16 @@ want_rc 2 "a HOME block logged after the record trips I1"
 want_has '"data_home":1' "  ...reported as the HOME block"
 want_has '"data_lba":7000' "  ...at its home address"
 
+# A record that entered a new segment names its claims on the segment map log
+# (h_maplog, by h_seq); they count only if the record does, so they must be
+# durable before it can.
+run claim-ok
+want_rc 0 "a claim block flushed before the record passes"
+want_has '"i1_claim_blocks":1' "  ...and was examined"
+run claim-late
+want_rc 2 "a claim block logged after the record trips I1"
+want_has '"data_lba":9200' "  ...naming the claim block"
+
 # I5: an application write contained in one durable unit.  ext4 data=journal
 # journals page by page, so a commit can close a jbd2 transaction with half
 # of a 16 KiB write in it; the tags of jbd2's descriptors say which blocks a
