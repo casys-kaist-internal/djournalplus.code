@@ -129,6 +129,7 @@ struct sbwrite {
 struct mapwrite {
 	uint64_t entry_idx;
 	uint64_t fepoch;
+	uint64_t mapblk;	/* which map block: 0 .. map_nr - 1 */
 	uint32_t ent_first;	/* c->ment[] */
 	uint32_t ent_n;
 	uint8_t	 fua;
@@ -649,6 +650,7 @@ static void track_map_block(struct ctx *c, const uint8_t *b, uint64_t lba,
 	memset(&m, 0, sizeof(m));
 	m.entry_idx = idx;
 	m.fepoch = fepoch;
+	m.mapblk = lba - c->sb_lba - 1;
 	m.fua = fua ? 1 : 0;
 	m.ent_first = (uint32_t)c->ment_n;
 	for (e = 0; e < TAU_SEGMENT_ENT_MAX && base + e < c->idx_n; e++) {
@@ -2508,11 +2510,21 @@ static void check_i4(struct ctx *c, struct viol_out *v, struct i4stat *st)
 	}
 	free(cp);
 
-	/* (e) map blocks before the base, per mount */
+	/*
+	 * (e) map blocks before the base, per mount, as the kernel guarantees
+	 * it (the kernel session, 11-07): a base move to B needs, for every map
+	 * block, a write of it logged after every map log block with seq <= B
+	 * of the mount (the snapshot holds the log mutex, so no FREE is in
+	 * flight, and waits out every claim in flight before it copies the map)
+	 * and durable before the superblock write carrying B.  An earlier
+	 * snapshot's map blocks predate the log blocks since, so they cannot
+	 * vouch for this one.
+	 */
 	for (k = 0; k < c->sbw_n; k++) {
 		const struct sbwrite *sb = &c->sbw[k];
-		uint64_t lo = prev_sb == SIZE_MAX ? 0 : c->sbw[prev_sb].entry_idx;
-		size_t n = 0, late = 0;
+		struct dline d = { sb->fepoch, sb->entry_idx };
+		uint64_t after = 0, idx;
+		size_t missing = 0;
 
 		if (prev_sb == SIZE_MAX || c->sbw[prev_sb].sequence != sb->sequence) {
 			prev_base = sb->base;	/* a mount: a new log */
@@ -2520,59 +2532,36 @@ static void check_i4(struct ctx *c, struct viol_out *v, struct i4stat *st)
 			continue;
 		}
 		if (sb->base > prev_base) {
-			uint64_t before = UINT64_MAX, after = UINT64_MAX;
-
 			st->base_moves++;
-			for (m = 0; m < c->mw_n; m++) {
-				const struct mapwrite *w = &c->mw[m];
-				struct dline d = { sb->fepoch, sb->entry_idx };
+			/* the last map log block of this mount the base covers */
+			after = c->sbw[prev_sb].entry_idx;
+			for (m = 0; m < c->mlw_n; m++)
+				if (c->mlw[m].jgen == sb->sequence && c->mlw[m].seq <= sb->base &&
+				    c->mlw[m].entry_idx < sb->entry_idx &&
+				    c->mlw[m].entry_idx > after)
+					after = c->mlw[m].entry_idx;
+			for (idx = 0; idx < c->map_nr; idx++) {
+				int ok = 0;
 
-				if (w->entry_idx < sb->entry_idx &&
-				    sb->entry_idx - w->entry_idx < before)
-					before = sb->entry_idx - w->entry_idx;
-				if (w->entry_idx > sb->entry_idx &&
-				    w->entry_idx - sb->entry_idx < after)
-					after = w->entry_idx - sb->entry_idx;
-				if (w->entry_idx <= lo || w->entry_idx >= sb->entry_idx)
-					continue;
-				n++;
-				if (!durable_by(w->fepoch, w->entry_idx, w->fua, &d))
-					late++;
-			}
-			/*
-			 * The snapshot's own map blocks are the writes next to its
-			 * base move.  If the nearest one follows it, they went out
-			 * after the base -- the previous snapshot's map blocks
-			 * between the two base moves must not stand in for them.
-			 */
-			/* ... unless that write is the unmount's rewrite: the
-			 * superblock goes out again with the same base after it */
-			if (n && after < before) {
-				uint64_t at = sb->entry_idx + after;
-				size_t q;
+				for (m = 0; m < c->mw_n && !ok; m++) {
+					const struct mapwrite *w = &c->mw[m];
 
-				for (q = k + 1; q < c->sbw_n; q++) {
-					if (c->sbw[q].entry_idx <= at)
-						continue;
-					if (c->sbw[q].sequence == sb->sequence &&
-					    c->sbw[q].base == sb->base)
-						after = UINT64_MAX;
-					break;
+					ok = w->mapblk == idx && w->entry_idx > after &&
+					     durable_by(w->fepoch, w->entry_idx, w->fua, &d);
 				}
-				if (after < before)
-					n = 0;
+				if (!ok)
+					missing++;
 			}
-			if (!n || late) {
+			if (missing) {
 				st->violations++;
 				if (viol_begin(v))
-					printf("{\"invariant\":\"I4\",\"detail\":\"%s\""
+					printf("{\"invariant\":\"I4\",\"detail\":\"the map log's"
+					       " base moved without every map block written after"
+					       " the log blocks it covers and durable before it\""
 					       ",\"superblock_entry\":%" PRIu64 ",\"base\":%" PRIu64
-					       ",\"map_writes\":%zu,\"not_durable\":%zu}",
-					       n ? "map blocks not durable before the superblock"
-						   " moved the map log's base" :
-						   "the map log's base moved before its snapshot's"
-						   " map blocks were written",
-					       sb->entry_idx, sb->base, n, late);
+					       ",\"log_covered_to_entry\":%" PRIu64
+					       ",\"map_blocks_missing\":%zu}",
+					       sb->entry_idx, sb->base, after, missing);
 			}
 			prev_base = sb->base;
 		}

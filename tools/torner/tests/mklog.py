@@ -597,6 +597,10 @@ def build_i234(kind, path):
         # vouched for by the first one's, which (early) follow its base move
         jb = tx(log, 42, jb, [5000], tail=(42, TAU_SEG_PBA))
         for base in (5, 9):
+            # a log block the base covers, written since the last snapshot
+            log.barrier(LOG_FLUSH_FLAG)
+            log.write(9100 + base, maplog_free(base - 2, [(0, TAU_SEG_PBA)]),
+                      flags=LOG_FUA_FLAG)
             log.barrier(LOG_FLUSH_FLAG)
             if kind == "i4-base-twice-early":
                 log.write(TAU_SB_LBA, tau_superblock(sequence=1, base=base), flags=LOG_FUA_FLAG)
