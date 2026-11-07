@@ -116,6 +116,68 @@
 #define TAU_SB_OFF_SEGMENT_SIZE	92	/* s_segment_size */
 #define TAU_SB_SIZE		1024
 
+/*
+ * include/linux/tau_journal.h:51,80 (e6f2cdb2, kernel #397).  s_maxlen is the
+ * journal file's length in blocks: the superblock and the segment map, so the
+ * map has s_maxlen - 1 blocks (fs/taujournal/journal.c:1053, seg_map_nr = len
+ * - 1).  The segment map log (from #382) is a segment of its own; mkfs leaves
+ * these 0 and the kernel fills them at mount.
+ */
+#define TAU_SB_OFF_MAPLOG_PBA	0x60	/* s_maplog_pba, be64 */
+#define TAU_SB_OFF_MAPLOG_LEN	0x70	/* s_maplog_len, be32 */
+
+/*
+ * The segment map log, include/linux/tau_journal.h:97-119 (#397).  A CLAIM
+ * block lists the segments one commit enters; a FREE block lists segments
+ * freed (e_ino 0) or given back to the host (e_pba 0 as well).  A FREE block
+ * goes out PREFLUSH|FUA and is waited for before the segment is handed out
+ * again (fs/taujournal/journal.c, __tau_maplog_free), so in the log every
+ * write to a segment by its next owner comes after the FREE that ended the
+ * previous ownership.
+ */
+#define TAU_MAPLOG_BLOCK	6	/* h_blocktype */
+#define TAU_MAPLOG_CLAIM	1
+#define TAU_MAPLOG_FREE		2
+#define TAU_MAPLOG_OFF_SEQ	8	/* h_seq, be64 */
+#define TAU_MAPLOG_OFF_KIND	20	/* h_kind, be16 */
+#define TAU_MAPLOG_OFF_NR	22	/* h_nr, be16 */
+#define TAU_MAPLOG_HDR_SIZE	32	/* sizeof(struct tau_maplog_head) */
+#define TAU_MAPLOG_ENT_SIZE	24	/* {e_index be32, e_pad, e_pba be64, e_ino be64} */
+#define TAU_MAPLOG_ENT_MAX	((TAU_BLOCK_SIZE - TAU_MAPLOG_HDR_SIZE) / TAU_MAPLOG_ENT_SIZE)
+
+/*
+ * fs/taujournal/tau.h:240 (#397): a descriptor's last 8 bytes are the file's
+ * serial in this mount; the commit keeps it at 96 (tau.h:298).  Together with
+ * the inode number and the per-file sequence it names one transaction.
+ */
+#define TAU_DESC_SERIAL_FROM_END	8
+#define TAU_COMMIT_OFF_SERIAL		96
+
+/* fs/taujournal/tau.h:327-329 (#397) */
+#define TAU_TAG_NEW		0x10	/* converted by the host after the record */
+#define TAU_TAG_HOME		0x20	/* written home: takes no journal block */
+
+/*
+ * The host journals whose commits gate a flush-less tau record.
+ *
+ * jbd2, include/linux/jbd2.h:112-135: a commit block is {h_magic, h_blocktype
+ * 2, h_sequence}, the same magic and header as tau's.  tau-ext4's recovery
+ * counts a record naming tid R iff tid_gt(j_commit_sequence, R), one past the
+ * last committed tid (fs/ext4/super.c:5524): jbd2's commit block R is durable.
+ *
+ * XFS, fs/xfs/libxfs/xfs_log_format.h:26,163-168: a log record starts with
+ * xlog_rec_header {h_magicno 0xFEEDbabe, h_cycle, h_version, h_len, h_lsn},
+ * on a 512-byte boundary.  tau-xfs counts a record naming LSN R iff R is below
+ * the recovered head (fs/xfs/xfs_log.c:3455): the log record at R is durable.
+ */
+#define JBD2_COMMIT_BLOCK_TYPE	2
+#define XLOG_HEADER_MAGIC	0xFEEDBABEU
+#define XLOG_OFF_CYCLE		4
+#define XLOG_OFF_VERSION	8
+#define XLOG_OFF_LEN		12
+#define XLOG_OFF_LSN		16
+#define XLOG_BBSIZE		512
+
 static inline uint32_t be32_at(const uint8_t *p, size_t off)
 {
 	return ((uint32_t)p[off] << 24) | ((uint32_t)p[off + 1] << 16) |

@@ -49,7 +49,7 @@ def tau_superblock():
     b = bytearray(FSBLK)
     struct.pack_into(">III", b, 0, TAU_MAGIC, 4, 0)
     struct.pack_into(">I", b, 12, FSBLK)          # s_blocksize
-    struct.pack_into(">I", b, 16, 1 << 20)        # s_maxlen
+    struct.pack_into(">I", b, 16, 2)              # s_maxlen: sb + one map block
     struct.pack_into(">I", b, 92, TAU_SEG_SIZE)   # s_segment_size
     return bytes(b)
 
@@ -62,7 +62,19 @@ def tau_segment_map(pbas, ino=14):
     return bytes(b)
 
 
-def tau_descriptor(seq, ino, tags, next_segment=0):
+TAU_TAG_SAME_UUID = 2
+TAU_TAG_HOME = 0x20
+TAU_MAPLOG_BLOCK = 6
+TAU_MAPLOG_FREE = 2
+JBD2_COMMIT_BLOCK = 2
+XLOG_MAGIC = 0xFEEDBABE
+
+
+def tau_descriptor(seq, ino, tags, next_segment=0, serial=1, home=()):
+    """Tags as the kernel lays them out (fs/taujournal/commit.c): 10 bytes
+    each, the journal's UUID after the first, the file's serial in the last
+    8 bytes.  Blocks in @home are tagged TAU_TAG_HOME: written straight home,
+    no journal block."""
     b = bytearray(FSBLK)
     struct.pack_into(">IIII", b, 0, TAU_MAGIC, TAU_DESCRIPTOR_BLOCK, seq, 0)
     struct.pack_into(">Q", b, 16, ino)
@@ -70,17 +82,51 @@ def tau_descriptor(seq, ino, tags, next_segment=0):
     off = 32
     for i, blk in enumerate(tags):
         flags = TAU_TAG_LAST if i == len(tags) - 1 else 0
+        if i:
+            flags |= TAU_TAG_SAME_UUID
+        if blk in home:
+            flags |= TAU_TAG_HOME
         struct.pack_into(">IIH", b, off, blk & 0xFFFFFFFF, blk >> 32, flags)
         off += 10
+        if not i:
+            off += 16                              # the UUID
+    struct.pack_into(">Q", b, FSBLK - 8, serial)
     return bytes(b)
 
 
-def tau_commit(seq, ino, epoch, next_segment=0):
+def tau_commit(seq, ino, epoch, next_segment=0, serial=1, flags=0):
     b = bytearray(FSBLK)
     struct.pack_into(">IIII", b, 0, TAU_MAGIC, TAU_COMMIT_BLOCK, seq, 0)
     struct.pack_into(">Q", b, 16, ino)
     struct.pack_into(">Q", b, 24, next_segment)
-    struct.pack_into(">Q", b, 32, epoch)
+    struct.pack_into(">Q", b, 32, epoch)           # h_epoch: the host commit it names
+    struct.pack_into(">I", b, 40, flags)           # h_flags
+    struct.pack_into(">Q", b, 96, serial)          # h_serial
+    return bytes(b)
+
+
+def jbd2_commit(tid):
+    """jbd2's commit block: tau's magic and header, outside tau's segments."""
+    b = bytearray(FSBLK)
+    struct.pack_into(">III", b, 0, TAU_MAGIC, JBD2_COMMIT_BLOCK, tid)
+    return bytes(b)
+
+
+def xlog_record(cycle, block, at=0):
+    """A block holding an XFS log record header at byte @at (a 512-byte
+    boundary): h_magicno, h_cycle, h_version 2, h_len, h_lsn = cycle<<32|block."""
+    b = bytearray(FSBLK)
+    struct.pack_into(">IIIIQ", b, at, XLOG_MAGIC, cycle, 2, 512, (cycle << 32) | block)
+    return bytes(b)
+
+
+def maplog_free(seq, ents):
+    """A FREE block of the segment map log: {e_index, e_pba, e_ino 0} each."""
+    b = bytearray(FSBLK)
+    struct.pack_into(">IIQIHH", b, 0, TAU_MAGIC, TAU_MAPLOG_BLOCK, seq, 1,
+                     TAU_MAPLOG_FREE, len(ents))
+    for i, (index, pba) in enumerate(ents):
+        struct.pack_into(">IIQQ", b, 32 + i * 24, index, 0, pba, 0)
     return bytes(b)
 
 
@@ -190,16 +236,72 @@ def build_tau(kind, path):
     """
     One transaction: descriptor at fs block 1000, its two data blocks at
     1001-1002, commit at 1003.  Tags name the in-place blocks 5000/5001.
+
+    The first four records name no host commit (h_epoch 0), so only their own
+    flush can order them.  The gated cases name jbd2 tid 5 (or an XFS LSN),
+    as a record sent without a flush of its own since kernel #376 does.
     """
     log = Log()
     desc = tau_descriptor(seq=42, ino=12, tags=[5000, 5001])
     payload = bytes(FSBLK) * 2
-    commit = tau_commit(seq=42, ino=12, epoch=7)
+    commit = tau_commit(seq=42, ino=12, epoch=0)
+    gated = tau_commit(seq=42, ino=12, epoch=5)
 
     # Geometry first: without it nothing in the stream can be attributed to
     # tau, and the checker refuses the log rather than reporting it clean.
     log.write(TAU_SB_LBA, tau_superblock())
     log.write(TAU_SB_LBA + 1, tau_segment_map([TAU_SEG_PBA]))
+
+    if kind in ("fua-first", "fua-first-nofree"):
+        # The record_fua_only control's shape.  The segment's previous owner
+        # wrote block 1001, and (fua-first) its FREE went out on the map log.
+        # Then the record goes FUA with no preflush: dm-log-writes logs a FUA
+        # write at its completion but plain writes only at the next FLUSH, so
+        # the record lands in the log AHEAD of the descriptor and data it
+        # vouches for.  The checker has to find them after it, and must not
+        # take the previous owner's 1001 for this transaction's.
+        log.write(1001, bytes(FSBLK))
+        log.barrier(LOG_FLUSH_FLAG)
+        if kind == "fua-first":
+            log.write(9100, maplog_free(1, [(0, TAU_SEG_PBA)]), flags=LOG_FUA_FLAG)
+        log.write(1003, commit, flags=LOG_FUA_FLAG)
+        log.write(1000, desc)
+        log.write(1001, payload)
+        log.barrier(LOG_FLUSH_FLAG)
+        log.dump(path)
+        return
+
+    if kind in ("home-ok", "home-late"):
+        # Tag 7000 is HOME: a new block written straight home, outside the
+        # journal.  Its write must be durable before the record, like the
+        # journal copies.
+        desc = tau_descriptor(seq=42, ino=12, tags=[5000, 7000], home=(7000,))
+        log.write(1000, desc)
+        log.write(1001, bytes(FSBLK))
+        if kind == "home-ok":
+            log.write(7000, bytes(FSBLK))
+        log.barrier(LOG_FLUSH_FLAG)
+        log.write(1002, commit, flags=LOG_FUA_FLAG)
+        if kind == "home-late":
+            log.write(7000, bytes(FSBLK))
+            log.barrier(LOG_FLUSH_FLAG)
+        log.dump(path)
+        return
+
+    if kind == "gated-late":
+        # A record without a flush of its own naming jbd2 tid 5, but data
+        # block 1002 completes only after jbd2's preflush went out: it is
+        # logged at the next flush, after the host commit.  The record can
+        # count with that block not on disk.
+        log.write(1000, desc)
+        log.write(1001, bytes(FSBLK))
+        log.write(1003, gated)
+        log.barrier(LOG_FLUSH_FLAG)
+        log.write(9500, jbd2_commit(5), flags=LOG_FUA_FLAG)
+        log.write(1002, bytes(FSBLK))
+        log.barrier(LOG_FLUSH_FLAG)
+        log.dump(path)
+        return
 
     log.write(1000, desc)
     log.write(1001, payload)
@@ -223,6 +325,26 @@ def build_tau(kind, path):
         # epochs on FUA puts the commit in a later epoch and calls it fine.
         log.write(9000, bytes(FSBLK), flags=LOG_FUA_FLAG)
         log.write(1003, commit, flags=LOG_FUA_FLAG)
+    elif kind == "gated-ok":
+        # A record without a flush of its own, logged in its data's window,
+        # naming jbd2 tid 5.  jbd2's commit block of tid 5 goes out behind a
+        # flush (PREFLUSH|FUA: dm logs the empty flush, then the FUA write),
+        # so the data is durable before the record can count.
+        log.write(1003, gated)
+        log.barrier(LOG_FLUSH_FLAG)
+        log.write(9500, jbd2_commit(5), flags=LOG_FUA_FLAG)
+    elif kind == "gate-closed":
+        # The record names tid 5, whose commit never reaches the log: no crash
+        # state of this log counts the record, so its order cannot hurt.
+        log.write(1003, gated)
+        log.barrier(LOG_FLUSH_FLAG)
+    elif kind == "xfs-gated-ok":
+        # tau-xfs: the record names the LSN of the XFS log record it waits
+        # for (cycle 3, block 64).  The header sits at a 512-byte boundary
+        # inside the block, not at its start.
+        log.write(1003, tau_commit(seq=42, ino=12, epoch=(3 << 32) | 64))
+        log.barrier(LOG_FLUSH_FLAG)
+        log.write(9600, xlog_record(3, 64, at=512), flags=LOG_FUA_FLAG)
     else:
         raise SystemExit("unknown kind %s" % kind)
 
@@ -305,5 +427,7 @@ def build(kind, path):
 if __name__ == "__main__":
     if len(sys.argv) != 3:
         raise SystemExit("usage: mklog.py {good|no-barrier|no-flags|fua-not-flush|"
+                         "gated-ok|gated-late|gate-closed|xfs-gated-ok|"
+                         "fua-first|fua-first-nofree|home-ok|home-late|"
                          "datalog|atomslog|unit} <out>")
     build(sys.argv[1], sys.argv[2])

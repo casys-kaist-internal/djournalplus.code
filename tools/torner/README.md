@@ -9,7 +9,7 @@ Crash-atomicity test suite for tauJournal. Implements the T2/T3 plan in
 | §2.1 `atomicw` | `torner gen` | done |
 | §2.2 `atomchk` | `torner check` | done |
 | — | `torner tear` | done (self-test for `check`) |
-| §3 `tau-loginv` | `torner loginv` | parser + epochs + **I1** (on FLUSH epochs); I2–I5 not implemented |
+| §3 `tau-loginv` | `torner loginv` | parser + epochs + **gated I1** (FLUSH epochs; the host commit a flush-less record names; HOME blocks); I2–I5 not implemented |
 | — | `torner atoms` | done: follows every application write through the log, FS-agnostic |
 | §4 `tau-replay` | `torner replay` | 4 of 5 epoch strategies + `torn-entry`; write-aimed `atom-order`/`atom-reorder`/`atom-tear`; `targeted` not implemented |
 | §6 `report.py` | `scripts/report.py` | Table 1, per-write table, write shapes, state coverage; T1/T3 tables have no input |
@@ -308,7 +308,7 @@ and defaults to the numeric `--run-id`.
 
 ```
 torner loginv --log <logdev> [--config tau-ext4|tau-xfs|ext4-data]
-              [--check I1] [--fsblock 4096] [--stat-only]
+              [--check I1] [--i1-strict] [--fsblock 4096] [--stat-only]
 ```
 
 Parses a `dm-log-writes` log and decides ordering invariants without crashing
@@ -316,12 +316,32 @@ anything. That is the point: probabilistic replay can miss a missing barrier,
 because most replays of a barrier-less stream still land in a legal order by
 accident. Reading the log settles it.
 
-**I1** — every block a transaction commits must be durable before its commit
-block can be.  "Durable before" is decided by `FLUSH` alone: a block is
-guaranteed on media ahead of its commit iff a `FLUSH` lies between them (the
-commit is in a later *flush epoch*), or the block itself was written `FUA`.
-Violations report the sequence, both LBAs, both flush epochs, the log entry
-indices, how many blocks the transaction spans, and `"epoch_model":"flush"`.
+**I1** — every block a transaction commits must be durable before recovery
+can count its record.  "Durable before" is decided by `FLUSH` alone: a block
+is guaranteed on media ahead of x iff a `FLUSH` lies between them (x is in a
+later *flush epoch*), or the block itself was written `FUA`.
+
+I1 is judged the way recovery judges a record (**gated I1**).  Since kernel
+#376 most records go out without a flush of their own and name a host commit
+instead (`h_epoch`): tau-ext4's recovery counts the record only if jbd2's
+commit of tid `h_epoch` is on disk (`tid_gt(j_commit_sequence, R)`), tau-xfs's
+only if the XFS log record at LSN `h_epoch` is (below the recovered head).
+That host commit goes out behind a flush, over everything the record vouches
+for.  So a block must be durable before the record *and* its host commit both
+can be: `fepoch(block) < max(fepoch(record), fepoch(host commit))`.  The host
+commit is found in the same stream: jbd2's commit block (tau's magic, block
+type 2, outside tau's segments) by tid, the XFS log record header
+(`0xFEEDbabe`, on a 512-byte boundary, its LSN's cycle equal to `h_cycle`) by
+LSN.  A record whose host commit never reaches the log is counted by no crash
+state of this log: `i1_gate_never_open`, not a violation.  `--i1-strict`
+judges on the record's own flush alone, the rule before #376, under which
+nearly every record of #376 and later fails (`i1_strict_unordered`).
+
+Violations report the inode, serial and sequence, the record's LBA, flush epoch
+and log entry, its `h_epoch` and where that host commit was logged, the worst
+block (LBA, epoch, entry, whether it is a HOME block or missing), and how many
+blocks were unordered or missing; `"gate"` says what the verdict was judged
+against (`none`, `host`, `isize`, `strict`).
 
 An earlier version split epochs on `FUA` as well, as CrashMonkey's permuter
 does.  That is wrong — `FUA` makes only its own data durable — and it is not a
@@ -332,6 +352,33 @@ includes exactly that log (`fua-not-flush`) and requires I1 to fire.  What the
 log cannot show is submission order: a `FUA` commit issued concurrently with a
 `FLUSH`, rather than after it completed, is logged the same way.
 
+**Which blocks, and which write of each.**  A transaction is (inode, serial,
+sequence).  Its blocks are its journal extent — from its first descriptor to
+its commit: descriptors, the data their tags name, revoke blocks — plus every
+block a descriptor tags `TAU_TAG_HOME`: new blocks written straight home,
+which take no journal block.  The journal is written linearly through a
+segment and on at the start of the next one in the transaction's chain, so a
+transaction that crossed a segment boundary is [first descriptor, end of its
+segment) plus [start of the commit's segment, commit), checked when the first
+segment's `h_next_segment` names the commit's.
+
+Which logged write of a block is the transaction's took two lessons from the
+`record_fua_only` control, whose crash states fail and which the first version
+of I1 passed by skipping 99.8% of its transactions:
+
+- `dm-log-writes` logs a plain write at the next `FLUSH` but a `FUA` write at
+  its own completion, so a record sent `FUA` without a preflush is logged
+  *before* the descriptor and data it vouches for.  The transaction's write is
+  the last one logged before its commit, or failing that the first one after
+  it.
+- A journal block is written once per ownership of its segment.  A segment goes
+  back to the pool through a `FREE` on the segment map log, which goes out
+  `PREFLUSH|FUA` and is waited for before the segment is handed out again; so
+  writes are looked for only between the `FREE`s around the commit, and the
+  previous owner's write of the same block is never taken.  More than one write
+  inside an ownership is counted (`i1_blocks_ambiguous`).  A HOME block is
+  looked for after the file's previous commit.
+
 Two things about identifying tau's blocks are not obvious, and both were learned
 from a real capture rather than from the headers:
 
@@ -340,10 +387,11 @@ from a real capture rather than from the headers:
   `h_commit_sec`. On a tau-ext4 stack both journals are in the stream and no
   amount of header shape tells them apart. They are separated by LBA instead:
   pass 1 finds the tau superblock — identified by `s_segment_size`, the one
-  field jbd2 leaves zero — and reads the segment map that follows it to learn
-  where the journal's segments physically live. Blocks carrying the magic
-  outside those extents are counted as `foreign_magic_blocks` and never
-  asserted on.
+  field jbd2 leaves zero — and the segment map that follows it (`s_maxlen - 1`
+  blocks; a fixed 64 read whatever follows the journal file, 54,913 "segments"
+  on tau-xfs for a journal of 8) and the map log's claims say where the
+  journal's segments physically live. Blocks carrying the magic outside those
+  extents are counted as `foreign_magic_blocks` and never asserted on.
 - **A transaction is a chain of descriptors, not one descriptor plus tags.**
   Each descriptor is followed by the data blocks its tags name, all sharing one
   sequence, closed by a single commit. So the extent is `[first descriptor of
@@ -369,10 +417,10 @@ Two honesty properties matter more than coverage here:
   transaction to commit" — while every tau invariant "passes". `torner gen
   --untorn` is what makes tau engage.
 - Invariants that are not implemented report `"not_implemented"`, never
-  `"pass"`. Transactions that could not be reconstructed (multi-segment ones,
-  where `h_next_segment` is non-zero and the linear layout no longer holds) are
-  counted in `coverage.i1_transactions_skipped` rather than dropped silently,
-  and `coverage.i1_blocks_examined` says how much was actually looked at. On the
+  `"pass"`. Transactions that could not be reconstructed are counted in
+  `coverage.i1_transactions_skipped` (no descriptor in the log, or a chain of
+  three segments or more) rather than dropped silently, and
+  `coverage.i1_blocks_examined` says how much was actually looked at. On the
   first real tau capture these read 0 checked / 425 skipped: a clean exit code
   that had inspected nothing. Without those counters it would have read as a
   pass.
@@ -380,10 +428,24 @@ Two honesty properties matter more than coverage here:
 `make test` checks these cases against synthetic logs built by
 `tests/mklog.py`: a well-ordered log passes, a log whose commit shares a flush
 epoch with its own data trips I1 — with or without an unrelated `FUA` write in
-between — and a flagless log is refused. CRASH_TODO §3.7 asks
-for a barrier-stripped kernel build to prove I1 fires — that proves the kernel.
-To prove the *checker*, a log constructed to violate I1 is better evidence,
-because we know exactly what is wrong with it.
+between — and a flagless log is refused; a flush-less record passes when its
+jbd2 commit (or XFS log record) flushes its data and fails when a block lands
+after that flush; a record whose host commit never comes is counted, not
+passed; a `FUA` record logged ahead of its own data trips I1, and the previous
+owner's write before the map log `FREE` is not taken for it; a HOME block
+logged after the record trips I1. CRASH_TODO §3.7 asks for a barrier-stripped
+kernel build to prove I1 fires — that proves the kernel. To prove the
+*checker*, a log constructed to violate I1 is better evidence, because we know
+exactly what is wrong with it; and the `record_fua_only` captures, whose crash
+states fail, are the self-check on real logs.
+
+On the 2026-11-07 captures of kernel #397 (70 tau-ext4/tau-xfs cells, 2-3k
+records each, `TORNER_LOGINV_DEBUG=1` says why a block was ambiguous): every
+record was checked (two-segment ones included, none skipped, no block
+missing); the main, `set-fdatasync` and `set-pressure` cells have 0
+violations, the fsync rows ordered by their host commit and the fdatasync
+overwrite rows by the record's own flush; all four `record_fua_only-fds`
+cells fail on 99.7-99.8% of their records.
 
 ## `torner atoms`
 

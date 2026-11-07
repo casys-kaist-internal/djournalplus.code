@@ -16,9 +16,11 @@ pass=0; fail=0
 ok()  { printf '  \033[32mok\033[0m    %s\n' "$1"; pass=$((pass+1)); }
 bad() { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; fail=$((fail+1)); }
 
-run() {  # run <kind>; sets OUT and RC
-	python3 "$HERE/mklog.py" "$1" "$WORK/$1.log" || { bad "mklog $1"; return 1; }
-	OUT="$("$TORNER" loginv --log "$WORK/$1.log" --config tau-ext4 --check I1 2>&1)"
+run() {  # run <kind> [config] [extra loginv args]; sets OUT and RC
+	local kind="$1" cfg="${2:-tau-ext4}"
+	shift; [ $# -gt 0 ] && shift
+	python3 "$HERE/mklog.py" "$kind" "$WORK/$kind.log" || { bad "mklog $kind"; return 1; }
+	OUT="$("$TORNER" loginv --log "$WORK/$kind.log" --config "$cfg" --check I1 "$@" 2>&1)"
 	RC=$?
 	return 0
 }
@@ -68,6 +70,62 @@ run no-flags
 want_rc 1 "flagless log is refused, not passed"
 want_has '"usable":false' "  ...reported as unusable"
 want_not '"I1":"run"' "  ...and no invariant claims to have run"
+
+# Since kernel #376 a record usually goes without a flush of its own and names
+# a host commit instead (h_epoch): recovery counts it only once that commit is
+# on disk, and the host commit goes out behind a flush.  Gated I1 judges the
+# record as recovery does.
+run gated-ok
+want_rc 0 "a flush-less record whose host commit flushes its data passes"
+want_has '"i1_ordered_by_host_commit":1' "  ...ordered by jbd2's commit, not its own flush"
+want_has '"i1_strict_unordered":1' "  ...though the record alone is not ordered"
+want_has '"host_commits":1' "  ...jbd2's commit block was found outside tau's segments"
+
+run gated-ok tau-ext4 --i1-strict
+want_rc 2 "--i1-strict judges on the record's own flush only"
+want_has '"gate":"strict"' "  ...and says so"
+
+run gated-late
+want_rc 2 "a block logged after the host commit's flush trips gated I1"
+want_has '"gate":"host"' "  ...reported against the host commit"
+want_has '"data_lba":1002' "  ...naming the late block"
+want_has '"blocks_unordered":1' "  ...and only that one"
+
+run gate-closed
+want_rc 0 "a record whose host commit never reaches the log cannot count"
+want_has '"i1_gate_never_open":1' "  ...counted, not passed silently"
+
+run xfs-gated-ok tau-xfs
+want_rc 0 "tau-xfs: a record gated on an XFS log record passes"
+want_has '"i1_ordered_by_host_commit":1' "  ...found by LSN at a 512-byte boundary"
+
+# The record_fua_only control: the record goes FUA without a preflush, so
+# dm-log-writes logs it before the descriptor and data it vouches for.  The
+# first version of I1 looked for them only before the commit, skipped such
+# transactions, and passed the control whose crash states fail.
+run fua-first
+want_rc 2 "a FUA record logged ahead of its own data trips I1"
+want_has '"gate":"none"' "  ...with nothing gating it"
+want_has '"blocks_unordered":3' "  ...descriptor and both data blocks"
+want_has '"i1_blocks_ambiguous":0' "  ...the previous owner's write, before the FREE, is not taken"
+
+# Without the map log FREE the previous owner's write of 1001 is in the same
+# ownership as this transaction's: it is counted as ambiguous, and the
+# transaction is still caught by the other two blocks.
+run fua-first-nofree
+want_rc 2 "without the FREE the transaction is still caught"
+want_has '"i1_blocks_ambiguous":1' "  ...and the doubled block is counted as ambiguous"
+
+# A block tagged HOME is written straight home and takes no journal block; it
+# has to be durable before the record like the journal copies.
+run home-ok
+want_rc 0 "a HOME block written before the record's flush passes"
+want_has '"i1_home_blocks":1' "  ...and was examined"
+
+run home-late
+want_rc 2 "a HOME block logged after the record trips I1"
+want_has '"data_home":1' "  ...reported as the HOME block"
+want_has '"data_lba":7000' "  ...at its home address"
 
 echo
 printf 'passed %d, failed %d\n' "$pass" "$fail"
