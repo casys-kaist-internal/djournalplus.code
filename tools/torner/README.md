@@ -547,7 +547,8 @@ under that name would quietly hollow out the strongest claim in the plan.
 
 ```sh
 # once per configuration: build the stack, run the workload, keep the artifacts
-# (and atoms.json: how each application write reached the device)
+# (and atoms.json: how each application write reached the device; on tau,
+# loginv.json: gated I1 over every record of the log)
 scripts/capture.sh --workdir DIR --fs ext4|ext4-data|xfs|tau-ext4|tau-xfs|zfs \
                    [--threads 4 --unit 16384 --gen-args "--other-fsync-ms 5"]
 

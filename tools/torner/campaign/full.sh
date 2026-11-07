@@ -130,6 +130,20 @@ if tau:
               "   capture: reused %s, on the spot %s" % (
                   r["config"], r["row"], r["profile"], r["tag"], r["states"], bad,
                   r["reused_win"] or "?", r["reuse_flush_win"] or "?", r["reused"], r["reuse_flush"]))
+# capture.sh's gated I1 (loginv.json), captures from 11-07 on: every record of
+# the log, no crash state needed.  Only record_fua_only can show here; the
+# other controls switch recovery, not the log.
+i1 = [r for r in csv.DictReader(open(sys.argv[1])) if r.get("i1_checked")]
+if i1:
+    print("\ngated I1 per cell (torner loginv over every record): checked/skipped, blocks missing,"
+          " ordered by own flush / by host commit / gate never open, violations")
+    for r in i1:
+        must_fail = r["tag"].startswith("record_fua_only")
+        nv = int(r["i1_violations"] or 0)
+        verdict = ("FAILS (good)" if nv else "NO SIGNAL") if must_fail else ("VIOLATIONS" if nv else "passes")
+        print("  %-9s %-10s %-6s %-22s %s/%s  missing %s  own %s / host %s / never %s  violations %s  %s" % (
+            r["config"], r["row"], r["profile"], r["tag"], r["i1_checked"], r["i1_skipped"],
+            r["i1_missing"], r["i1_own"], r["i1_gated"], r["i1_gate_closed"], nv, verdict))
 PYEOF
 } > "$OUT/summary.md"
 cat "$OUT/summary.md"

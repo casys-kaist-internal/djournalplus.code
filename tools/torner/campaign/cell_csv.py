@@ -25,6 +25,11 @@ capture.json, atoms.json, states-<strategy>.jsonl -- and says, for that
                   yet on the map log, so tau_flush_freed wrote it on the spot
   reused_win, reuse_flush_win   the same inside torner gen's timed run, the only
                   part explore crashes in -- not its prefill (tau-probe-samples.txt)
+  i1_*            tau, loginv.json: gated I1 over every record of the log, no
+                  crash state needed -- records checked and skipped, blocks with
+                  no write in the log, records ordered by their own flush, by the
+                  host commit they name, whose host commit never came, and
+                  violations (torner README, `torner loginv`)
 
 A 2 KiB append alternates a write that starts a block (even page) with one
 inside the block the previous write allocated (odd page); --row ap2k splits
@@ -45,7 +50,9 @@ FIELDS = ("config", "row", "profile", "tag", "kernel", "mount_opts", "mkfs_opts"
           "viol_content", "viol_size", "viol_durability", "p3_dirty", "p3_na",
           "writes_targeted", "writes_torn", "torn_O", "torn_R", "torn_T",
           "upper95", "kinds", "witness", "capture",
-          "reused", "reuse_flush", "reused_win", "reuse_flush_win")
+          "reused", "reuse_flush", "reused_win", "reuse_flush_win",
+          "i1_checked", "i1_skipped", "i1_missing", "i1_own", "i1_gated",
+          "i1_gate_closed", "i1_violations")
 
 
 def wilson_hi(k, n, z=1.96):
@@ -126,6 +133,22 @@ def probes(cap, duration):
         out.update(reused_win=end["seg_reused"] - before[-1]["seg_reused"],
                    reuse_flush_win=end["seg_reuse_flush"] - before[-1]["seg_reuse_flush"])
     return out
+
+
+def loginv_i1(cap):
+    """capture.sh's gated I1 verdict (loginv.json), tau captures from 11-07 on."""
+    try:
+        c = json.load(open(os.path.join(cap, "loginv.json"))).get("coverage", {})
+    except (OSError, ValueError):
+        return {}
+    keys = (("i1_checked", "i1_transactions_checked"),
+            ("i1_skipped", "i1_transactions_skipped"),
+            ("i1_missing", "i1_blocks_missing"),
+            ("i1_own", "i1_ordered_own_flush"),
+            ("i1_gated", "i1_ordered_by_host_commit"),
+            ("i1_gate_closed", "i1_gate_never_open"),
+            ("i1_violations", "i1_violations"))
+    return {k: c.get(src, "") for k, src in keys}
 
 
 def summarize(cap, row, profile):
@@ -210,6 +233,7 @@ def summarize(cap, row, profile):
                kinds=" ".join("%s=%d" % kv for kv in sorted(kinds.items())),
                witness=witness or "")
     out.update(probes(cap, float(cj.get("duration_s", 5))))
+    out.update(loginv_i1(cap))
     if row == "ap2k":
         # starts a block (even page) / inside the block the last write allocated
         nb = {p for p in targeted if p[0] % 2 == 0}

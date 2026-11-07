@@ -68,7 +68,8 @@ usage: capture.sh --workdir DIR [options]
                      reproducible by replaying the whole log onto base
 
 Artifacts land in DIR: base.img, log.img, progress.img, capture.json,
-atoms.json (how each application write reached the device; torner atoms)
+atoms.json (how each application write reached the device; torner atoms),
+loginv.json (tau: gated I1 over every record; torner loginv)
 EOF
 	exit 1
 }
@@ -248,6 +249,27 @@ if [ "$STAT_RC" != 0 ]; then
 	say "FAILED: log is not usable (see reason above)"
 	exit 1
 fi
+
+# Gated I1 over every record in the log (torner loginv, README): a verdict
+# that needs no crash state.  A violation is recorded, not a failed capture --
+# the record_fua_only control is meant to have them.
+case "$FS" in
+tau-*)
+	"$TORNER" loginv --log "$LOG" --config "$FS" --check I1 \
+		--max-violations 8 > "$WORKDIR/loginv.json"
+	LI_RC=$?
+	[ -s "$WORKDIR/loginv.json" ] && python3 - "$WORKDIR/loginv.json" "$LI_RC" <<'PYEOF' >&2
+import json, sys
+c = json.load(open(sys.argv[1])).get("coverage", {})
+print("[capture] gated I1 (exit %s): records checked %d, skipped %d, blocks missing %d;"
+      " ordered by own flush %d, by host commit %d, gate never open %d; violations %d"
+      % (sys.argv[2], c.get("i1_transactions_checked", 0),
+         c.get("i1_transactions_skipped", 0), c.get("i1_blocks_missing", 0),
+         c.get("i1_ordered_own_flush", 0), c.get("i1_ordered_by_host_commit", 0),
+         c.get("i1_gate_never_open", 0), c.get("i1_violations", 0)))
+PYEOF
+	;;
+esac
 
 # How each application write reached the device -- one bio, or in pieces --
 # read off the log by content alone.  This is what the atom-* strategies plan
