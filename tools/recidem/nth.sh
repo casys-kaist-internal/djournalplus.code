@@ -29,7 +29,7 @@
 #   env FSES ("ext4-tau xfs-tau"), STATES (1), EPOCHS_MAX (25), ENTRY_CUTS (20), SUBSETS (6),
 #       FLIP_SUBSETS (4), SEED (1), COW_GB (64), LOG_GB (32): the room appended to the crash image for the
 #       snapshots' COW and the log (nth_guest.sh carves /dev/vda; the guest's root stays out of it),
-#       plus run.sh's DISK_GB FILES DATA_GB JOURNAL_GB THREADS BATCH LOAD_S KILL_MIN_S IMGDIR
+#       plus run.sh's DISK_GB FILES DATA_GB JOURNAL_GB THREADS BATCH LOAD_S KILL_MIN_S IMGDIR SEGSIZE
 # Guest: an overlay on vm_imgs/cm-guest-ubuntu.qcow2, the tree's bzImage and the initrd of its build.
 # Parsed whole first.
 {
@@ -41,6 +41,10 @@ set -u
 FSES=${FSES:-ext4-tau xfs-tau} STATES=${STATES:-1}
 EPOCHS_MAX=${EPOCHS_MAX:-25} ENTRY_CUTS=${ENTRY_CUTS:-20} SUBSETS=${SUBSETS:-6} FLIP_SUBSETS=${FLIP_SUBSETS:-4} SEED=${SEED:-1}
 COW_GB=${COW_GB:-64} LOG_GB=${LOG_GB:-32}
+# τ journal segments: 16 MiB, as the benches since the user's decision (가) of 11-08 (XFS then needs
+# tjmaxsize=32G for the 32 GiB cap); SEGSIZE= (empty) gives the mkfs defaults, 128 MiB, as up to 11-08
+SEGSIZE=${SEGSIZE-16m}
+XL=tjmaxsize=1G; [ -n "$SEGSIZE" ] && XL=tjsegsize=$SEGSIZE,tjmaxsize=32G   # xfs-tau's -l
 DISK_GB=${DISK_GB:-256} FILES=${FILES:-64} DATA_GB=${DATA_GB:-96} JOURNAL_GB=${JOURNAL_GB:-32}
 THREADS=${THREADS:-64} BATCH=${BATCH:-64} LOAD_S=${LOAD_S:-60} KILL_MIN_S=${KILL_MIN_S:-40}
 KD=$R/codes/djournalplus-kernel.code
@@ -129,9 +133,10 @@ for fs in $FSES; do
     # the crash state, as run.sh
     rm -f "${C:?}"; truncate -s "${DISK_GB}G" "$C"
     case $fs in
-      ext4-tau) tau_mke2fs -q -t ext4 -E lazy_itable_init=0,lazy_journal_init=0 -F "$C" > /dev/null ;;
-      xfs-tau)  tau_mkfs_xfs -q -f -l tjmaxsize=1G "$C" > /dev/null ;;
+      ext4-tau) tau_mke2fs -t ext4 -E lazy_itable_init=0,lazy_journal_init=0${SEGSIZE:+,tau_segsize=$SEGSIZE} -F "$C" > "$P.mkfs" 2>&1 ;;
+      xfs-tau)  tau_mkfs_xfs -f -l $XL "$C" > "$P.mkfs" 2>&1 ;;
     esac
+    echo "$fs s$s: mkfs: $(grep -m1 -o 'segment size of [0-9]* *[A-Z]*' "$P.mkfs")"
     boot "$C" "$P.load.console" || { echo "$fs s$s: boot failed"; vm_kill; continue; }
     g "bash ~/recidem/guest.sh mount $fs $JOURNAL_GB" > /dev/null; mount_wait 120 > /dev/null || { echo "$fs s$s: load mount failed"; vm_kill; continue; }
     g "bash ~/recidem/guest.sh prepare $FILES $DATA_GB" > /dev/null || { echo "$fs s$s: prepare failed"; vm_kill; continue; }

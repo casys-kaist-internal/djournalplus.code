@@ -18,7 +18,8 @@
 # Usage: run.sh [out dir]
 #   env: FSES ("ext4-tau xfs-tau"), STATES (5), FRACS ("0.25 0.5 0.75"), DISK_GB (256), FILES (64),
 #        DATA_GB (96), JOURNAL_GB (32), THREADS (64), BATCH (64), LOAD_S (60), KILL_MIN_S (40),
-#        IMGDIR (/mnt/recidem: a file system on the test device made here; the images live there)
+#        IMGDIR (/mnt/recidem: a file system on the test device made here; the images live there),
+#        SEGSIZE (16m: τ journal segments; empty = the mkfs default, 128 MiB)
 # Guest: an overlay on vm_imgs/cm-guest-ubuntu.qcow2 per boot, the tree's bzImage and the initrd of
 # its build (vm_imgs/initrd.img-6.8.0tjournal+-<build>). Parsed whole first.
 {
@@ -29,6 +30,10 @@ set -u
 FSES=${FSES:-ext4-tau xfs-tau} STATES=${STATES:-5} FRACS=${FRACS:-0.25 0.5 0.75}
 DISK_GB=${DISK_GB:-256} FILES=${FILES:-64} DATA_GB=${DATA_GB:-96} JOURNAL_GB=${JOURNAL_GB:-32}
 THREADS=${THREADS:-64} BATCH=${BATCH:-64} LOAD_S=${LOAD_S:-60} KILL_MIN_S=${KILL_MIN_S:-40}
+# τ journal segments: 16 MiB, as the benches since the user's decision (가) of 11-08 (XFS then needs
+# tjmaxsize=32G for the 32 GiB cap); SEGSIZE= (empty) gives the mkfs defaults, 128 MiB, as up to 11-08
+SEGSIZE=${SEGSIZE-16m}
+XL=tjmaxsize=1G; [ -n "$SEGSIZE" ] && XL=tjsegsize=$SEGSIZE,tjmaxsize=32G   # xfs-tau's -l
 KD=$R/codes/djournalplus-kernel.code
 KV=$(strings $KD/arch/x86/boot/bzImage | grep -m1 '^6\.8\.0tjournal')
 BUILD=$(echo "$KV" | grep -oE '#[0-9]+' | tr -d '#')
@@ -110,9 +115,10 @@ for fs in $FSES; do
     # a fresh τ file system, loaded until the kill: the crash state
     rm -f "${C:?}"; truncate -s "${DISK_GB}G" "$C"
     case $fs in
-      ext4-tau) tau_mke2fs -q -t ext4 -E lazy_itable_init=0,lazy_journal_init=0 -F "$C" > /dev/null ;;
-      xfs-tau)  tau_mkfs_xfs -q -f -l tjmaxsize=1G "$C" > /dev/null ;;
+      ext4-tau) tau_mke2fs -t ext4 -E lazy_itable_init=0,lazy_journal_init=0${SEGSIZE:+,tau_segsize=$SEGSIZE} -F "$C" > "$P.mkfs" 2>&1 ;;
+      xfs-tau)  tau_mkfs_xfs -f -l $XL "$C" > "$P.mkfs" 2>&1 ;;
     esac
+    echo "$fs s$s: mkfs: $(grep -m1 -o 'segment size of [0-9]* *[A-Z]*' "$P.mkfs")"
     boot "$C" "$P.load.console" || { echo "$fs s$s: boot failed"; vm_kill; continue; }
     g "bash ~/recidem/guest.sh mount $fs $JOURNAL_GB" > /dev/null; mount_wait 120 > /dev/null || { echo "$fs s$s: load mount failed"; vm_kill; continue; }
     g "bash ~/recidem/guest.sh prepare $FILES $DATA_GB" > /dev/null || { echo "$fs s$s: prepare failed"; vm_kill; continue; }

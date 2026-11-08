@@ -190,12 +190,16 @@ DBFSCONF = {
     # data files O_TAU_ATOMIC (postgres.h, os0file.h), so tau journals them.
     # The rootfs's mke2fs.conf is the stock one, and nrext64=0 is stock
     # mkfs.xfs 6.6.0's default (common.sh's tau_mke2fs / tau_mkfs_xfs).
+    # 16 MiB journal segments, as the benches since the user's decision (가)
+    # of 2026-11-08 (c253127); XFS's tjmaxsize=32G keeps the 32 GiB cap, which
+    # tjmaxsize=1G would cut to 4 GiB at 16 MiB.  The 2026-11-06 #1980 rows ran
+    # the mkfs defaults (128 MiB; XFS tjmaxsize=1G).
     "tau-ext4": dict(mkfs="/kt/tau/mke2fs -t ext4 -E lazy_itable_init=0,"
-                          "lazy_journal_init=0 -F $TEST_DEV",
+                          "lazy_journal_init=0,tau_segsize=16m -F $TEST_DEV",
                      mount="mount -t ext4 -o tjournal,tjournal_size=32"
                            " $TEST_DEV $TEST_DIR", tau=True),
-    "tau-xfs": dict(mkfs="/kt/tau/mkfs.xfs -f -i nrext64=0 -l tjmaxsize=1G"
-                         " $TEST_DEV",
+    "tau-xfs": dict(mkfs="/kt/tau/mkfs.xfs -f -i nrext64=0"
+                         " -l tjsegsize=16m,tjmaxsize=32G $TEST_DEV",
                     mount="mount -t xfs -o tjournal $TEST_DEV $TEST_DIR",
                     modprobe="xfs", tau=True),
 }
