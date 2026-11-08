@@ -468,10 +468,29 @@ tail rule, so it is counted (`i5_writes_partial`) and not judged.
 `*_in_run` the splits that start inside gen's timed run (after its
 `torner:begin` mark), the only part `explore` crashes in.
 
+On tau, a write in no unit is an Undo write, and that path is intended (the
+kernel session, 2026-11-08; `taudocs/revoke.md` §3 and §5).  The block was still
+TauRedo when the write came: its transaction had committed and the checkpoint
+had not yet dropped it.  So the write went in place, with a scoped tag for the
+old copy pending.  The checkpoint writes the page as it is now, not the
+transaction's frozen copy, so its home write can be the version's only copy in
+the log.  Its unit is the record that carries the tags, together with each
+block's latest durable home write before that record.  A crash before the
+record replays the old copy over the whole unit; after it, the tags retire the
+old copy.  I3 judges those tags.  On the 100 tau captures of 2026-11-08 (#398),
+1-7 writes per ow4k/ow16k capture are in no unit, all fsync'd.  In 98 of the
+100, `i3_tags` equals the no-unit writes times the blocks per unit, and I3 finds
+0 violations; the 2 others are the record_fua_only-fds control on tau-xfs.  The
+11-07 captures show the same writes (gen is deterministic): they were in the
+log, but those captures had no loginv.json.
+
 On the 2026-10-20 table's `ext4-data` captures, I5 finds 7-9 split writes in
 each busy multi-block cell (ap16k, hole, prealloc, ow16k) and none in the 4 KiB
 rows; the 6 in ow16k quiet are all in the prefill, before the timed run, which
-is why its crash states found no tear.  On the 70 tau captures of 2026-11-07
+is why its crash states found no tear.  The 2026-11-08 rerun of those columns
+(lazy init off, no sync before the unmount) finds 10-20 per busy multi-block
+cell, all in the timed run except 6 of ow16k's 10, and again 6 in ow16k quiet,
+all in the prefill.  On the 70 tau captures of 2026-11-07
 (#397): 470,475 writes checked, 0 split.
 
 Two things about identifying tau's blocks are not obvious, and both were learned
