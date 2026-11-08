@@ -25,7 +25,7 @@ esac
 [[ -e "$TAR" || -e "$BACKUP_DIR/ext4_$KEY.img" ]] || { echo "❌ no $BACKUP_DIR/ext4_$KEY.img (create_image.sh)"; exit 1; }
 for FS in $TARGET_FILESYSTEM; do
   [[ "$FS" != ext4 ]] || { echo "❌ ext4 is the source"; exit 1; }
-  [[ ! -e "$BACKUP_DIR/${FS}_${KEY}.img" ]] || { echo "❌ $BACKUP_DIR/${FS}_${KEY}.img exists"; exit 1; }
+  [[ ! -e "$(fs_image $FS "$KEY" "$BACKUP_DIR")" ]] || { echo "❌ $(fs_image $FS "$KEY" "$BACKUP_DIR") exists"; exit 1; }
 done
 OUT="$TAU_RESULTS/benchbase/copy_${MODE}_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$OUT"
@@ -70,5 +70,5 @@ for FS in $TARGET_FILESYSTEM; do
   echo "--> image $(date -u +%T)"
   create_backup_fs_image $FS "$KEY" "$BACKUP_DIR"
   case $FS in zfs*) clear_fs $FS "$DEVICE" ;; esac
-  echo "[✓] $BACKUP_DIR/${FS}_${KEY}.img $(date -u --rfc-3339=seconds)"
+  echo "[✓] $(fs_image $FS "$KEY" "$BACKUP_DIR") $(date -u --rfc-3339=seconds)"
 done
