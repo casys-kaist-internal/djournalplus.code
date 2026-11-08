@@ -170,8 +170,11 @@ for line in open(sys.argv[6]):
         d = json.loads(line)
     except ValueError:
         continue
-    if 1 <= d.get("epoch", 0) <= EP and d.get("spec"):
-        subs.append(d["spec"])
+    # torner's key is state_spec; a window of millions of entries makes a drop list
+    # too long for a command line, so only windows whose spec stays short
+    sp = d.get("state_spec") or ""
+    if 1 <= d.get("epoch", 0) <= EP and sp and len(sp) <= 4096:
+        subs.append(sp)
 if subs and nsub:
     subs = [subs[round(i * (len(subs) - 1) / max(nsub - 1, 1))] for i in range(min(nsub, len(subs)))]
     specs += sorted(set(subs), key=subs.index)
@@ -204,7 +207,7 @@ EOF
         trial "epoch<=$e,drop=[$F]"
         g "sudo ~/nth/bin/torner replay --log \$(cat ~/nth/log.loop) --enumerate --strategy random-subset --samples $FLIP_SUBSETS --seed $SEED" \
           < /dev/null > "$P.flipsubsets.jsonl" 2> /dev/null
-        python3 - "$e" "$FLIP_SUBSETS" "$P.flipsubsets.jsonl" <<'EOF2' | while read -r spec; do trial "$spec"; done
+        python3 - "$e" "$FLIP_SUBSETS" "$P.flipsubsets.jsonl" "$F" <<'EOF2' | while read -r spec; do trial "$spec"; done
 import json, sys
 e, k = int(sys.argv[1]), int(sys.argv[2])
 subs = []
@@ -213,9 +216,10 @@ for line in open(sys.argv[3]):
         d = json.loads(line)
     except ValueError:
         continue
-    if d.get("epoch") == e and d.get("spec"):
-        subs.append(d["spec"])
-for x in subs[:k]:
+    sp = d.get("state_spec") or ""
+    if d.get("epoch") == e and sp and len(sp) <= 4096:
+        subs.append(sp)
+for x in [x for x in dict.fromkeys(subs) if x != "epoch<=%d,drop=[%s]" % (e, sys.argv[4])][:k]:
     print(x)
 EOF2
       fi
