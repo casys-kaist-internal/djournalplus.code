@@ -3,7 +3,8 @@
 # at mount). Copied into the guest as ~/recidem/guest.sh; the host runs every command over ssh.
 # Long steps run detached and leave markers the host polls, so a killed VM never hangs an ssh call.
 #   mount <fs> <journal GiB>   mount /dev/vda with tjournal, detached: markers mount.start (epoch
-#                              s.ns) and mount.done (seconds the mount took), dmesg since in mount.dmesg
+#                              s.ns) and mount.done (seconds the mount took, written once the
+#                              mount's kernel log is complete in mount.dmesg, followed with dmesg -w)
 #   prepare <files> <GiB>      the files the load overwrites (f000...), then sync
 #   load <files> <GiB> <threads> <s> <batch>   atomicw overwrite --mode tau, an fdatasync every <batch> pages, detached
 #                              (load.log, marker load.done)
@@ -26,10 +27,16 @@ case "$cmd" in
       xfs-tau)  o=(-t xfs -o "tjournal,tjournal_size=$jgb") ;;
       *) echo "unknown fs $fs"; exit 1 ;;
     esac
-    n=$(sudo dmesg | wc -l)
-    nohup bash -c "t0=\$(date +%s.%N); echo \$t0 > '$R/mount.start'; sync '$R/mount.start';
-      sudo mount ${o[*]} $DEV $MNT && echo \$(awk -v a=\$(date +%s.%N) -v b=\$t0 'BEGIN {printf \"%.3f\", a - b}') > '$R/mount.done';
-      sudo dmesg | tail -n +$((n + 1)) > '$R/mount.dmesg'" > /dev/null 2>&1 &
+    # the mount's kernel log, followed live: τ's replay logs a line per revoke block and overflows
+    # the ring buffer, so a line count taken before the mount does not find its start afterwards
+    # (the 11-06 run's replay sizes were lower bounds for that reason)
+    sudo dmesg -C
+    nohup bash -c "sudo dmesg -w > '$R/mount.dmesg' 2>&1 & kp=\$!
+      t0=\$(date +%s.%N); echo \$t0 > '$R/mount.start'; sync '$R/mount.start'
+      if sudo mount ${o[*]} $DEV $MNT; then
+        e=\$(awk -v a=\$(date +%s.%N) -v b=\$t0 'BEGIN {printf \"%.3f\", a - b}')
+        sleep 1; sudo kill \$kp; echo \$e > '$R/mount.done'
+      else sleep 1; sudo kill \$kp; fi" > /dev/null 2>&1 &
     echo started
     ;;
   prepare)
