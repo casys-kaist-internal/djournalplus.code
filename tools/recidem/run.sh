@@ -23,7 +23,7 @@
 # Guest: an overlay on vm_imgs/cm-guest-ubuntu.qcow2 per boot, the tree's bzImage and the initrd of
 # its build (vm_imgs/initrd.img-6.8.0tjournal+-<build>). Parsed whole first.
 {
-R=/home/jhlee/codes/djournalplus.code; T=$R/tools/recidem; V=$R/tools/qemu/vm_imgs
+R=$(cd "$(dirname "$(realpath "$0")")/../.." && pwd); T=$R/tools/recidem; V=$R/tools/qemu/vm_imgs
 cd $R || exit 1
 unset TAU_TARGET_DISK; source set_env.sh > /dev/null; source bench/scripts/common.sh > /dev/null; set +e
 set -u
@@ -52,7 +52,7 @@ die() { echo "recidem: $*"; exit 1; }
 pgrep -f "hostfwd=tcp::$PORT-:22" > /dev/null && die "a VM on port $PORT is running"
 mkdir -p "$OUT" || exit 1
 exec > >(tee -a "$OUT/run.log") 2>&1
-cp "$0" "$T/guest.sh" "$OUT/"
+cp "$T/run.sh" "$T/guest.sh" "$OUT/"
 echo "recidem $(date -u --rfc-3339=seconds): kernel $KV; $FSES; $STATES states x fractions $FRACS;" \
   "disk ${DISK_GB}G, $FILES files ${DATA_GB}G, journal ${JOURNAL_GB}G, $THREADS threads, batch $BATCH, load ${LOAD_S}s"
 # the images' file system on the test device

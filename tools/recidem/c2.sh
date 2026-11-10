@@ -28,7 +28,7 @@
 # Parsed whole first.
 {
 SELF=$(realpath "$0")
-R=/home/jhlee/codes/djournalplus.code; T=$R/tools/recidem; V=$R/tools/qemu/vm_imgs
+R=$(cd "$(dirname "$(realpath "$0")")/../.." && pwd); T=$R/tools/recidem; V=$R/tools/qemu/vm_imgs
 cd $R || exit 1
 unset TAU_TARGET_DISK; source set_env.sh > /dev/null; source bench/scripts/common.sh > /dev/null; set +e
 set -u
