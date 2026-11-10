@@ -89,12 +89,17 @@ mount_wait() {  # <timeout s>: seconds the guest's mount took, or "timeout"
   done
   echo timeout; return 1
 }
-fsck_img() {  # <fs> <image>
+fsck_img() {  # <fs> <image> <output>
+  local rc l
   case $1 in
-    ext4-tau) sudo "$TAUFS_E2FSPROGS/e2fsck/e2fsck" -fn "$2" > "$3" 2>&1 ;;
-    xfs-tau)  sudo "$TAUFS_XFSPROGS/repair/xfs_repair" -n -f "$2" > "$3" 2>&1 ;;
+    ext4-tau) sudo "$TAUFS_E2FSPROGS/e2fsck/e2fsck" -fn "$2" > "$3" 2>&1; rc=$? ;;
+    # xfs_repair -f reads an image file with O_DIRECT in 512 B sectors, which a file system on a
+    # 4 KiB-sector disk refuses (EINVAL, every check fails: libra08's PM1753); a read-only loop
+    # device takes the 512 B reads
+    xfs-tau)  l=$(sudo losetup --find --show --read-only "$2") || { echo "losetup failed" > "$3"; echo 99; return; }
+              sudo "$TAUFS_XFSPROGS/repair/xfs_repair" -n "$l" > "$3" 2>&1; rc=$?; sudo losetup -d "$l" ;;
   esac
-  echo $?
+  echo $rc
 }
 recover() {  # <fs> <image> <prefix>: boot, mount (the replay), hash, umount, power off, fsck
   boot "$2" "$3.console" || { echo "boot failed"; return 1; }
