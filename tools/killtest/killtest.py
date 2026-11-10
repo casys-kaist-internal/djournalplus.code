@@ -390,13 +390,14 @@ def stage_db(stage):
     progs = ("mysqld", "mysql", "mysqladmin", "innochecksum")
     for prog in progs:
         shutil.copy2(run / prog, stage / "db/mysql/bin" / prog)
-    # the libraries the build ships itself (abseil, protobuf), by ldd
+    # the libraries the build ships itself (abseil, protobuf), by ldd; set_env.sh's
+    # LD_LIBRARY_PATH names them through build/lib, a symlink, so directories are resolved
     libdir = str((MYSQL_BUILD / "library_output_directory").resolve())
     out = subprocess.run(["ldd"] + [str(run / x) for x in progs],
                          capture_output=True, text=True).stdout
     for lib in sorted({l.split()[2] for l in out.splitlines()
                        if "=>" in l and len(l.split()) > 2
-                       and l.split()[2].startswith(libdir)}):
+                       and os.path.realpath(os.path.dirname(l.split()[2])) == libdir}):
         shutil.copy2(lib, stage / "db/mysql/lib")
     shutil.copytree(MYSQL_BUILD / "share", stage / "db/mysql/share",
                     ignore=shutil.ignore_patterns("CMakeFiles", "*.cmake",
