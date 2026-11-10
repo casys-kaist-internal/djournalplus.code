@@ -18,7 +18,8 @@
 # Usage: run.sh [out dir]
 #   env: FSES ("ext4-tau xfs-tau"), STATES (5), FRACS ("0.25 0.5 0.75"), DISK_GB (256), FILES (64),
 #        DATA_GB (96), JOURNAL_GB (32), THREADS (64), BATCH (64), LOAD_S (60), KILL_MIN_S (40),
-#        IMGDIR (/mnt/recidem: a file system on the test device made here; the images live there),
+#        IMGDIR (/mnt/recidem: a file system on the test device made here; the images live there; a state with
+#        a FAIL keeps its crash image as IMGDIR/kept-<out>-<fs>.s<n>.crash unless under 1 TiB would stay free),
 #        SEGSIZE (16m: τ journal segments; empty = the mkfs default, 128 MiB),
 #        KD (the umbrella's codes/djournalplus-kernel.code: the kernel tree the guest boots)
 # Guest: an overlay on vm_imgs/cm-guest-ubuntu.qcow2 per boot, the tree's bzImage and the initrd of
@@ -153,7 +154,12 @@ for fs in $FSES; do
       else res="FAIL($b)"; fi
       printf '%-10s %-6s %-5s %8s %8s %6s %8s %8s %8s %s\n' "$fs" "s$s" "$f" "$TA" "$kill_s" "$mid" "$TB" "$fA" "$fB" "$res" | tee -a "$OUT/results.txt"
     done
-    rm -f "${IMGDIR:?}/A.img" "${IMGDIR:?}/B.img" "${C:?}"
+    rm -f "${IMGDIR:?}/A.img" "${IMGDIR:?}/B.img"
+    failed=$(awk -v f="$fs" -v s="s$s" '$1 == f && $2 == s && /FAIL/' "$OUT/results.txt" | wc -l)
+    room=$(df --output=avail -B1G "$IMGDIR" | tail -1 | tr -dc 0-9)   # GiB free with C still there
+    if [ "$failed" -gt 0 ] && [ "$room" -ge 1024 ]; then
+      K=$IMGDIR/kept-$(basename "$OUT")-$fs.s$s.crash; mv "$C" "$K" && echo "$fs s$s: a FAIL: crash image kept as $K"
+    else rm -f "${C:?}"; fi
   done
 done
 rm -f "${IMGDIR:?}/ov.qcow2"
