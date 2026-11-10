@@ -29,7 +29,7 @@
 #   env FSES ("ext4-tau xfs-tau"), STATES (1), EPOCHS_MAX (25), ENTRY_CUTS (20), SUBSETS (6),
 #       FLIP_SUBSETS (4), SEED (1), COW_GB (64), LOG_GB (32): the room appended to the crash image for the
 #       snapshots' COW and the log (nth_guest.sh carves /dev/vda; the guest's root stays out of it),
-#       plus run.sh's DISK_GB FILES DATA_GB JOURNAL_GB THREADS BATCH LOAD_S KILL_MIN_S IMGDIR SEGSIZE
+#       plus run.sh's DISK_GB FILES DATA_GB JOURNAL_GB THREADS BATCH LOAD_S KILL_MIN_S IMGDIR SEGSIZE KD
 # Guest: an overlay on vm_imgs/cm-guest-ubuntu.qcow2, the tree's bzImage and the initrd of its build.
 # Parsed whole first.
 {
@@ -47,7 +47,7 @@ SEGSIZE=${SEGSIZE-16m}
 XL=tjmaxsize=1G; [ -n "$SEGSIZE" ] && XL=tjsegsize=$SEGSIZE,tjmaxsize=32G   # xfs-tau's -l
 DISK_GB=${DISK_GB:-256} FILES=${FILES:-64} DATA_GB=${DATA_GB:-96} JOURNAL_GB=${JOURNAL_GB:-32}
 THREADS=${THREADS:-64} BATCH=${BATCH:-64} LOAD_S=${LOAD_S:-60} KILL_MIN_S=${KILL_MIN_S:-40}
-KD=$R/codes/djournalplus-kernel.code
+KD=${KD:-$R/codes/djournalplus-kernel.code}
 KV=$(strings $KD/arch/x86/boot/bzImage | grep -m1 '^6\.8\.0tjournal')
 BUILD=$(echo "$KV" | grep -oE '#[0-9]+' | tr -d '#')
 INITRD=${INITRD:-$V/initrd.img-6.8.0tjournal+-$BUILD}

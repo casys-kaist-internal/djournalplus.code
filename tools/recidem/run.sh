@@ -19,7 +19,8 @@
 #   env: FSES ("ext4-tau xfs-tau"), STATES (5), FRACS ("0.25 0.5 0.75"), DISK_GB (256), FILES (64),
 #        DATA_GB (96), JOURNAL_GB (32), THREADS (64), BATCH (64), LOAD_S (60), KILL_MIN_S (40),
 #        IMGDIR (/mnt/recidem: a file system on the test device made here; the images live there),
-#        SEGSIZE (16m: τ journal segments; empty = the mkfs default, 128 MiB)
+#        SEGSIZE (16m: τ journal segments; empty = the mkfs default, 128 MiB),
+#        KD (the umbrella's codes/djournalplus-kernel.code: the kernel tree the guest boots)
 # Guest: an overlay on vm_imgs/cm-guest-ubuntu.qcow2 per boot, the tree's bzImage and the initrd of
 # its build (vm_imgs/initrd.img-6.8.0tjournal+-<build>). Parsed whole first.
 {
@@ -34,7 +35,7 @@ THREADS=${THREADS:-64} BATCH=${BATCH:-64} LOAD_S=${LOAD_S:-60} KILL_MIN_S=${KILL
 # tjmaxsize=32G for the 32 GiB cap); SEGSIZE= (empty) gives the mkfs defaults, 128 MiB, as up to 11-08
 SEGSIZE=${SEGSIZE-16m}
 XL=tjmaxsize=1G; [ -n "$SEGSIZE" ] && XL=tjsegsize=$SEGSIZE,tjmaxsize=32G   # xfs-tau's -l
-KD=$R/codes/djournalplus-kernel.code
+KD=${KD:-$R/codes/djournalplus-kernel.code}
 KV=$(strings $KD/arch/x86/boot/bzImage | grep -m1 '^6\.8\.0tjournal')
 BUILD=$(echo "$KV" | grep -oE '#[0-9]+' | tr -d '#')
 INITRD=${INITRD:-$V/initrd.img-6.8.0tjournal+-$BUILD}

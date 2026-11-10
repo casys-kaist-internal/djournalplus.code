@@ -10,12 +10,13 @@
 # the guest's stock mkfs/fsck, no CM_* environment, no tjournal mount (τ compiled in, inactive).
 # Guest: an overlay on vm_imgs/cm-guest-ubuntu.qcow2, the tree's bzImage, the initrd of its build.
 #   run_seq2.sh <sample dir> [out dir]   env BASE, INITRD (vm_imgs/), FSES ("ext4 xfs"), DEADLINE_MIN (720),
-#                                         STOCK=1, SUMMARY_ONLY=1 (only the table, from a finished run)
+#                                         STOCK=1, SUMMARY_ONLY=1 (only the table, from a finished run),
+#                                         KD (the kernel tree), OVDIR (vm_imgs: the overlays and scratch disks)
 # Exit 0 when every variant ran all its tests with no failure and no fault line. Parsed whole first.
 {
 set -u
 H=$(cd "$(dirname "$0")" && pwd); CM=$(cd "$H/../crashmonkey" && pwd)
-R=$(cd "$CM/../.." && pwd); V=$R/tools/qemu/vm_imgs; KD=$R/codes/djournalplus-kernel.code
+R=$(cd "$CM/../.." && pwd); V=$R/tools/qemu/vm_imgs; KD=${KD:-$R/codes/djournalplus-kernel.code}
 die() { echo "run_seq2: $*" >&2; exit 1; }
 KV=$(strings "$KD/arch/x86/boot/bzImage" 2>/dev/null | grep -m1 '^6\.8\.0tjournal')
 BN=$(echo "$KV" | grep -oE '#[0-9]+' | tr -d '#'); [ -n "$BN" ] || die "no tau bzImage in $KD"
@@ -43,7 +44,7 @@ echo "run_seq2 ${SUMMARY_ONLY:+(summary only) }$(date -u --rfc-3339=seconds): $K
 
 variant() {  # <fs> <ssh port> <gdb port>
 	local fs=$1 port=$2 gport=$3 d=$OUT/$1-$VS
-	local ov=$V/cm-seq2-$fs.qcow2 sc=$V/cm-seq2-$fs.raw
+	local ov=${OVDIR:-$V}/cm-seq2-$fs.qcow2 sc=${OVDIR:-$V}/cm-seq2-$fs.raw
 	local g="ssh -p $port $O jhlee@localhost"
 	pgrep -f "hostfwd=tcp::$port-:22" > /dev/null && { echo "$fs: a VM on port $port is running"; return 1; }
 	mkdir -p "$d"; rm -f "${ov:?}" "${sc:?}"
