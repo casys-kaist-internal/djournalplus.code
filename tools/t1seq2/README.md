@@ -4,6 +4,9 @@
 > - `unpack_k60.sh <dir>` unpacks it and builds so/, about 2.5 min with 32 jobs. On libra09 the rebuilt .so are
 >   byte-identical to the originals.
 > - Then run `run_seq2.sh <dir>`. `sample.py` needs Ace's `work/`, so only a new sample needs it.
+> - `k60_could_not_run.tsv` lists the 114 k60 workloads that cannot run, with the reasons from libra09's #1980 run
+   (ext4-tau, classify.py). These IDs are invalid as Ace generated them, so they are the same on every kernel; #398
+   on libra08 gave the identical 114. Use it where Ace's j-lang files are missing.
 
 # T1 — CrashMonkey ACE seq-2 sample on τ (libra09, 2026-11-06)
 
