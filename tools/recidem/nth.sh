@@ -29,7 +29,8 @@
 #   env FSES ("ext4-tau xfs-tau"), STATES (1), EPOCHS_MAX (25), ENTRY_CUTS (20), SUBSETS (6),
 #       FLIP_SUBSETS (4), SEED (1), COW_GB (64), LOG_GB (32): the room appended to the crash image for the
 #       snapshots' COW and the log (nth_guest.sh carves /dev/vda; the guest's root stays out of it),
-#       plus run.sh's DISK_GB FILES DATA_GB JOURNAL_GB THREADS BATCH LOAD_S KILL_MIN_S IMGDIR SEGSIZE KD
+#       plus run.sh's DISK_GB FILES DATA_GB JOURNAL_GB THREADS BATCH LOAD_S KILL_MIN_S IMGDIR SEGSIZE KD;
+#       KEEP=1 keeps each crash image (with the recovery's log in its last LOG_GB) as IMGDIR/kept-<out>-<fs>.s<n>.crash
 # Guest: an overlay on vm_imgs/cm-guest-ubuntu.qcow2, the tree's bzImage and the initrd of its build.
 # Parsed whole first.
 {
@@ -151,6 +152,7 @@ for fs in $FSES; do
     boot "$C" "$P.sweep.console" || { echo "$fs s$s: boot failed"; vm_kill; continue; }
     g "bash ~/recidem/nth_guest.sh record $fs $JOURNAL_GB $DISK_GB $COW_GB $LOG_GB" > "$P.record" 2>&1
     cat "$P.record"
+    scp -q -P $PORT $O jhlee@localhost:nth/A.hash "$P.A.hash" < /dev/null 2> /dev/null   # the reference hashes
     st=$(grep '^{"tool":"torner-replay"' "$P.record")
     E=$(echo "$st" | python3 -c 'import json, sys; print(json.load(sys.stdin)["entries"])' 2> /dev/null)
     EP=$(echo "$st" | python3 -c 'import json, sys; print(json.load(sys.stdin)["epochs"])' 2> /dev/null)
@@ -236,7 +238,9 @@ EOF2
     g "sudo dmesg" < /dev/null > "$P.sweep.dmesg" 2> /dev/null
     g "bash ~/recidem/nth_guest.sh cleanup" > /dev/null 2>&1
     vm_off
-    rm -f "${C:?}"
+    if [ -n "${KEEP:-}" ]; then   # a rename on the same mount: the next state reuses the name C
+      K=$IMGDIR/kept-$(basename "$OUT")-$fs.s$s.crash; mv "$C" "$K" && echo "$fs s$s: crash image kept as $K (log: its last ${LOG_GB} GiB)"
+    else rm -f "${C:?}"; fi
   done
 done
 rm -f "${IMGDIR:?}/nth-ov.qcow2"
