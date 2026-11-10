@@ -68,7 +68,8 @@ esac
 KEY="tpcc_w$WH"
 BACKUP_DIR="$TAU_BACKUP_ROOT/benchbase/$MODE"
 for FS in $FS_GROUPS; do
-  [[ -e "$BACKUP_DIR/${FS}_${KEY}.img" ]] || { echo "❌ no image $BACKUP_DIR/${FS}_${KEY}.img (create_image.sh)"; exit 1; }
+  img=$(fs_image $FS "$KEY" "$BACKUP_DIR")   # a tau image carries its segment size, as restore_filesystem looks it up
+  [[ -e "$img" ]] || { echo "❌ no image $img (create_image.sh, copy_image.sh)"; exit 1; }
 done
 OUT="$TAU_RESULTS/benchbase/$MODE/$(date +%Y%m%d_%H%M%S)${VARIANT:+_$VARIANT}${PROFILE:+_prof-$PROFILE}"
 mkdir -p "$OUT"
