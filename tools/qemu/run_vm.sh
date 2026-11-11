@@ -60,6 +60,14 @@ if [ "${VM_NUMA:-0}" = 1 ]; then
 fi
 # 86:00.0 SAMSUNG MZPLJ3T2HBJR   3c:00.0 980 PRO   af:00.0 Optane
 
+# VM_NVME_FILE: the test device is an emulated NVMe on that file, not a passed-through drive
+if [ -n "${VM_NVME_FILE:-}" ]; then
+	TESTDEV_ARGS="-drive file=$VM_NVME_FILE,if=none,id=taunvme,format=raw,cache=none,aio=native,discard=unmap"
+	TESTDEV_ARGS="$TESTDEV_ARGS -device nvme,serial=taudev0,drive=taunvme"
+else
+	TESTDEV_ARGS="-device vfio-pci,host=$NVME_PCIE_ADDR"
+fi
+
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then # script is executed directly.
 	qemu-system-x86_64	-kernel $TAUFS_KERNEL/arch/x86/boot/bzImage \
 				-initrd "${VM_INITRD:-/boot/initrd.img-6.8.0tjournal+}" \
@@ -72,7 +80,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then # script is executed directly.
 				--enable-kvm \
 				$DISPLAY_ARGS \
 				-net nic -net user,hostfwd=tcp::$QEMU_SSH_PORT-:22 \
-				-device vfio-pci,host=$NVME_PCIE_ADDR \
+				$TESTDEV_ARGS \
 				$PREALLOC_ARG \
 				-gdb tcp::$QEMU_GDB_PORT 
 			       	# If you want kernel debug enable this
