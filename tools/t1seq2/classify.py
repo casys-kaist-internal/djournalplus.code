@@ -4,6 +4,10 @@
 
   classify.py <variant dir> <sample dir>   -> <variant dir>/could_not_run.tsv; the counts on stdout
 
+  Without Ace's j-lang files (<sample dir>/../work, which k60.tar.xz does not carry) a workload's reason
+  comes from k60_could_not_run.tsv beside this script (libra09's #1980 ext4-tau run); a workload not in
+  it is "unexplained" (libra08:tau, 11-11).
+
 Outcomes:
   - The verdict per test comes from run-<fs>.out, copy_diff.sh's "Passed" / "Failed" / "Could not run".
   - xfsMonkey.log overrides a "Passed" for a test the harness gave up on: after four failed runs it
@@ -30,11 +34,15 @@ Reasons for a workload that could not run:
                               writes after its last checkpoint, and garbage reads as checkpoint 0
   unexplained                 anything else: needs a look
 """
-import glob, re, sys
+import glob, os, re, sys
 
 vd, sd = sys.argv[1], sys.argv[2]
 pair = dict(l.split()[:2] for l in open(f'{sd}/sample.tsv'))
 J = sd.rstrip('/') + '/../work/code/tests/seq2/j-lang-files'
+table = None
+if not os.path.isdir(J):   # the reasons libra09's #1980 run gave the k60 sample's 114 (workload -> reason)
+    T = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'k60_could_not_run.tsv')
+    table = {w[0]: w[4] for w in (l.rstrip('\n').split('\t') for l in list(open(T))[1:])}
 ansi = lambda s: re.sub(r'\x1b\[[0-9;]*m', '', s)
 log = ansi(open(glob.glob(f'{vd}/*xfsMonkey.log')[0]).read())
 out = ansi(open(glob.glob(f'{vd}/run-*.out')[0]).read())
@@ -46,7 +54,9 @@ def under(p, d):
 def reason(n, st, block):
     if 'Assertion `last_checkpoint < mods_.size()' in block:
         return 'harness-assert'
-    ops = [l.split() for l in open(f'{J}/j-lang{n}').read().split('# run', 1)[1].split('\n') if l.strip()]
+    if table is not None:
+        return table.get(f'j-lang{n}', 'unexplained')
+    ops =[l.split() for l in open(f'{J}/j-lang{n}').read().split('# run', 1)[1].split('\n') if l.strip()]
     dirs = {w[1] for w in ops if w[0] == 'mkdir'}
     for k, w in enumerate(ops):
         if w[0] == 'rename' and w[1] in dirs and under(w[2], w[1]) and '5632' in st:
