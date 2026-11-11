@@ -84,6 +84,7 @@ tools/tautest/
     ├── db-rollback-test.sh a live database over a rolled-back commit (#44)
     ├── flushorder-test.sh  flush order through dm-log-writes, with a control (§21)
     ├── recrash-test.sh     a crash inside the multi-block map write at recovery's end or at unmount (#78)
+    ├── freetags-test.sh    truncate / punch / zero of a file whose revoke tags a background commit left behind (#79)
     ├── trunc-reuse-test.sh crash-check replay over blocks freed and reused (bug #20); a free lost in a power cut
     ├── home-test.sh        crash-check new blocks written home: a racing rewrite waits, an older copy stays out
     ├── range-test.sh       range operations keep the data, runtime and crash (#26 #36 #38 #39)
