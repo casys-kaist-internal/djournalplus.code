@@ -1953,6 +1953,29 @@ static const struct sbwrite *base_move_after(const struct ctx *c, uint64_t e,
 	return NULL;
 }
 
+/*
+ * The first superblock write after entry @e of a mount other than @gen: from
+ * it on no record of mount @gen counts, by any path -- recovery drops every
+ * transaction whose h_jgen is not the s_sequence it read (rtx_drop_stale(),
+ * rtx_current(); every record carries a tail), and the orphan floor and the
+ * map log blocks test the same (the kernel session, 11-12).  s_sequence only
+ * grows, so this is the next mount's.  The unmount's retire writes it from
+ * kernel #399 (tau_journal_retire()), before the snapshot moves the base, so
+ * that base move is the next mount's (base_move_after()).  A mount writes one
+ * too (tau_journal_next_gen()), after its replay brought the crashed mount's
+ * transactions home and flushed them.
+ */
+static const struct sbwrite *retire_after(const struct ctx *c, uint64_t e,
+					  uint32_t gen)
+{
+	size_t k;
+
+	for (k = 0; k < c->sbw_n; k++)
+		if (c->sbw[k].entry_idx > e && c->sbw[k].sequence != gen)
+			return &c->sbw[k];
+	return NULL;
+}
+
 /* (ino, serial, pblk) -> the transactions that journaled pblk, in log order */
 struct jtref {
 	uint64_t ino, serial, pblk, entry;
@@ -2043,7 +2066,7 @@ static void build_refs(struct ctx *c, struct jtref **jrp, size_t *jrn,
 }
 
 struct i2stat {
-	uint64_t txs, never, by_free, by_snapshot, blocks, home, handoff;
+	uint64_t txs, never, by_free, by_snapshot, by_generation, blocks, home, handoff;
 	uint64_t deferred, uncovered, leads, snapshot_leads;
 	uint64_t tailblk_checked, tailblk_bad;
 };
@@ -2051,13 +2074,15 @@ struct i2stat {
 /*
  * I2 -- the tail.  A record whose h_tail_tid is past tx T (tid_gt) ends T's
  * replay, and so does a FREE dropping one of T's segments, or a snapshot doing
- * so once the superblock moves the map log's base past it.  By the earliest of
- * these, every home block T journaled has to be covered (the kernel session's
- * rules, 11-07):
+ * so once the superblock moves the map log's base past it (the kernel
+ * session's rules, 11-07), or a superblock write of a later mount: the retire,
+ * at the unmount from kernel #399 (retire_after()).  By the earliest of these,
+ * every home block T journaled has to be covered:
  *  (i)  a home write of it after T's first block, durable by then -- from any
  *       engine, carrying T's version or newer; or
  *  (ii) a later transaction of the file that journaled it again, still
- *       replayed there and itself valid by then (the handoff).
+ *       replayed there and itself valid by then (the handoff) -- never past a
+ *       retire, which ends that one's replay too.
  * A truncate's conditional tags and an unlinked file are the other two ways
  * out; no gen here makes them yet, so a block a conditional tag of the file
  * names, in T or later, is counted as deferred rather than judged.
@@ -2100,7 +2125,8 @@ static void check_i2(struct ctx *c, struct viol_out *v, struct i2stat *st,
 		size_t p = c->cpos[x->ci], q, bind_rec = SIZE_MAX;
 		struct dline dl = DL_NEVER, mine = dlc[x->ci], snapmap = DL_NEVER;
 		const struct segfree *fr = NULL;
-		int s, snap = 0;
+		const struct sbwrite *rt;
+		int s, snap = 0, gen = 0;
 
 		st->txs++;
 		/* the first record of the file whose tail passes T; the tail
@@ -2142,11 +2168,24 @@ static void check_i2(struct ctx *c, struct viol_out *v, struct i2stat *st,
 					snapmap = (struct dline){ f->fepoch, f->entry_idx };
 			}
 		}
+		rt = retire_after(c, cm->entry_idx, cm->jgen);
+		if (rt) {
+			struct dline rd = { rt->fepoch, rt->entry_idx };
+
+			if (dl_less(&rd, &dl)) {
+				dl = rd;
+				fr = NULL;
+				snap = 0;
+				gen = 1;
+			}
+		}
 		if (dl_never(&dl)) {
 			st->never++;
 			continue;
 		}
-		if (fr && snap)
+		if (gen)
+			st->by_generation++;
+		else if (fr && snap)
 			st->by_snapshot++;
 		else if (fr)
 			st->by_free++;
@@ -2203,10 +2242,11 @@ static void check_i2(struct ctx *c, struct viol_out *v, struct i2stat *st,
 					st->snapshot_leads++;
 				continue;
 			}
-			/* the handoff: a later transaction of the file has it */
+			/* the handoff: a later transaction of the file has it
+			 * (none past a retire: it ends the later one too) */
 			for (l = jtref_lower(jr, jr_n, cm->inode_number, cm->serial, pb,
 					     cm->entry_idx + 1);
-			     l < jr_n && jr[l].ino == cm->inode_number &&
+			     !gen && l < jr_n && jr[l].ino == cm->inode_number &&
 			     jr[l].serial == cm->serial && jr[l].pblk == pb && !handoff; l++) {
 				const struct txinfo *y = &c->tx[jr[l].tx];
 				const struct jblk *cy = &c->jb[y->ci];
@@ -2237,11 +2277,13 @@ static void check_i2(struct ctx *c, struct viol_out *v, struct i2stat *st,
 			       ",\"commit_entry\":%" PRIu64 ",\"by\":\"%s\""
 			       ",\"bound_epoch\":%" PRIu64 ",\"bound_entry\":%" PRIu64
 			       ",\"pblk\":%" PRIu64 ",\"home_writes\":%zu",
+			       gen ? "a later mount's superblock retired the transaction" :
 			       fr ? (snap ? "a snapshot dropped the transaction's segment" :
 					    "a FREE dropped the transaction's segment") :
 				    "a record's tail passed the transaction",
 			       cm->inode_number, cm->serial, cm->sequence, cm->entry_idx,
-			       fr ? (snap ? "snapshot" : "free") : "tail", dl.fep, dl.entry,
+			       gen ? "generation" : fr ? (snap ? "snapshot" : "free") : "tail",
+			       dl.fep, dl.entry,
 			       pb, nh);
 			if (last)
 				printf(",\"last_home_entry\":%" PRIu64
@@ -3280,6 +3322,7 @@ int torner_loginv(int argc, char **argv)
 	       ",\"i5_writes_partial_in_run\":%" PRIu64
 	       ",\"i2_transactions\":%" PRIu64 ",\"i2_never_passed\":%" PRIu64
 	       ",\"i2_bound_by_free\":%" PRIu64 ",\"i2_bound_by_snapshot\":%" PRIu64
+	       ",\"i2_bound_by_generation\":%" PRIu64
 	       ",\"i2_blocks\":%" PRIu64 ",\"i2_covered_home\":%" PRIu64
 	       ",\"i2_covered_handoff\":%" PRIu64 ",\"i2_deferred\":%" PRIu64
 	       ",\"i2_uncovered\":%" PRIu64 ",\"i2_leads\":%" PRIu64
@@ -3300,7 +3343,8 @@ int torner_loginv(int argc, char **argv)
 	       i5_checked, i5_split, i5_max_entries,
 	       s5.checked, s5.split, s5.partial, s5.unjournaled,
 	       s5.split_run, s5.partial_run,
-	       s2.txs, s2.never, s2.by_free, s2.by_snapshot, s2.blocks, s2.home,
+	       s2.txs, s2.never, s2.by_free, s2.by_snapshot, s2.by_generation,
+	       s2.blocks, s2.home,
 	       s2.handoff, s2.deferred, s2.uncovered, s2.leads, s2.snapshot_leads,
 	       s2.tailblk_checked, s2.tailblk_bad,
 	       s3.scoped, s3.cond, s3.vacuous, s3.home, s3.copy, s3.violations,

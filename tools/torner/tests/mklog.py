@@ -565,6 +565,21 @@ def build_i234(kind, path):
         if kind == "i2-uncovered":
             log.write(5000, bytes(FSBLK))                # too late
             log.barrier(LOG_FLUSH_FLAG)
+    elif kind in ("i2-retire-ok", "i2-retire-uncovered", "i2-retire-nohandoff"):
+        # No tail passes tx 42; the unmount retires the mount instead (kernel
+        # #399): a superblock write with the next s_sequence, PREFLUSH|FUA,
+        # after which recovery replays none of its records.  The final
+        # checkpoint's write of 5000 must be durable by then.  Without the
+        # PREFLUSH (the segment map control) it is not; and tx 43, which
+        # journaled 5000 again, is retired with 42: no handoff.
+        jb = tx(log, 42, jb, [5000], tail=(42, TAU_SEG_PBA))
+        if kind == "i2-retire-nohandoff":
+            jb = tx(log, 43, jb, [5000], tail=(42, TAU_SEG_PBA))
+        log.write(5000, bytes(FSBLK))                    # the final checkpoint
+        if kind == "i2-retire-ok":
+            log.barrier(LOG_FLUSH_FLAG)
+        log.write(TAU_SB_LBA, tau_superblock(sequence=2), flags=LOG_FUA_FLAG)
+        log.barrier(LOG_FLUSH_FLAG)
     elif kind in ("i3-ok", "i3-late"):
         # 42 journals 5000; then 5000 is rewritten in place, and 43 carries
         # the scoped tag (5000, scope 42) for it: the home write must be
@@ -651,6 +666,7 @@ if __name__ == "__main__":
                          "fua-first|fua-first-nofree|home-ok|home-late|"
                          "i5-jbd2-ok|i5-jbd2-split|i5-tau-ok|i5-tau-split|"
                          "claim-ok|claim-late|i2-ok|i2-uncovered|i2-handoff|"
+                         "i2-retire-ok|i2-retire-uncovered|i2-retire-nohandoff|"
                          "i3-ok|i3-late|tailblk-bad|i4-base-ok|i4-base-early|"
                          "i4-reuse-ok|i4-reuse-nofree|i4-base-twice-ok|"
                          "i4-base-twice-early|"

@@ -150,6 +150,20 @@ want_has '"pblk":5000' "  ...naming the block"
 run i2-handoff tau-ext4 --check I1,I2
 want_rc 0 "I2: a later tx inside the tail holds the block (handoff)"
 want_has '"i2_covered_handoff":1' "  ...counted as a handoff"
+# From kernel #399 the unmount retires the mount: a superblock write with the
+# next s_sequence, after which no record of the mount is replayed.  It ends T's
+# replay like a tail, and every later transaction's with it: no handoff.
+run i2-retire-ok tau-ext4 --check I1,I2
+want_rc 0 "I2: the home block is flushed before the unmount's retire"
+want_has '"i2_bound_by_generation":1' "  ...bound by the retire"
+want_has '"i2_never_passed":0' "  ...not left unjudged"
+run i2-retire-uncovered tau-ext4 --check I1,I2
+want_rc 2 "I2: a retire without its PREFLUSH: the home block is not durable"
+want_has '"by":"generation"' "  ...reported at the retire"
+run i2-retire-nohandoff tau-ext4 --check I1,I2
+want_rc 2 "I2: a later tx of the mount is no handoff past the retire"
+want_has '"i2_uncovered":2' "  ...both transactions' block uncovered"
+want_has '"i2_covered_handoff":0' "  ...none taken as a handoff"
 run tailblk-bad tau-ext4 --check I1,I2
 want_rc 2 "h_tail_blk must name the first block of the tail transaction"
 want_has '"invariant":"tail_blk"' "  ...reported as tail_blk"

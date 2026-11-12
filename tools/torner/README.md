@@ -390,19 +390,28 @@ transactions, so they run with it.
 file and mount: inode, serial, `h_jgen`) ends T's replay; so does a `FREE`
 dropping one of T's segments, or a snapshot dropping one once the superblock
 moves `s_maplog_base` past it (recovery applies log blocks past the base over
-the map blocks).  By the earliest of these — a record judged as gated I1 judges
-it, the earliest that can count among those passing T — every home block T
-journaled must be covered: a home write of it after T's first block, durable by
-then (from any engine: it carries T's version or newer), or a later
-transaction of the file that journaled it again, not passed itself and valid
-by then (the handoff).  HOME tags owe nothing.  A truncate's conditional tags
-and an unlinked file are the other two ways out; until a gen makes them, a
-block a conditional tag of the file names, in T or later, is counted as
-`i2_deferred`.  Counted, not judged: a home write of one of T's journal blocks
-before T's record is valid (`i2_leads`; with `tau_defer_txdirty_cpflush` on the
-kernel session expects none), and a block covered at the base write but not at
-the snapshot's map block (`i2_snapshot_leads`).  `h_tail_blk` is checked
-structurally: the first block of tx `h_tail_tid`.
+the map blocks), or the first superblock write after T whose `s_sequence` is
+not T's `h_jgen` (`i2_bound_by_generation`): recovery drops every record of
+another generation (`rtx_drop_stale()`).  From kernel #399 the unmount writes
+one, the retire (`tau_journal_retire()`), before its snapshot, whose base move
+is then the next generation's: the retire is the deadline of every transaction
+no tail passed.  Until 2026-11-12 loginv left those unjudged
+(`i2_never_passed`, 1-9 in every #401 capture).  A mount writes one too
+(`tau_journal_next_gen()`), after its replay flushed; a capture holds one
+mount.  By the earliest of these — a record judged as gated I1 judges it, the
+earliest that can count among those passing T — every home block T journaled
+must be covered: a home write of it after T's first block, durable by then
+(from any engine: it carries T's version or newer), or a later transaction of
+the file that journaled it again, not passed itself and valid by then (the
+handoff; none past a retire, which ends that one too).  HOME tags owe nothing.
+A truncate's conditional tags and an unlinked file are the other two ways out;
+until a gen makes them, a block a conditional tag of the file names, in T or
+later, is counted as `i2_deferred`.  Counted, not judged: a home write of one
+of T's journal blocks before T's record is valid (`i2_leads`; with
+`tau_defer_txdirty_cpflush` on the kernel session expects none), and a block
+covered at the base write but not at the snapshot's map block
+(`i2_snapshot_leads`).  `h_tail_blk` is checked structurally: the first block
+of tx `h_tail_tid`.
 
 **I3 — scoped revoke tags.**  A scoped tag (pblk, scope S) in record C stands
 in for in-place data written over the file's last journal copy of pblk.  With
@@ -440,8 +449,14 @@ ext4lazyinit's zeroing (a bare flush per inode table group) and the `sync`
 before unmount flush the last home writes first, and the final checkpoint has
 nothing left.  Those ext4-side flushes make writes durable earlier than tau
 orders them, during the timed run too, so they weaken every tau-ext4 ordering
-check.  With `tau_maplog_len=8` (a snapshot every few log blocks) the base
-rule, the wrap rule and owners in map blocks are exercised mid-run (6-9 base
+check.  From kernel #399 the unmount's retire comes first, and kernel #401's
+knob drops its PREFLUSH too: on the 2026-11-12 captures of #401
+(2026-11-12-tau401) `tau_segmap_fua_only` fails I2 at the retire in 7 of 8
+(tau-ext4 16 and 4 blocks busy and quiet, `-fds` 0 and 4; tau-xfs 16 and 4,
+`-fds` 20 and 8), where loginv without the retire showed no signal; the 76 main
+and variant captures and the other controls judge as before.  With
+`tau_maplog_len=8` (a snapshot every few log blocks) the base rule, the wrap
+rule and owners in map blocks are exercised mid-run (6-9 base
 moves, 30-46 overwrites, 11-14 owners per capture): 0 violations, and with
 `tau_maplog_early_base` every base move fails.
 
