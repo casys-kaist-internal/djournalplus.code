@@ -77,10 +77,10 @@
 # Needs ~/tautest/dm-log-writes.ko built for the running kernel.  Loop devices
 # on /dev/shm only: no real disk is touched.  RECORD_FUA_ONLY=1 is the control
 # (tau_record_fua_only: records durable before their data) -- overwrite must
-# then FAIL.  SEGMAP_FUA_ONLY=1 (tau_segmap_fua_only: a freed segment map entry
-# durable before the home writes) must FAIL during the unmount, and in reuse
-# before it: the run writes no map blocks there, so a free block alone goes
-# out ahead of its txs' home writes (bug.md #53).
+# then FAIL.  SEGMAP_FUA_ONLY=1 (tau_segmap_fua_only: a freed segment map entry,
+# or the unmount's new generation, durable before the home writes) must FAIL
+# during the unmount, and in reuse before it: the run writes no map blocks
+# there, so a free block alone goes out ahead of its txs' home writes (bug.md #53).
 # REUSE_FLUSH_ONLY=1 (tau_reuse_flush_only: a freed segment reused while the disk
 # map still names it) must FAIL in the single-drop states of reuse.  With the
 # segment map log the new owner's claim goes out with its first writes and hides

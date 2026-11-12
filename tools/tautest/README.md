@@ -1453,7 +1453,8 @@ FAIL in `mapsplit`, `fsmapsplit` and `mapappend`, and `MAPLOG_EARLY_BASE=1`
 written) must FAIL in `maplog` and `logappend`. From #385 one more: `SERIAL_IGNORE=1` (`tau_serial_ignore`: recovery
 does not tell apart the files a mount gave one ino) must FAIL in `inoreuse`; like
 the `GATE_*` knobs it acts on the recovery of the rebuilt disks. `SEGMAP_FUA_ONLY` then drops the PREFLUSH of the map blocks and of the
-log's free blocks -- it runs on `reuse` too, which must FAIL in the run, where no
+log's free blocks, and from the kernel's fccc4abd (#401) that of the unmount's new generation too (from 45cb689c its flush
+put the drain's home writes on the disk before the map, and `overwrite` passed under the control) -- it runs on `reuse` too, which must FAIL in the run, where no
 map blocks are written (`map blocks written in the run: 0`), so the bad states
 come from the free blocks alone, ahead of their txs' home writes (a failing run
 prints how many bad states were in the run and how many during the unmount) --
