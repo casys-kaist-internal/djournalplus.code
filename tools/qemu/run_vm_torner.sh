@@ -31,6 +31,12 @@ SRCDISK="${SRCDISK:-$HERE/vm_imgs/torner-src.raw}"
 ROOTFS="${ROOTFS:-$HERE/vm_imgs/qemu-image_2404.qcow2}"
 # more kernel command line, e.g. tau_journal.tau_shrink_seeks=32
 KCMDLINE="${KCMDLINE:-}"
+# VM_HUGEPAGES=1 (off by default): the guest's RAM on the host's 1 GiB hugepages,
+# all on the node with the most free ones (libra08 and libra09 reserve 63 per node
+# at boot for perf runs; a correctness VM may use them, and then cannot push
+# another VM's plain memory into the OOM killer, as on 11-11). memfd, not a
+# hugetlbfs mount: /dev/hugepages1G is root's and this VM runs as the user.
+VM_HUGEPAGES="${VM_HUGEPAGES:-0}"
 
 # tools/bin's build if there is one, else the one on PATH
 if [ -z "${QEMU:-}" ]; then
@@ -74,6 +80,22 @@ if [ ! -f "$SCRATCH" ]; then
 	truncate -s "$SCRATCH_SIZE" "$SCRATCH" || die "cannot create scratch disk"
 fi
 
+MEMARGS=(-m "$MEM")
+if [ "$VM_HUGEPAGES" = 1 ]; then
+	bytes=$(numfmt --from=iec "$MEM") || die "MEM=$MEM is not a size"
+	[ $((bytes % (1 << 30))) = 0 ] || die "VM_HUGEPAGES=1 needs MEM in whole GiB, not $MEM"
+	need=$((bytes >> 30)) node= most=-1
+	for d in /sys/devices/system/node/node[0-9]*; do
+		f=$(cat "$d/hugepages/hugepages-1048576kB/free_hugepages" 2>/dev/null) || continue
+		[ "$f" -gt "$most" ] && { most=$f; node=${d##*node}; }
+	done
+	[ "$most" -ge "$need" ] ||
+		die "VM_HUGEPAGES=1: no node has $need free 1 GiB pages (the most is $most, node $node)"
+	MEMARGS+=(-object "memory-backend-memfd,id=ram0,size=$MEM,hugetlb=on,hugetlbsize=1G,prealloc=on,host-nodes=$node,policy=bind"
+		-machine memory-backend=ram0)
+	echo "run_vm_torner: guest RAM $MEM on node $node's 1 GiB pages ($most free before)" >&2
+fi
+
 cat >&2 <<EOF
 run_vm_torner: kernel $RELEASE
                rootfs  $ROOTFS
@@ -95,7 +117,7 @@ exec "$QEMU" \
 	-append "root=/dev/sda rw console=ttyS0${KCMDLINE:+ $KCMDLINE}" \
 	-cpu host \
 	-smp "cpus=$CORES" \
-	-m "$MEM" \
+	"${MEMARGS[@]}" \
 	--enable-kvm \
 	--nographic \
 	-drive "file=$ROOTFS,index=0,media=disk,format=qcow2" \
