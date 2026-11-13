@@ -1,0 +1,85 @@
+#!/usr/bin/env bpftrace
+/*
+ * EVAL_PLAN R3 item 4: do the database runs of §6.4 truncate, punch or unlink
+ * their files?  Every call on the watched file system, as it happens:
+ *
+ *   <CLOCK_MONOTONIC ns> <op> <comm> <pid> <parent>/<name> <args>
+ *
+ *   truncate  do_truncate(): truncate(2), ftruncate(2), open(O_TRUNC); len= the new size
+ *   unlink    vfs_unlink(): unlink(2), rmdir excluded; nlink= the inode's links before
+ *   fallocate vfs_fallocate() with a mode other than plain allocation (punch hole 0x02,
+ *             collapse 0x08, zero range 0x10, insert 0x20, ...); mode= off= len=
+ *   rename    vfs_rename() over an existing name: the target's data goes as with unlink
+ *
+ * and per (op, comm, parent, name) the number of calls in @calls at the end
+ * (SIGINT).  The callers write the phase boundaries in the same clock to a file
+ * of their own (<out>.marks: "<name> <mono ns> <wall>"), and r3_calls_report.py
+ * counts the calls per phase from the timestamps.
+ *
+ * kprobes with struct casts: the types come from the kernel's BTF, or from
+ * BPFTRACE_BTF=<file> where the kernel has none (pahole --btf_encode_detached on
+ * its vmlinux).  Function arguments as in Linux 6.8.
+ *
+ * $1  s_dev of the file system to watch (major << 20 | minor), 0: all
+ */
+
+BEGIN
+{
+	printf("r3_calls: start %s (boot ns %llu), dev %d\n",
+	       strftime("%Y-%m-%dT%H:%M:%S%z", nsecs), nsecs, $1);
+}
+
+/* int do_truncate(struct mnt_idmap *, struct dentry *, loff_t length,
+ *                 unsigned int time_attrs, struct file *) */
+kprobe:do_truncate
+/ $1 == 0 || ((struct dentry *)arg1)->d_sb->s_dev == $1 /
+{
+	$d = (struct dentry *)arg1;
+	printf("%llu truncate %s %d %s/%s len=%lld size=%lld\n", nsecs, comm, pid,
+	       str($d->d_parent->d_name.name), str($d->d_name.name), (int64)arg2,
+	       $d->d_inode->i_size);
+	@calls["truncate", comm, str($d->d_parent->d_name.name), str($d->d_name.name)] = count();
+}
+
+/* int vfs_unlink(struct mnt_idmap *, struct inode *dir, struct dentry *,
+ *                struct inode **delegated_inode) */
+kprobe:vfs_unlink
+/ $1 == 0 || ((struct dentry *)arg2)->d_sb->s_dev == $1 /
+{
+	$d = (struct dentry *)arg2;
+	printf("%llu unlink %s %d %s/%s nlink=%u size=%lld\n", nsecs, comm, pid,
+	       str($d->d_parent->d_name.name), str($d->d_name.name),
+	       $d->d_inode->__i_nlink, $d->d_inode->i_size);
+	@calls["unlink", comm, str($d->d_parent->d_name.name), str($d->d_name.name)] = count();
+}
+
+/* long vfs_fallocate(struct file *, int mode, loff_t offset, loff_t len); mode 0
+ * and FALLOC_FL_KEEP_SIZE (1) alone only allocate */
+kprobe:vfs_fallocate
+/ (arg1 & ~1) != 0 &&
+  ($1 == 0 || ((struct file *)arg0)->f_path.dentry->d_sb->s_dev == $1) /
+{
+	$d = ((struct file *)arg0)->f_path.dentry;
+	printf("%llu fallocate %s %d %s/%s mode=0x%x off=%lld len=%lld\n", nsecs, comm, pid,
+	       str($d->d_parent->d_name.name), str($d->d_name.name), arg1, (int64)arg2, (int64)arg3);
+	@calls["fallocate", comm, str($d->d_parent->d_name.name), str($d->d_name.name)] = count();
+}
+
+/* int vfs_rename(struct renamedata *): only over an existing target */
+kprobe:vfs_rename
+/ ((struct renamedata *)arg0)->new_dentry->d_inode != 0 &&
+  ($1 == 0 || ((struct renamedata *)arg0)->new_dentry->d_sb->s_dev == $1) /
+{
+	$r = (struct renamedata *)arg0;
+	printf("%llu rename %s %d %s/%s over %s/%s size=%lld\n", nsecs, comm, pid,
+	       str($r->old_dentry->d_parent->d_name.name), str($r->old_dentry->d_name.name),
+	       str($r->new_dentry->d_parent->d_name.name), str($r->new_dentry->d_name.name),
+	       $r->new_dentry->d_inode->i_size);
+	@calls["rename", comm, str($r->new_dentry->d_parent->d_name.name),
+	       str($r->new_dentry->d_name.name)] = count();
+}
+
+END
+{
+	printf("r3_calls: end %s\n", strftime("%Y-%m-%dT%H:%M:%S%z", nsecs));
+}

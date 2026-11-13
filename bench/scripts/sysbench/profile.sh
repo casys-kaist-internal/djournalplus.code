@@ -1,4 +1,4 @@
-# Profiling runs of run_main.sh (PROFILE=trace|files|m3|perf|walkeep|diag), sourced by it:
+# Profiling runs of run_main.sh (PROFILE=trace|files|m3|perf|walkeep|diag|r3), sourced by it:
 # the usual restore and 10-min warm-up, then one 5-min measurement at 64
 # threads with collectors around it. Separate from the throughput runs, which
 # carry no tracing.
@@ -25,6 +25,13 @@
 #            instruments, e.g. DIAG_TOOLS=offcpu: the MySQL user threads'
 #            on-CPU, CPU-wait and blocked time (schedstat) and their blocked
 #            time by stack (offcpu.bt)
+#   r3       EVAL_PLAN R3 item 4: costs/r3_calls.bt from the database's start to
+#            the end of the measurement, every truncate, unlink, punch (and other
+#            fallocate modes) and rename over a file on the test file system, by
+#            process and file; costs/r3_calls_report.py splits them into warmup,
+#            measure and after (<block>.r3calls, .marks, .txt). Kernel BTF, or
+#            BPFTRACE_BTF=<file> on a kernel without it. A counting run, not a
+#            throughput run: its result directory says so (NOT_THROUGHPUT)
 # Every profiling run also records mpstat, the DB statistics before and after
 # (PG pg_stat_wal/database/io/checkpointer, MySQL global status, INNODB_METRICS,
 # file_summary_by_instance, and a 1-s INNODB_METRICS series), the ZFS kstats,
@@ -75,9 +82,11 @@ profile_check() {
         case $f in zfs*|btrfs) echo "❌ PROFILE=m3 is for ext4 and xfs, not $f"; return 1 ;; esac
       done
       ;;
+    r3) command -v bpftrace >/dev/null || { echo "❌ PROFILE=r3 needs bpftrace"; return 1; } ;;
     *) echo "❌ Unknown PROFILE: $PROFILE"; return 1 ;;
   esac
-  [[ -e /sys/kernel/btf/vmlinux ]] || { echo "❌ PROFILE needs kernel BTF (boot $TAU_BASE_KERNEL)"; return 1; }
+  [[ -e /sys/kernel/btf/vmlinux || ( "$PROFILE" == r3 && -r "${BPFTRACE_BTF:-}" ) ]] ||
+    { echo "❌ PROFILE needs kernel BTF (boot $TAU_BASE_KERNEL)"; return 1; }
   if [[ "$PROFILE" == "perf" ]]; then
     "$PERF_BIN" version --build-options 2>/dev/null | grep -q "bpf_skeletons: \[ on" ||
       { echo "❌ $PERF_BIN lacks BPF skeletons (perf lock contention -b)"; return 1; }
@@ -126,7 +135,35 @@ profile_dump_once() {
               my_q "SELECT NAME, ENABLED, TIMED FROM performance_schema.setup_instruments
                     WHERE NAME LIKE 'wait/io/file/%'" > "$o.my_ps_file_instruments" ;;
   esac
+  if [[ "$PROFILE" == r3 ]]; then profile_r3_start "$o"; fi
   return 0
+}
+
+# PROFILE=r3: the calls, from here (the database has just started) to the end of
+# the measurement (profile_end); phases in <block>.r3calls.marks
+profile_r3_mark() {  # <phase> [label]
+  echo "$1 $(python3 -c 'import time; print(time.clock_gettime_ns(time.CLOCK_MONOTONIC))') $(date -u +%FT%T.%N) ${2:-}" \
+    >> "$R3_CALLS_OUT.marks"
+}
+
+profile_r3_start() {  # <out prefix>
+  local devnum=0 i
+  case "$FS" in   # the test file system's s_dev; zfs and btrfs have their own: watch all
+    zfs*|btrfs*) ;;
+    *) devnum=$(( (0x$(stat -c %t "$DEVICE") << 20) | 0x$(stat -c %T "$DEVICE") )) ;;
+  esac
+  R3_CALLS_OUT=$1.r3calls
+  echo "PROFILE=r3 (EVAL_PLAN R3 item 4): the runs here count truncate/unlink/punch/rename calls" \
+    "with bpftrace (costs/r3_calls.bt); not throughput runs, their numbers are not results" \
+    > "$RESULT_DIR/NOT_THROUGHPUT"
+  sudo env ${BPFTRACE_BTF:+BPFTRACE_BTF=$BPFTRACE_BTF} bpftrace "$TAUFS_BENCH/scripts/costs/r3_calls.bt" \
+    "$devnum" > "$R3_CALLS_OUT" 2>&1 &
+  PROF_BT_PID=$!
+  for (( i = 0; i < 60; i++ )); do
+    grep -q "^Attaching" "$R3_CALLS_OUT" 2>/dev/null && break
+    sleep 1
+  done
+  profile_r3_mark warmup
 }
 
 # DB and kernel counters: profile_snapshot <begin|end> <out prefix>
@@ -215,6 +252,7 @@ profile_begin() {
       done
       sleep 2
       ;;
+    r3) profile_r3_mark measure "$1" ;;
     perf)
       ( sleep 60
         sudo "$PERF_BIN" lock contention -a -b -E 20 --max-stack 16 -v -- sleep 60 > "$o.perf_lock" 2>&1
@@ -232,8 +270,12 @@ profile_end() {
   local -; set +e   # run_main.sh runs under set -e; a failed collector must not stop it
   local o="$RESULT_DIR/$1"
   echo "end $(date -u +%s.%N)" >> "$o.time"
+  if [[ "$PROFILE" == r3 ]]; then profile_r3_mark after "$1"; fi
   if [[ -n "$PROF_BT_PID" ]]; then
     sudo kill -INT "$PROF_BT_PID" 2>/dev/null; wait "$PROF_BT_PID" 2>/dev/null; PROF_BT_PID=
+  fi
+  if [[ "$PROFILE" == r3 ]]; then
+    python3 "$TAUFS_BENCH/scripts/costs/r3_calls_report.py" "$R3_CALLS_OUT" > "$R3_CALLS_OUT.txt" 2>&1
   fi
   if [[ "$PROFILE" == "files" ]]; then
     sudo find "$MOUNT_DIR" -xdev -type f -printf '%i %s %p\n' > "$o.inodes" 2>/dev/null
