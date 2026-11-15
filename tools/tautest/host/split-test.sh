@@ -1,7 +1,9 @@
 #!/bin/bash
 # A write spanning journaled and in-place blocks stays untorn (#21); two writes,
-# one in place and one journaled, each come back whole (twowrite).  README.
-#   usage: split-test.sh [xfs|ext4|both] [split|split-ctl|extend|inplace|twowrite|all] [rounds]
+# one in place and one journaled, each come back whole (twowrite); an in-place
+# write whose old copies sit in two txs, the older checkpointed (twotx, #80;
+# controls twotx-ctl, onetx -- not in "all").  README.
+#   usage: split-test.sh [xfs|ext4|both] [split|split-ctl|extend|inplace|twowrite|twotx|twotx-ctl|onetx|all] [rounds]
 # WARNING: runs mkfs on $TAU_DEV inside the guest.
 
 set -u
@@ -17,7 +19,7 @@ both) FSLIST="xfs ext4" ;;
 xfs|ext4) ;;
 *) echo "usage: $0 [xfs|ext4|both] [case|all] [rounds]" >&2; exit 2 ;;
 esac
-[ "$CASES" = all ] && CASES="split-ctl inplace split extend twowrite"
+[ "$CASES" = all ] && CASES="split-ctl inplace split extend twowrite twotx"
 
 rc=0
 summary=""

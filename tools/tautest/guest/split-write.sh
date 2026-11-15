@@ -1,6 +1,6 @@
 #!/bin/bash
 # Set up one split case (README) and arm; writes ARMED or INCONCLUSIVE.
-#   usage: split-write.sh <xfs|ext4> <split|split-ctl|extend|inplace|twowrite> [hold-s]
+#   usage: split-write.sh <xfs|ext4> <split|split-ctl|extend|inplace|twowrite|twotx|twotx-ctl|onetx> [hold-s]
 
 cd "$(dirname "$0")" || exit 1
 . ./common.sh
@@ -11,10 +11,11 @@ HOLD=${3:-120}
 STATUS_FILE=${STATUS_FILE:-$HOME/split-status}
 P=/sys/module/tau_journal/parameters
 F=$TAU_MNT/split
+AGE_A=${AGE_A:-8}	# twotx, onetx: T1a ages this long after its commit
 
 case "$CASE" in
-split|split-ctl|extend|inplace|twowrite) ;;
-*) die "usage: $0 <xfs|ext4> <split|split-ctl|extend|inplace|twowrite> [hold-seconds]" ;;
+split|split-ctl|extend|inplace|twowrite|twotx|twotx-ctl|onetx) ;;
+*) die "usage: $0 <xfs|ext4> <split|split-ctl|extend|inplace|twowrite|twotx|twotx-ctl|onetx> [hold-seconds]" ;;
 esac
 [ -n "$FS" ] || die "usage: $0 <xfs|ext4> <case> [hold-seconds]"
 [ -r "$P/tau_probe_commits" ] ||
@@ -28,7 +29,7 @@ inconclusive() { status "INCONCLUSIVE $*"; exit 0; }
 probe() { cat "$P/tau_probe_$1" 2>/dev/null || echo 0; }
 setparam() { echo "$2" | sudo tee "$P/$1" >/dev/null || die "cannot set $1"; }
 
-WATCH="revoke_taken atoz_mixed commits jwrite_revoke tx_dropped"
+WATCH="revoke_taken atoz_mixed atoz_twotx commits jwrite_revoke tx_dropped"
 declare -A SNAP
 snap() { local c; for c in $WATCH; do SNAP[$c]=$(probe "$c"); done; }
 delta() { echo $(( $(probe "$1") - ${SNAP[$1]} )); }
@@ -62,9 +63,10 @@ os.fsync(fd)
 os.close(fd)' "$F" || die "fsync failed"
 }
 
-# <size> <byte> [offset] plus 4 MiB filler: one tx over TAU_SMALL_TX, fsync'd
+# <size> <byte> [offset] [filler offset] plus 4 MiB filler: one tx over
+# TAU_SMALL_TX, fsync'd
 big_tx() {
-	sudo "$TAUWRITE_NOFSYNC" "$F" $((4 * MB)) "$FILL" $((1 * MB)) >/dev/null ||
+	sudo "$TAUWRITE_NOFSYNC" "$F" $((4 * MB)) "$FILL" "${4:-$MB}" >/dev/null ||
 		die "filler write failed"
 	FILL=$((FILL + 1))
 	sudo "$TAUWRITE" "$F" "$1" "$2" "${3:-0}" >/dev/null || die "tauwrite failed"
@@ -96,6 +98,27 @@ setup() {
 	split*)
 		echo "== T1: block 1 := 0x42 (block 0 stays clean) =="
 		big_tx 4096 $((0x42)) 4096
+		;;
+	twotx|twotx-ctl)
+		# T1a leaves the journal after the write (twotx) or stays (control)
+		if [ "$CASE" = twotx ]; then
+			setparam tau_max_transaction_age "$AGE_A"
+		else
+			setparam tau_max_transaction_age 3600
+		fi
+		echo "== T1a: block 0 := 0x41 =="
+		big_tx 4096 $((0x41))
+		setparam tau_max_transaction_age 3600	# T1b stays
+		echo "== T1b: block 1 := 0x42, its filler at 8 MiB (T1a's is TauRedo) =="
+		big_tx 4096 $((0x42)) 4096 $((8 * MB))
+		;;
+	onetx)
+		setparam tau_max_transaction_age "$AGE_A"	# T1a leaves after the write
+		echo "== T1a: blocks 0-1 := 0x41 =="
+		big_tx 8192 $((0x41))
+		setparam tau_max_transaction_age 3600	# T1b stays
+		echo "== T1b: block 8 := 0x42, its filler at 8 MiB =="
+		big_tx 4096 $((0x42)) 32768 $((8 * MB))
 		;;
 	*)
 		echo "== T1: blocks 0-1 := 0x41 =="
@@ -153,6 +176,55 @@ twowrite)
 		inconclusive "W1 did not go in place (revoke_taken+$(delta revoke_taken))"
 	[ "$(delta atoz_mixed)" -eq 0 ] ||
 		inconclusive "a write mixed journaled and in-place blocks" ;;
+twotx*)
+	# fixed kernels journal it whole (#80); before, it went in place
+	WHOLE=$(delta atoz_twotx)
+	[ "$(delta atoz_mixed)" -eq 0 ] &&
+	{ [ "$WHOLE" -ge 1 ] || [ "$(delta revoke_taken)" -ge 2 ]; } ||
+		inconclusive "the write neither went in place whole nor was journaled whole (revoke_taken+$(delta revoke_taken), atoz_mixed+$(delta atoz_mixed), atoz_twotx+$WHOLE)" ;;
+onetx)
+	[ "$(delta revoke_taken)" -ge 2 ] && [ "$(delta atoz_mixed)" -eq 0 ] &&
+	[ "$(delta atoz_twotx)" -eq 0 ] ||
+		inconclusive "the write did not go in place whole (revoke_taken+$(delta revoke_taken), atoz_mixed+$(delta atoz_mixed), atoz_twotx+$(delta atoz_twotx))" ;;
+esac
+
+# twotx, onetx: T1a ages; the checkpoint writes the in-place data home and drops
+# T1a, while the write's tags still wait for an fsync.  W4 then makes a record
+# whose tail is past T1a.
+case "$CASE" in
+twotx*|onetx)
+	snap
+	if [ "${WHOLE:-0}" -ge 1 ]; then
+		echo "== idle $((AGE_A + 8)) s: journaled whole, T1a ages as it will =="
+		sleep $((AGE_A + 8))
+		show idle
+	elif [ "$CASE" = twotx-ctl ]; then
+		echo "== idle $((AGE_A + 8)) s: T1a stays =="
+		sleep $((AGE_A + 8))
+		show idle
+		[ "$(delta tx_dropped)" -eq 0 ] ||
+			inconclusive "a tx left the journal (tx_dropped+$(delta tx_dropped))"
+	else
+		want=43
+		[ "$CASE" = onetx ] && want=4343
+		echo "== T1a ages: checkpointed, the in-place data home, T1a dropped =="
+		got=""
+		for w in $(seq 1 60); do
+			sleep 1
+			got=$(inplace_byte 0)
+			[ "$CASE" = onetx ] && got+=$(inplace_byte 1)
+			[ "$(delta tx_dropped)" -ge 1 ] && [ "$got" = "$want" ] && break
+		done
+		show T1a-gone
+		[ "$(delta tx_dropped)" -eq 1 ] ||
+			inconclusive "tx_dropped+$(delta tx_dropped), want T1a alone"
+		[ "$got" = "$want" ] || inconclusive "the in-place data is not home ($got)"
+	fi
+	[ "$(delta jwrite_revoke)" -eq 0 ] ||
+		inconclusive "a revoke block was written: the tags are not pending"
+	echo "== W4: block 4 := 0x44 (a hole: journaled), no fsync =="
+	sudo "$TAUWRITE_NOFSYNC" "$F" 4096 $((0x44)) 16384 >/dev/null || die "write failed"
+	;;
 esac
 
 snap

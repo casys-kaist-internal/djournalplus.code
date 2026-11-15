@@ -687,6 +687,9 @@ carries 4 MiB of filler in every tx that has to stay.
 | `split-ctl` | as `split` | 8 KiB 0x43 + fsync | 0x43 0x43 |
 | `inplace` | blocks 0-1 TauRedo | 8 KiB 0x43 (all in place) | 0x41 0x41, or 0x43 0x43 |
 | `twowrite` | blocks 0-1 TauRedo, blocks 2-3 a hole | two writes: 8 KiB 0x43 over 0-1 (in place), then 8 KiB 0x45 over 2-3 (journaled) | 0-1: 0x41 0x41 or 0x43 0x43; 2-3: 0x45 0x45 |
+| `twotx` | block 0 TauRedo in T1a (aged 8 s), block 1 in T1b | 8 KiB 0x43; T1a checkpointed and dropped, then a journaled write to block 4 | 0x41 0x42, or 0x43 0x43 |
+| `twotx-ctl` | as `twotx`, T1a stays | as `twotx`, T1a not dropped | as `twotx` |
+| `onetx` | blocks 0-1 TauRedo in T1a (aged), block 8 in T1b | as `twotx` (one tx: still in place) | 0x41 0x41, or 0x43 0x43 |
 
 `twowrite` is not about one write: it shows what a background commit does to two.
 It commits the later write (journaled) and leaves the earlier one's revoke tag
@@ -694,6 +697,12 @@ pending, so after the power cut the later write is there and the earlier one is
 rolled back to its journal copy -- whole, and never older than what the last
 fsync promised. tau keeps each write untorn; it does not keep unsynced writes
 in order (`taudocs/paper/architecture.md` §8.7).
+
+`twotx` (bug.md #80): an all-in-place write whose old copies sit in two txs. Once
+the older tx is checkpointed and a record's tail passes it, a crash before the tags
+commit replays only the newer tx's copy: block 0 new, block 1 old. From #402 the
+write is journaled whole (`atoz_twotx+1`) and the setup skips the in-place checks;
+`onetx` must still go in place (`atoz_twotx+0`). `all` runs `twotx`.
 
 ```sh
 tools/tautest/host/split-test.sh both        # ~2 minutes per case
@@ -703,6 +712,21 @@ tools/tautest/host/split-test.sh both        # ~2 minutes per case
 |---|---|---|---|
 | #303 (before) | FAIL 0x43 0x42, both filesystems | FAIL 0x41 0x41 0x44, both (0x41 0x41 hole without the log force: XFS publishes the new block after the record, ext4 commits its allocation within 5 s) | PASS |
 | #304 (atoz) | PASS 0x43 0x43, `atoz_mixed+1` | PASS 0x44 x3 | PASS |
+| #401 (`twotx`) | `twotx` FAIL 0x43 0x42, both filesystems | | `twotx-ctl`, `onetx` PASS |
+| #403 (kernel 53826e51) | all PASS; `twotx` 0x43 0x43, `atoz_twotx+1`, both filesystems | | `twotx-ctl`, `onetx` PASS |
+
+### Pages dirtied before activation
+
+`actdirty-test.sh [xfs|ext4|both] [rounds]` (bug.md #68): X, 64 MiB of 0xAA, is fsync'd and
+deleted; A, 64 MiB of 0x55, is written without `O_TAU_UNTORN` and without fsync, then opened
+with it. The directory is fsync'd (A's name durable, not its data), the guest idles 7 s and is
+cut. Every 4 KiB block of A must be all 0x55 or all zero; 0xAA (the deleted file's old data in
+blocks the activation left to ext4 writeback without its ordering) fails. Counters `act_flush`
+(activation wrote pages first) and `act_dirty` (pages left after it, must be 0).
+
+| kernel | ext4 | xfs |
+|---|---|---|
+| #403 (a30a5373) | PASS x2, `act_flush+1`, 16384 x 0x55 | PASS x2, 16384 x 0x55 |
 
 ### Blocks a tau file freed and another file reused
 

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Mount after the crash: the last write came back whole or not at all.
-#   usage: split-verify.sh <xfs|ext4> <split|split-ctl|extend|inplace|twowrite>
+#   usage: split-verify.sh <xfs|ext4> <split|split-ctl|extend|inplace|twowrite|twotx|twotx-ctl|onetx>
 
 cd "$(dirname "$0")" || exit 1
 . ./common.sh
@@ -17,7 +17,10 @@ extend)    OK="41,41,00 44,44,44"; NBLK=3 ;;
 inplace)   OK="41,41 43,43" ;;
 # W2 was committed in the background; W1 has no tag yet, so it is whole either way
 twowrite)  OK="41,41,45,45 43,43,45,45"; NBLK=4 ;;
-*) die "usage: $0 <xfs|ext4> <split|split-ctl|extend|inplace|twowrite>" ;;
+# the write's old copies in two txs (twotx: the older one left the journal) or one
+twotx|twotx-ctl) OK="41,42 43,43" ;;
+onetx)     OK="41,41 43,43" ;;
+*) die "usage: $0 <xfs|ext4> <split|split-ctl|extend|inplace|twowrite|twotx|twotx-ctl|onetx>" ;;
 esac
 [ -n "$FS" ] || die "usage: $0 <xfs|ext4> <case>"
 
@@ -26,7 +29,7 @@ echo "== recovery mount ($FS) =="
 mount_tau "$FS"
 [ -f "$F" ] || die "$F missing after recovery"
 
-sudo dmesg | grep -E 'TAU: (replay done|found revoke block)' | tail -5 | sed 's/^/  /'
+sudo dmesg | grep -E 'TAU: (replay done|found revoke block|ino [0-9]+: replaying tid)' | tail -5 | sed 's/^/  /'
 
 # each of the first NBLK blocks as the byte it is made of, or "mixed"
 got=$(sudo python3 - "$F" "$NBLK" <<'PY'
