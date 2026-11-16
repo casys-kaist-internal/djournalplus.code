@@ -19,6 +19,8 @@
 #          ZFS_KIT: build_zfs.sh's kit (spl/zfs modules for the basevm kernel,
 #          the noble userland they match), for the zfs-* configs
 #          BASE: a copy of tautest's qemu-image.qcow2 to put the overlay on
+#          TORNER_INITRD [tools/qemu/vm_imgs/initrd.img-6.8.0tjournal+]: the initrd, or none
+#          (setup.log lists the guest's modules and their srcversion)
 #          OVDIR [tools/qemu/vm_imgs]: where the overlay goes (that is on root)
 #
 # Kernels: the tau columns boot the kernel tree's test-config build (dm-log-
@@ -71,7 +73,7 @@ qemu-img create -q -f qcow2 -b "$BASE" -F qcow2 "$OV" || exit 1
 echo "===== boot $(date '+%F %T')  $KV${KCMDLINE:+  cmdline +$KCMDLINE}"
 echo "cells: $CELLS"
 echo "base: $BASE"
-INITRD=$V/initrd.img-6.8.0tjournal+ ROOTFS=$OV SCRATCH=$SD SCRATCH_SIZE=24G \
+INITRD=${TORNER_INITRD:-$V/initrd.img-6.8.0tjournal+} ROOTFS=$OV SCRATCH=$SD SCRATCH_SIZE=24G \
 	SSH_PORT=$PORT GDB_PORT=$GDB_PORT TAUFS_KERNEL=$KD MEM=${MEM:-16G} KCMDLINE="${KCMDLINE:-}" \
 	sg kvm -c "bash $R/tools/qemu/run_vm_torner.sh" > "$OUT/console.log" 2>&1 < /dev/null &
 qpid=$!
@@ -140,6 +142,11 @@ echo "cmdline: $(cat /proc/cmdline)"
 if [ -e /sys/module/tau_journal/parameters/tau_shrink_seeks ]; then
 	echo "tau_shrink_seeks: $(cat /sys/module/tau_journal/parameters/tau_shrink_seeks)"
 fi
+# which modules the kernel holds, and dm-log-writes' srcversion: a module of another build
+# (an initrd's, the base image's /lib/modules) must not be among them
+echo "modules: $(cut -d' ' -f1 /proc/modules | xargs)"
+for m in $(cut -d' ' -f1 /proc/modules); do echo "srcversion $m $(cat /sys/module/$m/srcversion 2>/dev/null)"; done
+echo "tainted: $(cat /proc/sys/kernel/tainted)"
 EOF
 rc=$?; cat "$OUT/setup.log"; [ $rc = 0 ] || die "guest setup failed"
 if [ -n "${KCMDLINE:-}" ]; then

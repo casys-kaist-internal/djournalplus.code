@@ -52,9 +52,16 @@ die() { echo "run_vm_torner: $*" >&2; exit 1; }
 
 RELEASE="$(cat "$KERNEL/include/config/kernel.release" 2>/dev/null)"
 [ -n "$RELEASE" ] || die "cannot read kernel release"
-# root-only on some hosts (0600): INITRD=<a readable copy> runs qemu unprivileged
+# root-only on some hosts (0600): INITRD=<a readable copy> runs qemu unprivileged;
+# INITRD=none boots without one (the test kernels have the root disk's drivers built in,
+# and another build's initrd offers modules that do not belong to this kernel)
 INITRD="${INITRD:-/boot/initrd.img-$RELEASE}"
-[ -f "$INITRD" ] || die "initrd not found: $INITRD"
+if [ "$INITRD" = none ]; then
+	INITRD_ARGS=()
+else
+	[ -f "$INITRD" ] || die "initrd not found: $INITRD"
+	INITRD_ARGS=(-initrd "$INITRD")
+fi
 
 # The stack under test needs CONFIG_DM_LOG_WRITES; without it the guest cannot
 # create the dm target at all.
@@ -113,7 +120,7 @@ EOF
 
 exec "$QEMU" \
 	-kernel "$KERNEL/arch/x86/boot/bzImage" \
-	-initrd "$INITRD" \
+	"${INITRD_ARGS[@]}" \
 	-append "root=/dev/sda rw console=ttyS0${KCMDLINE:+ $KCMDLINE}" \
 	-cpu host \
 	-smp "cpus=$CORES" \
