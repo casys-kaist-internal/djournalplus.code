@@ -97,6 +97,17 @@ For **beta** the run uses the #401 pins (fccc4abd), whose τ code is #400's. The
 - the twotx cases (bug.md #80, fixed in #403);
 - FC6's truncate home write (B1, #403).
 
+## Judging a finished run again (`REEVAL`)
+
+`REEVAL=<raw run dir> bash bench/suite/fast_correct.sh` judges a run again under the current rules. It starts nothing and changes none of the run's files.
+- It reads each item's `cases.tsv`, `logs.list` and `allow.txt` where the run left them.
+- Next to the originals it writes `FCn/{faults.reeval.txt,verdicts.reeval.tsv,VERDICT.reeval}`, `MANIFEST.reeval` and `REPORT.reeval.md`. These go into the raw dir and into the umbrella report dir.
+  - `MANIFEST.reeval` holds the run's `MANIFEST`, then the new harness md5s, the expected list and `FAULT_RE`.
+  - With `REEVAL_OUT=<dir>` everything goes to `<dir>` instead.
+- `VERSION`, `ITEMS`, `LANES` and the expected list come from the run's `MANIFEST` unless given.
+
+It was first used on 11-16, on the beta run. That run's FC2 had counted 240 lockdep boot banner lines ("... MAX_LOCKDEP_KEYS: 8192") as faults. `FAULT_RE` now matches only lockdep's exhaustion reports ("MAX_LOCKDEP_… too low"), so beta and v1.0 are judged by the same rules.
+
 ## Results
 
 | where | what |

@@ -9,6 +9,15 @@
 #   [KINITRD=<file>|none] [KINITRD_LOCKDEP=<file>|none] \
 #   [ITEMS="FC1 FC2 FC7 FC3 FC4 FC5 FC6"] [LANES=parallel|serial] [EXPECT=<file>] [DRY=1] \
 #   bash bench/suite/fast_correct.sh
+#
+#   REEVAL=<raw run dir> [REEVAL_OUT=<dir>] [ITEMS=...] [EXPECT=<file>] bash bench/suite/fast_correct.sh
+# REEVAL: judge a finished run again with this harness's rules, starting nothing: the items' own
+# output (cases.tsv, logs.list, allow.txt) is read where the run left it, and nothing there is
+# changed. Each item gets faults.reeval.txt, verdicts.reeval.tsv and VERDICT.reeval; the run gets
+# MANIFEST.reeval (the run's MANIFEST, then this harness's md5s and rules) and REPORT.reeval.md --
+# in the run dir and in its umbrella report dir, or all under REEVAL_OUT (then not in the umbrella).
+# VERSION, ITEMS, LANES and the expected list come from the run's MANIFEST unless given.
+#
 # KINITRD: the initrd the items' VMs boot with [none]; never /boot's by name (any build pairs with
 # it). After each boot an item checks that the guest runs the pinned build (uname -v) and holds no
 # module of another build (cases <prefix>/boot/kernel, <prefix>/boot/modules).
@@ -35,8 +44,19 @@
 #   an item lists exists, and none has a fault line (FAULT_RE below) its allow.txt does not cover.
 set -u
 SUITE=$(cd "$(dirname "$(realpath "$0")")" && pwd)
-R=$(cd "$SUITE/../.." && pwd)
+R=${SUITE_ROOT:-$(cd "$SUITE/../.." && pwd)}	# SUITE_ROOT: the umbrella, for a copy of the suite elsewhere
 die() { echo "fast_correct: $*" >&2; exit 3; }
+REEVAL=${REEVAL:-}
+if [ -n "$REEVAL" ]; then
+	RAW=$(realpath "$REEVAL") || die "REEVAL: no $REEVAL"
+	[ -f "$RAW/MANIFEST" ] && [ -f "$RAW/items.txt" ] || die "REEVAL: $RAW has no MANIFEST or items.txt"
+	VERSION=$(sed -n 's/^version: //p' "$RAW/MANIFEST")
+	ITEMS=${ITEMS:-$(sed -n 's/^items: //p' "$RAW/MANIFEST")}
+	LANES=${LANES:-$(sed -n 's/^lanes: //p' "$RAW/MANIFEST")}
+	EXPECT=${EXPECT-$(sed -n 's/^expect: \([^ ]*\).*/\1/p' "$RAW/MANIFEST")}; [ "$EXPECT" = none ] && EXPECT=
+	UTC=$(sed -n 's/^run: \([^ ]*\).*/\1/p' "$RAW/MANIFEST")
+	OUT=${REEVAL_OUT:-$RAW}
+fi
 VERSION=${VERSION:-}; [[ $VERSION =~ ^[A-Za-z0-9._-]+$ ]] || die "VERSION= (letters, digits, . _ -)"
 KDIR=${KDIR:-}; KMD5=${KMD5:-}; KDIR_LOCKDEP=${KDIR_LOCKDEP:-}; KMD5_LOCKDEP=${KMD5_LOCKDEP:-}
 # the initrd each VM boots with, given, never found by name (tau-ops 11-16: /boot/initrd.img-6.8.0tjournal+
@@ -47,11 +67,14 @@ ITEMS=${ITEMS:-FC1 FC2 FC7 FC3 FC4 FC5 FC6}
 LANES=${LANES:-serial}; [[ $LANES == parallel || $LANES == serial ]] || die "LANES=parallel|serial"
 DRY=${DRY:-0}
 RAW_BASE=${RAW_BASE:-/mnt/tau_backup/fast}
+REP_BASE=${REP_BASE:-$R/bench/results/libra08/versions}   # a trial run of the harness: point it elsewhere
 EXPECT=${EXPECT-$SUITE/expect/$VERSION.txt}; [ -n "$EXPECT" ] && [ ! -f "$EXPECT" ] && EXPECT=
 declare -A LANE=([FC1]=P [FC2]=P [FC7]=P [FC3]=F [FC4]=F [FC5]=F [FC6]=F)
 declare -A TIMEOUT_MIN=([FC1]=180 [FC2]=90 [FC7]=60 [FC3]=40 [FC4]=150 [FC5]=240 [FC6]=40)
-# kernel splats and lockdep / RCU / watchdog reports; the logs an item lists are kernel logs only
-FAULT_RE='BUG:|BUG at |kernel BUG|WARNING:|Oops|general protection fault|Call Trace:|Kernel panic|possible circular locking|possible recursive locking|inconsistent lock state|possible irq lock inversion|suspicious RCU usage|bad unlock balance|turning off the locking correctness validator|MAX_LOCKDEP|UBSAN:|KASAN:|soft lockup|hung_task|blocked for more than|self-detected stall|rcu: INFO:'
+# kernel splats and lockdep / RCU / watchdog reports; the logs an item lists are kernel logs only.
+# Not the lockdep boot banner ("... MAX_LOCKDEP_KEYS: 8192"): its exhaustion reports read
+# "BUG: MAX_LOCKDEP_KEYS too low!" (11-16: the beta run's FC2 counted 240 banner lines).
+FAULT_RE='BUG:|BUG at |kernel BUG|WARNING:|Oops|general protection fault|Call Trace:|Kernel panic|possible circular locking|possible recursive locking|inconsistent lock state|possible irq lock inversion|suspicious RCU usage|bad unlock balance|turning off the locking correctness validator|MAX_LOCKDEP[A-Z_]* too low|UBSAN:|KASAN:|soft lockup|hung_task|blocked for more than|self-detected stall|rcu: INFO:'
 
 script_of() { ls "$SUITE"/fc/"$(tr 'A-Z' 'a-z' <<< "$1")"_*.sh 2>/dev/null | head -1; }
 kimage() { if [ -f "$1/arch/x86/boot/bzImage" ]; then echo "$1/arch/x86/boot/bzImage"; else echo "$1/bzImage"; fi; }
@@ -64,14 +87,15 @@ check_kdir() {	# <label> <dir> <md5>
 	[ "$got" = "$3" ] || die "$1: $(kimage "$2") md5 $got, expected '$3'"
 }
 for it in $ITEMS; do [ -n "${LANE[$it]:-}" ] || die "unknown item $it"; done
-check_kdir KDIR "$KDIR" "$KMD5"
-case " $ITEMS " in *" FC2 "*) check_kdir KDIR_LOCKDEP "$KDIR_LOCKDEP" "$KMD5_LOCKDEP" ;; esac
-UTC=$(date -u +%Y%m%dT%H%M%SZ)
-REP_BASE=${REP_BASE:-$R/bench/results/libra08/versions}   # a trial run of the harness: point it elsewhere
-if [ "$DRY" = 1 ]; then RAW=$RAW_BASE/$VERSION/dry-$UTC; REP=; else RAW=$RAW_BASE/$VERSION/$UTC; REP=$REP_BASE/$VERSION/fast/$UTC; fi
-mkdir -p "$RAW" || die "cannot make $RAW"
-exec 9> "$RAW_BASE/.fast_correct.lock"
-if [ "$DRY" != 1 ]; then flock -n 9 || die "another fast_correct.sh runs ($RAW_BASE/.fast_correct.lock)"; fi
+if [ -z "$REEVAL" ]; then
+	check_kdir KDIR "$KDIR" "$KMD5"
+	case " $ITEMS " in *" FC2 "*) check_kdir KDIR_LOCKDEP "$KDIR_LOCKDEP" "$KMD5_LOCKDEP" ;; esac
+	UTC=$(date -u +%Y%m%dT%H%M%SZ)
+	if [ "$DRY" = 1 ]; then RAW=$RAW_BASE/$VERSION/dry-$UTC; REP=; else RAW=$RAW_BASE/$VERSION/$UTC; REP=$REP_BASE/$VERSION/fast/$UTC; fi
+	mkdir -p "$RAW" || die "cannot make $RAW"
+	exec 9> "$RAW_BASE/.fast_correct.lock"
+	if [ "$DRY" != 1 ]; then flock -n 9 || die "another fast_correct.sh runs ($RAW_BASE/.fast_correct.lock)"; fi
+fi
 
 host_state() {
 	echo "host: $(hostname -s), $(uname -rv), load $(cut -d' ' -f1-3 /proc/loadavg)"
@@ -81,6 +105,7 @@ host_state() {
 	echo "1 GiB pages free: $(for n in /sys/devices/system/node/node[0-9]*; do printf '%s=%s ' "${n##*/}" "$(cat $n/hugepages/hugepages-1048576kB/free_hugepages)"; done)"
 	echo "disk free: / $(df -h --output=avail / | tail -1 | xargs), /mnt/tau_backup $(df -h --output=avail /mnt/tau_backup | tail -1 | xargs)"
 }
+suite_md5() { (cd "$SUITE" && md5sum fast_correct.sh fc/*.sh | awk '{printf "%s=%s ", $2, substr($1,1,8)}'); }
 manifest() {
 	echo "version: $VERSION"
 	echo "run: $UTC$([ "$DRY" = 1 ] && echo " (DRY)")"
@@ -92,7 +117,7 @@ manifest() {
 	echo "expect: ${EXPECT:-none}$([ -n "$EXPECT" ] && echo " (md5 $(md5sum < "$EXPECT" | cut -c1-32))")"
 	echo "umbrella: $(git -C "$R" log -1 --format='%h %ci %s')"
 	echo "umbrella_dirty: $(git -C "$R" status --short | tr '\n' ';')"
-	echo "suite_md5: $(cd "$SUITE" && md5sum fast_correct.sh fc/*.sh | awk '{printf "%s=%s ", $2, substr($1,1,8)}')"
+	echo "suite_md5: $(suite_md5)"
 	# what the items call: the entry scripts, and a digest of each tool tree's tracked files as they are
 	# on disk -- the same harness can be shown after a rebase changes the commit hashes
 	echo "tools_md5: $(cd "$R" && md5sum tools/qemu/run_vm.sh tools/qemu/run_vm_torner.sh tools/torner/campaign/full.sh \
@@ -128,20 +153,23 @@ run_item() {
 	[ "$DRY" = 1 ] || evaluate "$it" "$rc"
 }
 
+# <FCn> <rc> [<item dir> <out dir> <suffix>]: faults<sfx>.txt, verdicts<sfx>.tsv and VERDICT<sfx> in
+# <out dir> from what the item left in <item dir> (both RAW/<FCn> by default; REEVAL: .reeval)
 evaluate() {
-	local it=$1 rc=$2 d=$RAW/$1 f allow=
-	: > "$d/faults.txt"
-	[ -s "$d/allow.txt" ] && allow=$(cut -f1 "$d/allow.txt" | paste -sd'|')
-	if [ -s "$d/logs.list" ]; then
+	local it=$1 rc=$2 src=${3:-$RAW/$1} out=${4:-$RAW/$1} sfx=${5:-} f allow=
+	mkdir -p "$out"
+	: > "$out/faults$sfx.txt"
+	[ -s "$src/allow.txt" ] && allow=$(cut -f1 "$src/allow.txt" | paste -sd'|')
+	if [ -s "$src/logs.list" ]; then
 		while IFS= read -r f; do
 			[ -n "$f" ] || continue
-			[[ $f == /* ]] || f=$d/$f
-			if [ ! -f "$f" ]; then echo "MISSING_LOG $f" >> "$d/faults.txt"; continue; fi
+			[[ $f == /* ]] || f=$src/$f
+			if [ ! -f "$f" ]; then echo "MISSING_LOG $f" >> "$out/faults$sfx.txt"; continue; fi
 			grep -anE "$FAULT_RE" "$f" | { if [ -n "$allow" ]; then grep -vE "$allow"; else cat; fi; } |
-				sed "s|^|$f:|" >> "$d/faults.txt"
-		done < "$d/logs.list"
+				sed "s|^|$f:|" >> "$out/faults$sfx.txt"
+		done < "$src/logs.list"
 	fi
-	python3 - "$d/cases.tsv" "${EXPECT:-/dev/null}" "$it" > "$d/verdicts.tsv" <<'PYEOF'
+	python3 - "$src/cases.tsv" "${EXPECT:-/dev/null}" "$it" > "$out/verdicts$sfx.tsv" <<'PYEOF'
 import fnmatch, os, sys
 cases_f, expect_f, item = sys.argv[1:4]
 exp = []
@@ -176,21 +204,86 @@ for g, why in exp:
         print("\t".join(("expect:" + g, "-", "FAIL", "expected to fail, but no such case ran", why)))
 PYEOF
 	local n_fail n_xpass n_cases n_faults n_missing v
-	n_cases=$(grep -vc '^expect:' "$d/verdicts.tsv")	# the expect: rows count in n_fail
-	n_fail=$(awk -F'\t' '$3=="FAIL"' "$d/verdicts.tsv" | wc -l)
-	n_xpass=$(awk -F'\t' '$3=="XPASS"' "$d/verdicts.tsv" | wc -l)
-	n_missing=$(grep -c '^MISSING_LOG' "$d/faults.txt")
-	n_faults=$(( $(wc -l < "$d/faults.txt") - n_missing ))
+	n_cases=$(grep -vc '^expect:' "$out/verdicts$sfx.tsv")	# the expect: rows count in n_fail
+	n_fail=$(awk -F'\t' '$3=="FAIL"' "$out/verdicts$sfx.tsv" | wc -l)
+	n_xpass=$(awk -F'\t' '$3=="XPASS"' "$out/verdicts$sfx.tsv" | wc -l)
+	n_missing=$(grep -c '^MISSING_LOG' "$out/faults$sfx.txt")
+	n_faults=$(( $(wc -l < "$out/faults$sfx.txt") - n_missing ))
 	if [ "$rc" != 0 ]; then v=ERROR; [ "$rc" = 124 ] && v=TIMEOUT
 	elif [ "$n_cases" = 0 ]; then v=ERROR
 	elif [ $((n_fail + n_xpass + n_faults + n_missing)) -gt 0 ]; then v=FAIL
-	elif [ ! -s "$d/logs.list" ]; then v=FAIL; echo "NO_LOGS the item listed no kernel log" >> "$d/faults.txt"
+	elif [ ! -s "$src/logs.list" ]; then v=FAIL; echo "NO_LOGS the item listed no kernel log" >> "$out/faults$sfx.txt"
 	else v=PASS; fi
-	echo "$v" > "$d/VERDICT"
+	echo "$v" > "$out/VERDICT$sfx"
+}
+
+# <out dir> <suffix>: the report from out/FCn/{VERDICT,verdicts,faults}<sfx> and the run's own files
+vcount() { awk -F'\t' -v s="$2" '$3==s' "$1" 2>/dev/null | wc -l; }
+write_report() {
+	local out=$1 sfx=$2 it d all=PASS sec
+	for it in $ITEMS; do [ "$(cat "$out/$it/VERDICT$sfx" 2>/dev/null)" = PASS ] || all=FAIL; done
+	echo "# libra08 fast correctness: $VERSION ($UTC)${sfx:+, re-evaluated}"
+	echo
+	echo "VERDICT: $all"
+	echo
+	if [ -n "$sfx" ]; then
+		sed 's/^/    /' "$out/MANIFEST$sfx"
+	else
+		sed 's/^/    /' "$RAW/MANIFEST"
+		echo "    end: $(date -u '+%F %T UTC')"
+	fi
+	echo
+	echo "| item | lane | verdict | PASS | FAIL | XFAIL | XPASS | SKIP | fault lines | min |"
+	echo "|---|---|---|---:|---:|---:|---:|---:|---:|---:|"
+	for it in $ITEMS; do
+		d=$out/$it
+		sec=$(grep "^$it " "$RAW/items.txt" | sed -n 's/.*sec=\([0-9]*\).*/\1/p')
+		echo "| $it | ${LANE[$it]} | $(cat "$d/VERDICT$sfx" 2>/dev/null || echo ERROR) | $(vcount "$d/verdicts$sfx.tsv" PASS) | $(vcount "$d/verdicts$sfx.tsv" FAIL) | $(vcount "$d/verdicts$sfx.tsv" XFAIL) | $(vcount "$d/verdicts$sfx.tsv" XPASS) | $(vcount "$d/verdicts$sfx.tsv" SKIP) | $(grep -vc '^MISSING_LOG\|^NO_LOGS' "$d/faults$sfx.txt" 2>/dev/null) | $(( ${sec:-0} / 60 )) |"
+	done
+	echo
+	echo "## Not passed (FAIL, XPASS) and expected failures (XFAIL)"
+	for it in $ITEMS; do awk -F'\t' -v it="$it" '$3=="FAIL"||$3=="XPASS"||$3=="XFAIL" {print "- " it " " $1 ": " $3 " -- " $4 ($5 != "" ? " (" $5 ")" : "")}' "$out/$it/verdicts$sfx.tsv" 2>/dev/null; done
+	echo
+	echo "## Fault lines in the kernel logs (first 10 per item)"
+	for it in $ITEMS; do [ -s "$out/$it/faults$sfx.txt" ] && { echo "- $it:"; head -10 "$out/$it/faults$sfx.txt" | cut -c1-300 | sed 's/^/    /'; }; done
+	echo
+	echo "## Item summaries"
+	for it in $ITEMS; do [ -s "$RAW/$it/summary.md" ] && { echo; echo "### $it"; echo; cat "$RAW/$it/summary.md"; }; done
+	echo
+	echo "Raw: $RAW (run.log, cases.tsv, verdicts$sfx.tsv, faults$sfx.txt, logs.list per item)"
 }
 
 lane_items() { local it out=; for it in $ITEMS; do [ "${LANE[$it]}" = "$1" ] && out="$out $it"; done; echo $out; }
 run_lane() { local it; for it in $(lane_items "$1"); do run_item "$it"; done; }
+
+if [ -n "$REEVAL" ]; then
+	mkdir -p "$OUT" || die "cannot make $OUT"
+	for it in $ITEMS; do
+		rc=$(sed -n "s/^$it rc=\([0-9]*\).*/\1/p" "$RAW/items.txt" | tail -1)
+		[ -n "$rc" ] || { echo "fast_correct: REEVAL: $it did not run in $RAW" >&2; continue; }
+		evaluate "$it" "$rc" "$RAW/$it" "$OUT/$it" .reeval
+	done
+	{
+		cat "$RAW/MANIFEST"
+		echo "reeval: $(date -u '+%F %T UTC'), the run in $RAW judged again into $OUT"
+		echo "reeval_suite_md5: $(suite_md5)"
+		echo "reeval_umbrella: $(git -C "$R" log -1 --format='%h %ci %s')"
+		echo "reeval_expect: ${EXPECT:-none}$([ -n "$EXPECT" ] && echo " (md5 $(md5sum < "$EXPECT" | cut -c1-32))")"
+		echo "reeval_fault_re: $FAULT_RE"
+	} > "$OUT/MANIFEST.reeval"
+	write_report "$OUT" .reeval > "$OUT/REPORT.reeval.md"
+	REP=$REP_BASE/$VERSION/fast/$UTC
+	if [ "$OUT" = "$RAW" ] && [ -d "$REP" ]; then
+		cp "$OUT/MANIFEST.reeval" "$OUT/REPORT.reeval.md" "$REP/"
+		for it in $ITEMS; do
+			[ -d "$REP/$it" ] || continue
+			for f in verdicts.reeval.tsv faults.reeval.txt VERDICT.reeval; do [ -f "$OUT/$it/$f" ] && cp "$OUT/$it/$f" "$REP/$it/"; done
+		done
+	fi
+	grep '^VERDICT' "$OUT/REPORT.reeval.md"
+	echo "report: $OUT/REPORT.reeval.md"
+	exit 0
+fi
 
 manifest > "$RAW/MANIFEST"
 echo "fast_correct: $VERSION, $(kver "$KDIR"); $( [ "$DRY" = 1 ] && echo DRY || echo run) $UTC -> $RAW"
@@ -228,35 +321,7 @@ if [ "$DRY" = 1 ]; then
 fi
 
 # the report, and its copy in the umbrella
-{
-	all=PASS
-	for it in $ITEMS; do [ "$(cat "$RAW/$it/VERDICT" 2>/dev/null)" = PASS ] || all=FAIL; done
-	echo "# libra08 fast correctness: $VERSION ($UTC)"
-	echo
-	echo "VERDICT: $all"
-	echo
-	sed 's/^/    /' "$RAW/MANIFEST"
-	echo "    end: $(date -u '+%F %T UTC')"
-	echo
-	echo "| item | lane | verdict | PASS | FAIL | XFAIL | XPASS | SKIP | fault lines | min |"
-	echo "|---|---|---|---:|---:|---:|---:|---:|---:|---:|"
-	for it in $ITEMS; do
-		d=$RAW/$it; c() { awk -F'\t' -v s="$1" '$3==s' "$d/verdicts.tsv" 2>/dev/null | wc -l; }
-		sec=$(grep "^$it " "$RAW/items.txt" | sed -n 's/.*sec=\([0-9]*\).*/\1/p')
-		echo "| $it | ${LANE[$it]} | $(cat "$d/VERDICT" 2>/dev/null || echo ERROR) | $(c PASS) | $(c FAIL) | $(c XFAIL) | $(c XPASS) | $(c SKIP) | $(grep -vc '^MISSING_LOG\|^NO_LOGS' "$d/faults.txt" 2>/dev/null) | $(( ${sec:-0} / 60 )) |"
-	done
-	echo
-	echo "## Not passed (FAIL, XPASS) and expected failures (XFAIL)"
-	for it in $ITEMS; do awk -F'\t' -v it="$it" '$3=="FAIL"||$3=="XPASS"||$3=="XFAIL" {print "- " it " " $1 ": " $3 " -- " $4 ($5 != "" ? " (" $5 ")" : "")}' "$RAW/$it/verdicts.tsv" 2>/dev/null; done
-	echo
-	echo "## Fault lines in the kernel logs (first 10 per item)"
-	for it in $ITEMS; do [ -s "$RAW/$it/faults.txt" ] && { echo "- $it:"; head -10 "$RAW/$it/faults.txt" | cut -c1-300 | sed 's/^/    /'; }; done
-	echo
-	echo "## Item summaries"
-	for it in $ITEMS; do [ -s "$RAW/$it/summary.md" ] && { echo; echo "### $it"; echo; cat "$RAW/$it/summary.md"; }; done
-	echo
-	echo "Raw: $RAW (run.log, cases.tsv, verdicts.tsv, faults.txt, logs.list per item)"
-} > "$RAW/REPORT.md"
+write_report "$RAW" "" > "$RAW/REPORT.md"
 mkdir -p "$REP"
 cp "$RAW/MANIFEST" "$RAW/REPORT.md" "$RAW/items.txt" "$REP/"
 for it in $ITEMS; do
