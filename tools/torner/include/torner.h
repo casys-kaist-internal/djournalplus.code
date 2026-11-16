@@ -74,12 +74,59 @@ enum torner_mode {
 	TORNER_MODE_APPEND,		/* i_size growth            (Data-Inode) */
 	TORNER_MODE_ALLOC,		/* fallocate'd, unwritten->written conversion */
 	TORNER_MODE_DELALLOC,		/* sparse, delayed allocation at writeback */
-	TORNER_MODE_MIXED,
+	TORNER_MODE_MIXED,		/* half over written data, half an append */
 	TORNER_MODE__COUNT
 };
 
 const char *torner_mode_name(enum torner_mode m);
 int torner_mode_parse(const char *s, enum torner_mode *out);
+
+/*
+ * Mixed mode: one chain of writes, each partly over what the write before it
+ * wrote and partly past EOF, so one write is an overwrite and an append at once.
+ * Write k is stamped page_id = k, version 1, sector_idx 0 .. len/sector - 1.
+ *
+ *   chain    write k covers [k * step, k * step + unit): with step = unit/2 (the
+ *            default) its first half is over write k-1's second half, its second
+ *            half moves EOF.  Every other write crosses a unit boundary.
+ *   aligned  write 2j covers [j * unit, j * unit + unit/2): an append;
+ *            write 2j+1 covers [j * unit, (j + 1) * unit): its first half over
+ *            write 2j, its second half an append.  No write crosses a unit
+ *            boundary, so a file system that keeps a record of `unit` bytes whole
+ *            (ZFS, recordsize = unit) gets each write as one record.
+ *
+ * Writes are applied in k order (gen holds one lock over claim + pwrite), so the
+ * oracle knows which of the writes covering a sector is the newer.
+ */
+#define TORNER_MIXED_MAX_COVER	64
+
+struct torner_mixed {
+	int aligned;
+	uint32_t unit;
+	uint32_t step;		/* chain only */
+	uint32_t sector;
+};
+
+/* write k's byte range */
+void     torner_mixed_range(const struct torner_mixed *m, uint64_t k,
+			    uint64_t *off, uint32_t *len);
+uint64_t torner_mixed_end(const struct torner_mixed *m, uint64_t k);
+/* where write k starts to move EOF: the end of write k-1 (0 for write 0) */
+uint64_t torner_mixed_ext(const struct torner_mixed *m, uint64_t k);
+/* the writes covering the sector at byte offset o, oldest first; returns the count */
+int      torner_mixed_cover(const struct torner_mixed *m, uint64_t o,
+			    uint64_t *ks, uint32_t *idx, int max);
+/*
+ * The write whose EOF move holds `eof` (> 0): *exact = 1 if eof is that write's
+ * end, 0 if it lies inside the write's extension (part of its size only).
+ * Returns 0 for eof 0.
+ */
+int      torner_mixed_eof(const struct torner_mixed *m, uint64_t eof,
+			  uint64_t *k, int *exact);
+/* the last write that starts below `size` (> 0); later ones lie wholly past it */
+uint64_t torner_mixed_last(const struct torner_mixed *m, uint64_t size);
+/* "" if the geometry is usable, else why not */
+const char *torner_mixed_bad(const struct torner_mixed *m);
 
 /* crc32 (IEEE 802.3, reflected, poly 0xEDB88320) */
 void     torner_crc32_init(void);

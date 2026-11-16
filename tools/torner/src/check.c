@@ -193,7 +193,8 @@ static void report_size_torn(size_t *shown, const struct focus *f,
 
 static void report_focus(int fd, uint32_t unit, uint32_t sector, uint32_t spu,
 			 uint64_t npages, uint64_t fsize, int append,
-			 uint64_t run_id, const struct focus *fv, size_t fn)
+			 uint64_t writers, uint64_t run_id,
+			 const struct focus *fv, size_t fn)
 {
 	uint8_t *u = malloc(unit);
 	uint64_t n_new = 0, n_old = 0, n_abs = 0;
@@ -226,7 +227,8 @@ static void report_focus(int fd, uint32_t unit, uint32_t sector, uint32_t spu,
 				n_old++;
 			break;
 		case PAGE_ABSENT:
-			if (append)
+			/* several writers: only the last unit's blank is torn */
+			if (append && (writers <= 1 || fv[i].page + 1 == npages))
 				report_size_torn(&shown, &fv[i], "size_blank_unit", fsize);
 			else
 				n_abs++;
@@ -248,6 +250,281 @@ static void report_focus(int fd, uint32_t unit, uint32_t sector, uint32_t spu,
 	free(u);
 }
 
+/*
+ * ---- mixed mode (gen --mode mixed) ----
+ *
+ * The writes overlap, so a sector is not one unit's: it lies under up to
+ * TORNER_MIXED_MAX_COVER writes, and holds the newest of them that took effect,
+ * or nothing.  Each write is judged on its own.  Under "every write whole, the
+ * newest one wins", write k is torn exactly when its range shows k somewhere and
+ * something older than k somewhere else -- an older write's data, blank, or the
+ * end of the file.  A sector showing a newer write says nothing about k.  (If no
+ * write is torn this way, the writes the file shows are a set S that explains
+ * every sector: the newest write of S covering it, else blank.)
+ *
+ * EOF is evidence too.  Each write moves EOF to its end, so EOF names the write
+ * that set it: if EOF lies inside that write's extension, only part of its size
+ * reached the disk (size_cut); if EOF is its end, the write took effect and its
+ * extension must hold its data (size_blank otherwise: the size reached the disk,
+ * the data did not).
+ *
+ * Writes the file shows no trace of below a write it does show are counted
+ * (order_gaps) but are not violations: without an fsync between them nothing
+ * orders two writes.  P2 catches the ones an fsync made durable.
+ */
+#define SRC_BLANK	(-1)
+#define SRC_CORRUPT	(-2)
+
+enum mw_state { MW_NEW = 0, MW_OLD, MW_ABSENT, MW_TORN };
+enum mw_kind {
+	MK_NONE = 0, MK_TORN_OLDER, MK_TORN_BLANK, MK_TORN_EOF,
+	MK_SIZE_CUT, MK_SIZE_BLANK, MK_CORRUPT
+};
+
+static const char *mw_kind_name(int k)
+{
+	switch (k) {
+	case MK_TORN_OLDER:	return "mixed_torn_older";
+	case MK_TORN_BLANK:	return "mixed_torn_blank";
+	case MK_TORN_EOF:	return "mixed_torn_eof";
+	case MK_SIZE_CUT:	return "size_cut_unit";
+	case MK_SIZE_BLANK:	return "size_blank_unit";
+	case MK_CORRUPT:	return "sector_corrupt";
+	default:		return "?";
+	}
+}
+
+struct mixed_ctx {
+	struct torner_mixed m;
+	uint64_t fsize, nsec;		/* nsec: whole sectors below EOF */
+	int64_t *src;			/* per sector: write id, SRC_BLANK, SRC_CORRUPT */
+	uint8_t *cst;			/* per corrupt sector: its torner_sec_status */
+	uint64_t nw;			/* writes judged: 0 .. nw-1 */
+	uint8_t *wst, *wkind;
+	int eof_has, eof_exact;
+	uint64_t eof_k;
+	uint64_t n_new, n_old, n_absent, n_torn, n_size, order_gaps;
+	uint64_t n_after;		/* past the EOF write, not torn: never reached */
+};
+
+/* read every whole sector below EOF and say which write it holds */
+static int mixed_scan(struct mixed_ctx *mc, int fd, uint64_t run_id)
+{
+	const uint32_t sector = mc->m.sector;
+	const uint64_t chunk = 256;
+	uint8_t *buf = malloc((size_t)chunk * sector);
+	uint64_t n0;
+
+	mc->src = calloc(mc->nsec ? mc->nsec : 1, sizeof(*mc->src));
+	mc->cst = calloc(mc->nsec ? mc->nsec : 1, 1);
+	if (!buf || !mc->src || !mc->cst) {
+		free(buf);
+		return -1;
+	}
+	for (n0 = 0; n0 < mc->nsec; n0 += chunk) {
+		uint64_t cnt = (mc->nsec - n0 < chunk) ? mc->nsec - n0 : chunk, j;
+		int got = read_all(fd, buf, (size_t)cnt * sector, (off_t)(n0 * sector));
+
+		if (got < (int)(cnt * sector)) {
+			free(buf);
+			return -1;
+		}
+		for (j = 0; j < cnt; j++) {
+			const uint8_t *sec = buf + (size_t)j * sector;
+			uint64_t o = (n0 + j) * sector, ks[TORNER_MIXED_MAX_COVER];
+			uint32_t idx[TORNER_MIXED_MAX_COVER];
+			enum torner_sec_status st = TORNER_SEC_BAD_IDX;
+			struct torner_sector_hdr h;
+			int nc, c;
+
+			if (is_blank(sec, sector)) {
+				mc->src[n0 + j] = SRC_BLANK;
+				continue;
+			}
+			mc->src[n0 + j] = SRC_CORRUPT;
+			nc = torner_mixed_cover(&mc->m, o, ks, idx,
+						TORNER_MIXED_MAX_COVER);
+			for (c = nc - 1; c >= 0; c--) {
+				enum torner_sec_status s =
+					torner_verify_sector(sec, sector, ks[c], idx[c],
+							     run_id, &h);
+
+				if (s == TORNER_SEC_OK && h.version != 1)
+					s = TORNER_SEC_BAD_IDX;
+				if (s == TORNER_SEC_OK) {
+					mc->src[n0 + j] = (int64_t)ks[c];
+					break;
+				}
+				/* keep the most telling reason: anything over "not mine" */
+				if (st == TORNER_SEC_BAD_IDX)
+					st = s;
+			}
+			if (mc->src[n0 + j] == SRC_CORRUPT)
+				mc->cst[n0 + j] = (uint8_t)st;
+		}
+	}
+	free(buf);
+	return 0;
+}
+
+static void mixed_judge(struct mixed_ctx *mc)
+{
+	const uint32_t sector = mc->m.sector;
+	uint64_t k;
+
+	mc->eof_has = torner_mixed_eof(&mc->m, mc->fsize, &mc->eof_k, &mc->eof_exact);
+	mc->nw = mc->fsize ? torner_mixed_last(&mc->m, mc->fsize) + 1 : 0;
+	mc->wst = calloc(mc->nw ? mc->nw : 1, 1);
+	mc->wkind = calloc(mc->nw ? mc->nw : 1, 1);
+	if (!mc->wst || !mc->wkind)
+		return;
+
+	for (k = 0; k < mc->nw; k++) {
+		uint64_t off, o, ext = torner_mixed_ext(&mc->m, k);
+		uint32_t len;
+		uint64_t shows = 0, older = 0, blank = 0, beyond = 0, corrupt = 0;
+		uint64_t ext_missing = 0;
+		int is_eof = mc->eof_has && k == mc->eof_k;
+		uint8_t st, kind = MK_NONE;
+
+		torner_mixed_range(&mc->m, k, &off, &len);
+		for (o = off; o < off + len; o += sector) {
+			uint64_t n = o / sector;
+			int64_t s;
+
+			if (n >= mc->nsec) {
+				beyond++;
+				if (o >= ext)
+					ext_missing++;
+				continue;
+			}
+			s = mc->src[n];
+			if (s == SRC_CORRUPT) {
+				/*
+				 * Whose sector it was cannot be read off it; it is
+				 * charged to the newest write covering it, once,
+				 * and the older ones take it as neutral.
+				 */
+				uint64_t ks[TORNER_MIXED_MAX_COVER];
+				uint32_t idx[TORNER_MIXED_MAX_COVER];
+				int nc = torner_mixed_cover(&mc->m, o, ks, idx,
+							    TORNER_MIXED_MAX_COVER);
+
+				if (nc && ks[nc - 1] == k)
+					corrupt++;
+			} else if (s == SRC_BLANK) {
+				blank++;
+				if (o >= ext)
+					ext_missing++;
+			} else if ((uint64_t)s == k) {
+				shows++;
+			} else if ((uint64_t)s < k) {
+				older++;
+			}
+			/* a newer write over this sector: neutral */
+		}
+
+		if (corrupt)
+			kind = MK_CORRUPT;
+		else if (is_eof && !mc->eof_exact)
+			kind = MK_SIZE_CUT;
+		else if (is_eof && ext_missing)
+			kind = MK_SIZE_BLANK;
+		else if (shows && beyond)
+			kind = MK_TORN_EOF;
+		else if (shows && blank)
+			kind = MK_TORN_BLANK;
+		else if (shows && older)
+			kind = MK_TORN_OLDER;
+
+		if (kind != MK_NONE)
+			st = MW_TORN;
+		else if (shows || (!older && !blank && !beyond))
+			st = MW_NEW;		/* every sector at k or newer */
+		else if (older)
+			st = MW_OLD;		/* rolled back: the older data shows */
+		else
+			st = MW_ABSENT;
+		mc->wst[k] = st;
+		mc->wkind[k] = kind;
+		if (st != MW_TORN && st != MW_NEW && mc->eof_has && k > mc->eof_k) {
+			mc->n_after++;	/* gen stopped before it, or it is lost */
+			continue;
+		}
+		switch (st) {
+		case MW_NEW:	mc->n_new++; break;
+		case MW_OLD:	mc->n_old++; break;
+		case MW_ABSENT:	mc->n_absent++; break;
+		default:
+			mc->n_torn++;
+			if (kind == MK_SIZE_CUT || kind == MK_SIZE_BLANK)
+				mc->n_size++;
+			break;
+		}
+		if (mc->eof_has && k < mc->eof_k && (st == MW_OLD || st == MW_ABSENT))
+			mc->order_gaps++;
+	}
+}
+
+/* the first corrupt sector in write k's range, for the violation's detail */
+static const char *mixed_corrupt_detail(const struct mixed_ctx *mc, uint64_t k)
+{
+	uint64_t off, o;
+	uint32_t len;
+
+	torner_mixed_range(&mc->m, k, &off, &len);
+	for (o = off; o < off + len; o += mc->m.sector) {
+		uint64_t n = o / mc->m.sector;
+
+		if (n < mc->nsec && mc->src[n] == SRC_CORRUPT)
+			return torner_sec_status_name(mc->cst[n]);
+	}
+	return NULL;
+}
+
+static void report_focus_mixed(const struct mixed_ctx *mc,
+			       const struct focus *fv, size_t fn)
+{
+	uint64_t n_new = 0, n_old = 0, n_abs = 0;
+	size_t i, shown = 0;
+
+	printf(",\"focus\":{\"targets\":%zu,\"torn\":[", fn);
+	for (i = 0; i < fn; i++) {
+		uint64_t k = fv[i].page;
+
+		if (k >= mc->nw) {
+			n_abs++;	/* wholly past EOF */
+			continue;
+		}
+		switch (mc->wst[k]) {
+		case MW_NEW:	n_new++; break;
+		case MW_OLD:	n_old++; break;
+		case MW_ABSENT:	n_abs++; break;
+		default:
+			printf("%s{\"page\":%" PRIu64 ",\"version\":%" PRIu64
+			       ",\"kind\":\"%s\"",
+			       shown++ ? "," : "", k, fv[i].version,
+			       mw_kind_name(mc->wkind[k]));
+			if (mc->wkind[k] == MK_SIZE_CUT || mc->wkind[k] == MK_SIZE_BLANK)
+				printf(",\"eof\":%" PRIu64, mc->fsize);
+			if (mc->wkind[k] == MK_CORRUPT)
+				printf(",\"detail\":\"%s\"", jstr(mixed_corrupt_detail(mc, k)));
+			printf("}");
+			break;
+		}
+	}
+	printf("],\"new\":%" PRIu64 ",\"old\":%" PRIu64 ",\"absent\":%" PRIu64 "}",
+	       n_new, n_old, n_abs);
+}
+
+static void mixed_free(struct mixed_ctx *mc)
+{
+	free(mc->src);
+	free(mc->cst);
+	free(mc->wst);
+	free(mc->wkind);
+}
+
 static void usage(void)
 {
 	fprintf(stderr,
@@ -264,9 +541,16 @@ static void usage(void)
 "                          from `torner replay` progress_limit    [0 = all]\n"
 "  --focus-file <path>     \"page version\" per line: judge these writes one by\n"
 "                          one (new / old / absent / torn), uncapped\n"
-"  --append                the file grew by ONE writer's appends (gen --mode\n"
-"                          append --threads 1): a blank unit below EOF, or a\n"
-"                          unit EOF cuts, is torn (the size rule)\n"
+"  --append                the file grew by appends (gen --mode append): a unit\n"
+"                          EOF cuts is torn, and so is a blank unit below EOF\n"
+"                          (the size rule) -- with one writer\n"
+"  --append-writers <n>    the appends came from n writers   [1]: a blank unit\n"
+"                          below EOF is legal (a writer still copying when\n"
+"                          another moved EOF) unless it is the last one, whose\n"
+"                          write set EOF; the others are counted (holes_below_eof)\n"
+"  --mixed chain|aligned   the file is gen --mode mixed's chain (that --mixed):\n"
+"                          each write judged on its own (see check.c)\n"
+"  --mixed-step <bytes>    chain: gen's --mixed-step          [unit/2]\n"
 "\n"
 "  metadata passed straight through to the JSONL record (see CRASH_TODO 2.4):\n"
 "  --tier --config --workload --run-tag --state-id --strategy --epoch\n"
@@ -295,8 +579,14 @@ int torner_check(int argc, char **argv)
 	struct viol *viols = NULL;
 	int fd = -1, pfd = -1, i, rc = 1;
 	int p1_pass = 1, p2_checked = 0, p2_pass = 1, append = 0, size_pass = 1;
+	uint64_t append_writers = 1, holes = 0;
+	int mixed = 0, mixed_aligned = 0;
+	uint32_t mixed_step = 0;
+	struct mixed_ctx mc;
 	uint8_t *buf = NULL;
 	off_t fsize;
+
+	memset(&mc, 0, sizeof(mc));
 
 	for (i = 1; i < argc; i++) {
 		const char *a = argv[i];
@@ -313,6 +603,18 @@ int torner_check(int argc, char **argv)
 		else if (!strcmp(a, "--progress-limit")) { NEEDV(); prog_limit = strtoull(v, NULL, 0); }
 		else if (!strcmp(a, "--focus-file")) { NEEDV(); focus_path = v; }
 		else if (!strcmp(a, "--append"))       { append = 1; }
+		else if (!strcmp(a, "--append-writers")) { NEEDV(); append_writers = strtoull(v, NULL, 0); }
+		else if (!strcmp(a, "--mixed-step"))   { NEEDV(); mixed_step = strtoul(v, NULL, 0); }
+		else if (!strcmp(a, "--mixed")) {
+			NEEDV();
+			mixed = 1;
+			if (!strcmp(v, "aligned"))
+				mixed_aligned = 1;
+			else if (strcmp(v, "chain")) {
+				fprintf(stderr, "torner check: bad --mixed '%s'\n", v);
+				return 1;
+			}
+		}
 		else if (!strcmp(a, "--tier"))         { NEEDV(); tier = v; }
 		else if (!strcmp(a, "--config"))       { NEEDV(); config = v; }
 		else if (!strcmp(a, "--workload"))     { NEEDV(); workload = v; }
@@ -342,6 +644,28 @@ int torner_check(int argc, char **argv)
 	spu = unit / sector;
 	if (!batch)
 		batch = 1;
+	if (!append_writers)
+		append_writers = 1;
+	if (mixed) {
+		const char *why;
+
+		if (append) {
+			fprintf(stderr, "torner check: --mixed has its own size rule; not with --append\n");
+			return 1;
+		}
+		mc.m.aligned = mixed_aligned;
+		mc.m.unit = unit;
+		mc.m.sector = sector;
+		mc.m.step = mixed_step ? mixed_step : unit / 2;
+		why = torner_mixed_bad(&mc.m);
+		if (*why) {
+			fprintf(stderr, "torner check: %s\n", why);
+			return 1;
+		}
+	} else if (mixed_aligned || mixed_step) {
+		fprintf(stderr, "torner check: --mixed-step needs --mixed\n");
+		return 1;
+	}
 
 	torner_crc32_init();
 
@@ -371,6 +695,51 @@ int torner_check(int argc, char **argv)
 	if (!viols || !filever || !filestate || !buf) {
 		fprintf(stderr, "torner check: out of memory\n");
 		goto out;
+	}
+
+	/* ---- P1, mixed: per write (the unit loop below then has nothing to do) ---- */
+	if (mixed) {
+		uint64_t k;
+
+		npages = 0;
+		mc.fsize = (uint64_t)fsize;
+		mc.nsec = (uint64_t)fsize / sector;	/* a cut sector counts as past EOF */
+		if (mixed_scan(&mc, fd, run_id)) {
+			fprintf(stderr, "torner check: read: %s\n", strerror(errno ? errno : EIO));
+			goto out;
+		}
+		mixed_judge(&mc);
+		if (!mc.wst || !mc.wkind) {
+			fprintf(stderr, "torner check: out of memory\n");
+			goto out;
+		}
+		pages_seen = mc.nw - mc.n_after;
+		pages_intact = mc.n_new;
+		pages_absent = mc.n_old + mc.n_absent;
+		n_p1 = mc.n_torn;
+		n_size = mc.n_size;
+		p1_pass = !n_p1;
+		size_pass = !n_size;
+		for (k = 0; k < mc.nw && nviol < max_viol; k++) {
+			static const char *const pk[] = {
+				[MK_TORN_OLDER] = "p1_mixed_torn_older",
+				[MK_TORN_BLANK] = "p1_mixed_torn_blank",
+				[MK_TORN_EOF]   = "p1_mixed_torn_eof",
+				[MK_SIZE_CUT]   = "p1_size_cut_unit",
+				[MK_SIZE_BLANK] = "p1_size_blank_unit",
+				[MK_CORRUPT]    = "p1_sector_corrupt",
+			};
+
+			if (mc.wst[k] != MW_TORN)
+				continue;
+			viols[nviol].kind = pk[mc.wkind[k]];
+			viols[nviol].page_id = k;
+			if (mc.wkind[k] == MK_SIZE_CUT || mc.wkind[k] == MK_SIZE_BLANK)
+				viols[nviol].eof = mc.fsize;
+			if (mc.wkind[k] == MK_CORRUPT)
+				viols[nviol].detail = mixed_corrupt_detail(&mc, k);
+			nviol++;
+		}
 	}
 
 	/* ---- P1 ---- */
@@ -406,6 +775,17 @@ int torner_check(int argc, char **argv)
 			case PAGE_ABSENT:
 				if (!append) {
 					pages_absent++;
+					break;
+				}
+				/*
+				 * Several writers: a unit below EOF may still be
+				 * blank because its writer was copying when another
+				 * moved EOF past it.  Not the last unit: only its
+				 * own write ends there.
+				 */
+				if (append_writers > 1 && pid + 1 < npages) {
+					pages_absent++;
+					holes++;
 					break;
 				}
 				/* the size reached the disk, the data did not */
@@ -496,12 +876,26 @@ int torner_check(int argc, char **argv)
 				continue;
 			prog_considered++;
 
-			if (r.page_id >= npages ||
-			    filestate[r.page_id] != PAGE_INTACT ||
-			    filever[r.page_id] < r.version) {
+			if (mixed ? (r.page_id >= mc.nw || mc.wst[r.page_id] != MW_NEW)
+				  : (r.page_id >= npages ||
+				     filestate[r.page_id] != PAGE_INTACT ||
+				     filever[r.page_id] < r.version)) {
 				p2_pass = 0;
 				n_p2++;
-				if (nviol < max_viol) {
+				if (nviol < max_viol && mixed) {
+					uint8_t w = (r.page_id < mc.nw) ? mc.wst[r.page_id]
+									: MW_ABSENT;
+
+					viols[nviol].kind = "p2_lost_durable_write";
+					viols[nviol].page_id = r.page_id;
+					viols[nviol].want = r.version;
+					viols[nviol].got = 0;
+					viols[nviol].detail =
+						(r.page_id >= mc.nw) ? "beyond_eof" :
+						(w == MW_TORN) ? "write_torn" :
+						(w == MW_OLD) ? "rolled_back" : "absent";
+					nviol++;
+				} else if (nviol < max_viol) {
 					viols[nviol].kind = "p2_lost_durable_write";
 					viols[nviol].page_id = r.page_id;
 					viols[nviol].want = r.version;
@@ -542,16 +936,28 @@ int torner_check(int argc, char **argv)
 	       ",\"p3\":\"n/a\",\"p4\":\"n/a\"}",
 	       p1_pass ? "pass" : "fail",
 	       !p2_checked ? "n/a" : (p2_pass ? "pass" : "fail"),
-	       !append ? "n/a" : (size_pass ? "pass" : "fail"));
+	       !(append || mixed) ? "n/a" : (size_pass ? "pass" : "fail"));
 	printf(",\"stats\":{\"pages\":%" PRIu64 ",\"intact\":%" PRIu64
 	       ",\"absent\":%" PRIu64 ",\"p1_violations\":%" PRIu64
 	       ",\"size_violations\":%" PRIu64 ",\"eof\":%" PRIu64
 	       ",\"p2_violations\":%" PRIu64
 	       ",\"progress_considered\":%" PRIu64
 	       ",\"progress_beyond_limit\":%" PRIu64
-	       ",\"progress_limit\":%" PRIu64 "}",
+	       ",\"progress_limit\":%" PRIu64 ",\"holes_below_eof\":%" PRIu64 "}",
 	       pages_seen, pages_intact, pages_absent, n_p1, n_size,
-	       (uint64_t)fsize, n_p2, prog_considered, prog_skipped, prog_limit);
+	       (uint64_t)fsize, n_p2, prog_considered, prog_skipped, prog_limit,
+	       holes);
+	if (mixed)
+		printf(",\"mixed\":{\"layout\":\"%s\",\"step\":%u,\"writes\":%" PRIu64
+		       ",\"new\":%" PRIu64 ",\"old\":%" PRIu64 ",\"absent\":%" PRIu64
+		       ",\"torn\":%" PRIu64 ",\"after_eof\":%" PRIu64
+		       ",\"eof_write\":%lld,\"eof_exact\":%s"
+		       ",\"order_gaps\":%" PRIu64 "}",
+		       mc.m.aligned ? "aligned" : "chain",
+		       mc.m.aligned ? 0 : mc.m.step, mc.nw, mc.n_new, mc.n_old,
+		       mc.n_absent, mc.n_torn, mc.n_after,
+		       mc.eof_has ? (long long)mc.eof_k : -1LL,
+		       mc.eof_has && mc.eof_exact ? "true" : "false", mc.order_gaps);
 
 	printf(",\"violations\":[");
 	for (p = 0; p < nviol; p++) {
@@ -572,14 +978,17 @@ int torner_check(int argc, char **argv)
 	printf("]");
 	if (nviol < n_p1 + n_p2)
 		printf(",\"violations_truncated\":%" PRIu64, n_p1 + n_p2 - nviol);
-	if (focus_path)
+	if (focus_path && mixed)
+		report_focus_mixed(&mc, fv, fn);
+	else if (focus_path)
 		report_focus(fd, unit, sector, spu, npages, (uint64_t)fsize, append,
-			     run_id, fv, fn);
+			     append_writers, run_id, fv, fn);
 	printf("}\n");
 
 	rc = (p1_pass && p2_pass) ? 0 : 2;
 
 out:
+	mixed_free(&mc);
 	free(fv);
 	free(viols);
 	free(filever);
@@ -610,7 +1019,102 @@ static void tear_usage(void)
 "  --kind bitflip   flip one bit in the first sector's body\n"
 "  --kind cut       truncate the file n sectors into the page (EOF cuts it:\n"
 "                   torn under check --append)\n"
-"  --sectors <n>    how many leading sectors to damage         [1]\n");
+"  --sectors <n>    how many leading sectors to damage         [1]\n"
+"\n"
+"  mixed mode: --mixed chain|aligned [--mixed-step <b>] --write <k> instead of\n"
+"  --page, and the damage lands on write k's sectors:\n"
+"  --kind older     each sector as the next older write covering it left it\n"
+"                   (blank where none does): that part of write k never landed\n"
+"  --kind blank | bitflip   as above\n"
+"  --kind cut       truncate the file n sectors into write k\n"
+"  --from-end       damage write k's last n sectors instead of its first\n");
+}
+
+/* torner tear for gen --mode mixed: see tear_usage */
+static int tear_mixed(const char *path, const struct torner_mixed *m,
+		      uint64_t k, uint32_t n, int from_end, const char *kind)
+{
+	uint64_t off, first, s;
+	uint32_t len, nsec;
+	uint8_t *sec = NULL;
+	int fd, rc = 1;
+
+	torner_mixed_range(m, k, &off, &len);
+	nsec = len / m->sector;
+	if (!n || n > nsec)
+		n = 1;
+	first = from_end ? nsec - n : 0;
+
+	fd = open(path, O_RDWR);
+	if (fd < 0) {
+		fprintf(stderr, "torner tear: open %s: %s\n", path, strerror(errno));
+		return 1;
+	}
+	if (!strcmp(kind, "cut")) {
+		if (ftruncate(fd, (off_t)(off + (first + (from_end ? 0 : n)) * m->sector)) ||
+		    fsync(fd)) {
+			fprintf(stderr, "torner tear: truncate: %s\n", strerror(errno));
+			goto out;
+		}
+		printf("cut write %" PRIu64 ": EOF %s\n", k, from_end ?
+		       "before its last sectors" : "after its first sectors");
+		rc = 0;
+		goto out;
+	}
+	sec = malloc(m->sector);
+	if (!sec)
+		goto out;
+	for (s = first; s < first + n; s++) {
+		uint64_t o = off + s * m->sector, ks[TORNER_MIXED_MAX_COVER];
+		uint32_t idx[TORNER_MIXED_MAX_COVER];
+		int nc, c, older = -1;
+
+		if (read_all(fd, sec, m->sector, (off_t)o) != (int)m->sector) {
+			fprintf(stderr, "torner tear: short read at %" PRIu64 "\n", o);
+			goto out;
+		}
+		if (!strcmp(kind, "blank")) {
+			memset(sec, 0, m->sector);
+		} else if (!strcmp(kind, "bitflip")) {
+			sec[sizeof(struct torner_sector_hdr) + 7] ^= 0x10;
+		} else if (!strcmp(kind, "older")) {
+			struct torner_sector_hdr h;
+			uint64_t ooff;
+			uint32_t olen;
+
+			memcpy(&h, sec, sizeof(h));
+			nc = torner_mixed_cover(m, o, ks, idx, TORNER_MIXED_MAX_COVER);
+			for (c = 0; c < nc; c++)
+				if (ks[c] < k)
+					older = c;	/* the newest of the older ones */
+			if (older < 0) {
+				memset(sec, 0, m->sector);
+			} else {
+				torner_mixed_range(m, ks[older], &ooff, &olen);
+				torner_build_sector(sec, m->sector, ks[older], 1,
+						    idx[older], olen / m->sector,
+						    h.seq, h.tid, h.run_id);
+			}
+		} else {
+			fprintf(stderr, "torner tear: kind %s is not for --mixed\n", kind);
+			goto out;
+		}
+		if (pwrite(fd, sec, m->sector, (off_t)o) != (ssize_t)m->sector) {
+			fprintf(stderr, "torner tear: write: %s\n", strerror(errno));
+			goto out;
+		}
+	}
+	if (fsync(fd)) {
+		fprintf(stderr, "torner tear: fsync: %s\n", strerror(errno));
+		goto out;
+	}
+	printf("torn write %" PRIu64 ": %u sector(s) from its %s, kind=%s\n",
+	       k, n, from_end ? "end" : "start", kind);
+	rc = 0;
+out:
+	free(sec);
+	close(fd);
+	return rc;
 }
 
 int torner_tear(int argc, char **argv)
@@ -619,6 +1123,8 @@ int torner_tear(int argc, char **argv)
 	uint32_t unit = TORNER_DEF_UNIT, sector = TORNER_DEF_SECTOR, spu, n = 1, s;
 	uint64_t page = 0;
 	int fd = -1, i, rc = 1, have_page = 0;
+	int mixed = 0, from_end = 0;
+	struct torner_mixed m = { 0 };
 	uint8_t *buf = NULL;
 	struct torner_sector_hdr h;
 
@@ -633,6 +1139,10 @@ int torner_tear(int argc, char **argv)
 		else if (!strcmp(a, "--kind"))    { NEEDV(); kind = v; }
 		else if (!strcmp(a, "--unit"))    { NEEDV(); unit = strtoul(v, NULL, 0); }
 		else if (!strcmp(a, "--sector"))  { NEEDV(); sector = strtoul(v, NULL, 0); }
+		else if (!strcmp(a, "--write"))   { NEEDV(); page = strtoull(v, NULL, 0); have_page = 1; }
+		else if (!strcmp(a, "--from-end")) { from_end = 1; }
+		else if (!strcmp(a, "--mixed-step")) { NEEDV(); m.step = strtoul(v, NULL, 0); }
+		else if (!strcmp(a, "--mixed"))   { NEEDV(); mixed = 1; m.aligned = !strcmp(v, "aligned"); }
 		else if (!strcmp(a, "-h") || !strcmp(a, "--help")) { tear_usage(); return 0; }
 		else { tear_usage(); return 1; }
 #undef NEEDV
@@ -646,10 +1156,23 @@ int torner_tear(int argc, char **argv)
 		return 1;
 	}
 	spu = unit / sector;
+	torner_crc32_init();
+	if (mixed) {
+		const char *why;
+
+		m.unit = unit;
+		m.sector = sector;
+		if (!m.step)
+			m.step = unit / 2;
+		why = torner_mixed_bad(&m);
+		if (*why) {
+			fprintf(stderr, "torner tear: %s\n", why);
+			return 1;
+		}
+		return tear_mixed(path, &m, page, n, from_end, kind);
+	}
 	if (!n || n > spu)
 		n = 1;
-
-	torner_crc32_init();
 
 	fd = open(path, O_RDWR);
 	if (fd < 0) {

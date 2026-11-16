@@ -32,6 +32,7 @@ install: $(BIN)
 
 test: $(BIN)
 	./tests/selftest.sh
+	./tests/mixed_test.sh
 	./tests/loginv_test.sh
 	./tests/replay_test.sh
 	./tests/atoms_test.sh

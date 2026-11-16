@@ -74,6 +74,11 @@ struct gen_cfg {
 	uint32_t writeback_ms;		/* interferer: start writeback of target */
 	int prog_direct;
 	int quiet;
+	int mixed_aligned;		/* --mixed aligned (else chain) */
+	uint32_t mixed_step;		/* chain: bytes between writes [unit/2] */
+	int drop_cache;			/* drop the file's cache after setup */
+	int preread;			/* ... and read each write's range 4 KiB at a time first */
+	const char *trace_marker;	/* tracefs trace_marker: begin/end of the workload */
 };
 
 struct gen_shared {
@@ -90,6 +95,11 @@ struct gen_shared {
 	atomic_ullong next_mark;	/* seq at which to emit the next mark */
 	atomic_int stop;
 	struct timespec t0;
+	struct torner_mixed mix;	/* MIXED: the chain's geometry */
+	pthread_mutex_t mix_lock;	/* MIXED: claim + pwrite, in chain order */
+	uint64_t next_write;		/* MIXED: under mix_lock */
+	atomic_ullong prereads;		/* 4 KiB reads done by --preread */
+	int tmfd;			/* --trace-marker, or -1 */
 };
 
 /*
@@ -225,12 +235,77 @@ static inline uint64_t splitmix(uint64_t *s)
 	return z ^ (z >> 31);
 }
 
+/*
+ * --preread: read the range a write is about to cover, 4 KiB at a time, so the
+ * page cache holds it as order-0 folios (the fd is FADV_RANDOM: no readahead,
+ * which would allocate larger ones).  A write then spans several folios, and
+ * writeback -- another writer's fsync(), the flusher -- can take some of them
+ * without the rest.  Past EOF a read finds nothing and caches nothing.
+ */
+static int preread_range(struct gen_shared *sh, uint8_t *buf, uint64_t off,
+			 uint32_t len)
+{
+	uint64_t o, n = 0;
+
+	for (o = off; o < off + len; o += 4096) {
+		ssize_t r;
+
+		do {
+			r = pread(sh->fd, buf, 4096, (off_t)o);
+		} while (r < 0 && errno == EINTR);
+		if (r < 0)
+			return -1;
+		n++;
+	}
+	atomic_fetch_add(&sh->prereads, n);
+	return 0;
+}
+
+/*
+ * MIXED: claim the next write of the chain and write it, in chain order.  Write
+ * k overlaps write k-1, so two writers on neighbours would leave the overlap to
+ * whoever came last -- the claim and the pwrite() are one critical section.  The
+ * fsync()s run outside it, side by side: that is what N writers add, another
+ * writer's fsync() catching this write halfway through its copy.
+ * Returns 0 written, 1 the chain is done, -1 error (errno).
+ */
+static int mixed_write(struct gen_thread *t, uint8_t *buf, uint8_t *rbuf,
+		       uint64_t *page, uint64_t *seq)
+{
+	struct gen_shared *sh = t->sh;
+	const struct gen_cfg *c = &sh->cfg;
+	uint64_t k, off;
+	uint32_t len, nsec, s;
+	int rc = 0;
+
+	pthread_mutex_lock(&sh->mix_lock);
+	k = sh->next_write;
+	if (k >= c->pages || atomic_load(&sh->stop)) {
+		pthread_mutex_unlock(&sh->mix_lock);
+		return 1;
+	}
+	sh->next_write = k + 1;
+	torner_mixed_range(&sh->mix, k, &off, &len);
+	nsec = len / c->sector;
+	*seq = atomic_fetch_add(&sh->seq, 1);
+	for (s = 0; s < nsec; s++)
+		torner_build_sector(buf + (size_t)s * c->sector, c->sector,
+				    k, 1, s, nsec, *seq, t->tid, c->run_id);
+	if (c->preread && preread_range(sh, rbuf, off, len))
+		rc = -1;
+	else if (pwrite_all(sh->fd, buf, len, (off_t)off))
+		rc = -1;
+	pthread_mutex_unlock(&sh->mix_lock);
+	*page = k;
+	return rc;
+}
+
 static void *gen_worker(void *arg)
 {
 	struct gen_thread *t = arg;
 	struct gen_shared *sh = t->sh;
 	const struct gen_cfg *c = &sh->cfg;
-	uint8_t *unit = NULL, *rec = NULL;
+	uint8_t *unit = NULL, *rec = NULL, *rbuf = NULL;
 	uint64_t pending_lo = 0, pending_n = 0;
 	uint64_t *pend_page = NULL, *pend_ver = NULL, *pend_seq = NULL;
 	uint64_t since_sync = 0;
@@ -240,7 +315,8 @@ static void *gen_worker(void *arg)
 			  c->mode != TORNER_MODE_MIXED);
 
 	if (posix_memalign((void **)&unit, 4096, c->unit) ||
-	    posix_memalign((void **)&rec, 4096, TORNER_PROG_RECSZ)) {
+	    posix_memalign((void **)&rec, 4096, TORNER_PROG_RECSZ) ||
+	    posix_memalign((void **)&rbuf, 4096, 4096)) {
 		t->err = ENOMEM;
 		goto out;
 	}
@@ -258,8 +334,19 @@ static void *gen_worker(void *arg)
 	stride = coprime_stride(t->nowned ? t->nowned : 1, rnd | 1);
 
 	while (!atomic_load(&sh->stop)) {
-		uint64_t page, ver, seq, idx;
+		uint64_t page = 0, ver, seq = 0, idx;
 		uint32_t s;
+
+		if (c->mode == TORNER_MODE_MIXED) {
+			int r = mixed_write(t, unit, rbuf, &page, &seq);
+
+			if (r < 0)
+				t->err = errno;
+			if (r)
+				break;
+			ver = 1;
+			goto written;
+		}
 
 		if (c->mode == TORNER_MODE_APPEND) {
 			/*
@@ -298,11 +385,17 @@ static void *gen_worker(void *arg)
 					    c->sector, page, ver, s, sh->spu,
 					    seq, t->tid, c->run_id);
 
+		if (c->preread &&
+		    preread_range(sh, rbuf, (uint64_t)page * c->unit, c->unit)) {
+			t->err = errno;
+			break;
+		}
 		/* One atomic unit == one pwrite().  This is the thing under test. */
 		if (pwrite_all(sh->fd, unit, c->unit, (off_t)page * c->unit)) {
 			t->err = errno;
 			break;
 		}
+written:
 		t->writes++;
 
 		if (c->fsync_every) {
@@ -363,6 +456,7 @@ out:
 	atomic_fetch_add(&sh->fsyncs, t->fsyncs);
 	free(unit);
 	free(rec);
+	free(rbuf);
 	free(pend_page);
 	free(pend_ver);
 	free(pend_seq);
@@ -473,7 +567,8 @@ static int setup_file(struct gen_shared *sh)
 
 	switch (c->mode) {
 	case TORNER_MODE_APPEND:
-		/* starts empty; i_size grows as pages are claimed */
+	case TORNER_MODE_MIXED:
+		/* starts empty; i_size grows as pages (MIXED: writes) are claimed */
 		break;
 	case TORNER_MODE_DELALLOC:
 		/* sparse: allocation is delayed to writeback */
@@ -489,7 +584,6 @@ static int setup_file(struct gen_shared *sh)
 		}
 		break;
 	case TORNER_MODE_OVERWRITE:
-	case TORNER_MODE_MIXED:
 	default: {
 		/*
 		 * Lay down version 0 everywhere first, so the steady-state
@@ -528,6 +622,25 @@ static int setup_file(struct gen_shared *sh)
 		break;
 	}
 	}
+
+	/*
+	 * --drop-cache / --preread: the workload starts on a cold cache, so its
+	 * writes get folios of their own making rather than the prefill's (XFS:
+	 * a 16 KiB-aligned write into an uncached range gets one 16 KiB folio).
+	 * The prefill is clean by now (fsync above), so DONTNEED drops it.
+	 * --preread then fills each range 4 KiB at a time before the write, with
+	 * readahead off for this open file.
+	 */
+	if (c->drop_cache || c->preread) {
+		int e = posix_fadvise(sh->fd, 0, 0, POSIX_FADV_DONTNEED);
+
+		if (!e && c->preread)
+			e = posix_fadvise(sh->fd, 0, 0, POSIX_FADV_RANDOM);
+		if (e) {
+			fprintf(stderr, "torner gen: posix_fadvise: %s\n", strerror(e));
+			return -1;
+		}
+	}
 	return 0;
 
 etrunc:
@@ -556,6 +669,21 @@ static void usage(void)
 "                          actually engages (or mount -o tjournal_all)\n"
 "  --direct                open the target with O_DIRECT\n"
 "  --fdatasync             fdatasync() instead of fsync()\n"
+"\n"
+"  mixed mode (--mode mixed: --pages counts writes; the file starts empty):\n"
+"  --mixed chain           write k at k*step, unit bytes: half over write k-1,\n"
+"                          half past EOF                      [default]\n"
+"  --mixed aligned         unit/2 appended, then the unit rewritten whole over\n"
+"                          it and unit/2 more: no write crosses a unit boundary\n"
+"  --mixed-step <bytes>    chain: bytes between writes        [unit/2]\n"
+"\n"
+"  page cache (writeback can split a write only between folios):\n"
+"  --drop-cache            start the workload on a cold cache (the prefill\n"
+"                          dropped), so writes make their own folios\n"
+"  --preread               --drop-cache, readahead off, and each write's range\n"
+"                          read 4 KiB at a time first: order-0 folios\n"
+"  --trace-marker <path>   tracefs trace_marker: \"torner:begin\" / \"torner:end\"\n"
+"                          around the workload\n"
 "\n"
 "  interference, run on the side while the writers work (0 = off):\n"
 "  --sync-ms <n>           sync() every n ms\n"
@@ -618,7 +746,19 @@ int torner_gen(int argc, char **argv)
 		else if (!strcmp(a, "--writeback-ms")) { NEEDV(); c->writeback_ms = strtoul(v, NULL, 0); }
 		else if (!strcmp(a, "--progress-direct")) { c->prog_direct = 1; }
 		else if (!strcmp(a, "--quiet"))        { c->quiet = 1; }
-		else if (!strcmp(a, "--mode")) {
+		else if (!strcmp(a, "--mixed-step"))   { NEEDV(); c->mixed_step = strtoul(v, NULL, 0); }
+		else if (!strcmp(a, "--drop-cache"))   { c->drop_cache = 1; }
+		else if (!strcmp(a, "--preread"))      { c->preread = 1; }
+		else if (!strcmp(a, "--trace-marker")) { NEEDV(); c->trace_marker = v; }
+		else if (!strcmp(a, "--mixed")) {
+			NEEDV();
+			if (!strcmp(v, "aligned"))
+				c->mixed_aligned = 1;
+			else if (strcmp(v, "chain")) {
+				fprintf(stderr, "torner gen: bad --mixed '%s'\n", v);
+				return 1;
+			}
+		} else if (!strcmp(a, "--mode")) {
 			NEEDV();
 			if (torner_mode_parse(v, &c->mode)) {
 				fprintf(stderr, "torner gen: bad mode '%s'\n", v);
@@ -664,6 +804,37 @@ int torner_gen(int argc, char **argv)
 		fprintf(stderr, "torner gen: overwrite mode needs --duration > 0\n");
 		return 1;
 	}
+	if (c->mode == TORNER_MODE_MIXED) {
+		const char *why;
+
+		sh.mix.aligned = c->mixed_aligned;
+		sh.mix.unit = c->unit;
+		sh.mix.sector = c->sector;
+		sh.mix.step = c->mixed_step ? c->mixed_step : c->unit / 2;
+		c->mixed_step = sh.mix.aligned ? 0 : sh.mix.step;
+		why = torner_mixed_bad(&sh.mix);
+		if (*why) {
+			fprintf(stderr, "torner gen: %s\n", why);
+			return 1;
+		}
+	} else if (c->mixed_aligned || c->mixed_step) {
+		fprintf(stderr, "torner gen: --mixed and --mixed-step need --mode mixed\n");
+		return 1;
+	}
+	if (c->preread && c->direct) {
+		fprintf(stderr, "torner gen: --preread fills the page cache; not with --direct\n");
+		return 1;
+	}
+	pthread_mutex_init(&sh.mix_lock, NULL);
+	sh.tmfd = -1;
+	if (c->trace_marker) {
+		sh.tmfd = open(c->trace_marker, O_WRONLY);
+		if (sh.tmfd < 0) {
+			fprintf(stderr, "torner gen: open %s: %s\n",
+				c->trace_marker, strerror(errno));
+			return 1;
+		}
+	}
 	if (!c->run_id) {
 		struct timespec now;
 
@@ -704,6 +875,8 @@ int torner_gen(int argc, char **argv)
 	 */
 	if (c->mark_dev)
 		dm_mark(c->mark_dev, "torner:begin");
+	if (sh.tmfd >= 0 && write(sh.tmfd, "torner:begin\n", 13) < 0)
+		fprintf(stderr, "torner gen: trace marker: %s\n", strerror(errno));
 
 	atomic_store(&sh.seq, 1);
 	atomic_store(&sh.next_mark, c->mark_every);
@@ -765,6 +938,8 @@ out_stop:
 			pthread_join(itf[i].th, NULL);
 	if (c->mark_dev)
 		dm_mark(c->mark_dev, "torner:end");
+	if (sh.tmfd >= 0 && write(sh.tmfd, "torner:end\n", 11) < 0)
+		fprintf(stderr, "torner gen: trace marker: %s\n", strerror(errno));
 
 	secs = elapsed_s(&sh.t0);
 	rc = start_failed;
@@ -792,6 +967,8 @@ out_stop:
 		       ",\"interference\":{\"sync_ms\":%u,\"syncs\":%" PRIu64
 		       ",\"other_fsync_ms\":%u,\"other_fsyncs\":%" PRIu64
 		       ",\"writeback_ms\":%u,\"writebacks\":%" PRIu64 "}"
+		       ",\"mixed\":\"%s\",\"mixed_step\":%u"
+		       ",\"drop_cache\":%s,\"preread\":%s,\"prereads\":%llu"
 		       ",\"elapsed_ms\":%.0f}\n",
 		       c->run_id, torner_mode_name(c->mode),
 		       c->untorn ? "true" : "false", c->threads,
@@ -805,6 +982,12 @@ out_stop:
 		       c->sync_ms, itf[IF_SYNC].count,
 		       c->other_fsync_ms, itf[IF_OTHER_FSYNC].count,
 		       c->writeback_ms, itf[IF_WRITEBACK].count,
+		       c->mode != TORNER_MODE_MIXED ? "" :
+				c->mixed_aligned ? "aligned" : "chain",
+		       c->mixed_step,
+		       (c->drop_cache || c->preread) ? "true" : "false",
+		       c->preread ? "true" : "false",
+		       (unsigned long long)atomic_load(&sh.prereads),
 		       secs * 1000.0);
 	}
 
@@ -818,5 +1001,7 @@ out:
 		close(sh.fd);
 	if (sh.progfd >= 0)
 		close(sh.progfd);
+	if (sh.tmfd >= 0)
+		close(sh.tmfd);
 	return rc;
 }

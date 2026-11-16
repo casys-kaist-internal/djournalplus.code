@@ -25,6 +25,18 @@
 #   TORNER_TAU_MKFS_OPTS the tau journal's mkfs options (fsmap.sh)
 #   TORNER_RESERVE_MB    guest memory held back as 2 MiB hugepages while gen
 #                        runs, so that reclaim runs and asks the tau shrinker
+#   TORNER_GEN_SYSCTL    "name=value[,name=value]" set right before gen and put
+#                        back right after (vm.dirty_bytes=8192,...: a writer then
+#                        sleeps in the middle of its write while the flusher
+#                        takes what it has copied).  vm.dirty_bytes and
+#                        vm.dirty_ratio replace each other; both pairs come back
+#                        as they were.
+#   TORNER_TRACE [1]     count, while gen's workload runs (between its trace
+#                        markers), the target file's new page cache folios by
+#                        order and the times a gen thread was throttled for dirty
+#                        pages (scripts/gen_trace.py): gen-trace.json, and
+#                        folio_orders / dirty_pauses in capture.json -- what
+#                        shows a condition was made.  Not for ZFS (no page cache).
 # capture.json records the unmount sync, the mkfs options, the kernel command
 # line and the tau module's parameters, and how often reclaim called the tau
 # shrinker during gen (its count and scan callbacks, the function profiler).
@@ -114,8 +126,39 @@ done
 die() { echo "capture.sh: $*" >&2; exit 1; }
 say() { echo "[capture] $*" >&2; }
 
-TR=/sys/kernel/tracing; SHRINK=""; RESERVED=0
+TR=/sys/kernel/tracing; SHRINK=""; RESERVED=0; SYSCTL_UNDO=""; TI=""
+# "name=value ..." -> /proc/sys
+sysctl_set() {
+	local kv k
+	for kv in $1; do
+		k=${kv%%=*}
+		echo "${kv#*=}" > "/proc/sys/${k//.//}" || return 1
+	done
+}
+# what puts TORNER_GEN_SYSCTL's names back; a dirty pair comes back by whichever
+# of its two was in force (writing one zeroes the other)
+sysctl_save() {
+	local kv k u="" b r
+	for kv in ${1//,/ }; do
+		k=${kv%%=*}
+		[ -w "/proc/sys/${k//.//}" ] || { echo "no sysctl $k" >&2; return 1; }
+		case $k in
+		vm.dirty_bytes|vm.dirty_ratio)
+			b=$(cat /proc/sys/vm/dirty_bytes); r=$(cat /proc/sys/vm/dirty_ratio)
+			[ "$b" != 0 ] && u="$u vm.dirty_bytes=$b" || u="$u vm.dirty_ratio=$r" ;;
+		vm.dirty_background_bytes|vm.dirty_background_ratio)
+			b=$(cat /proc/sys/vm/dirty_background_bytes)
+			r=$(cat /proc/sys/vm/dirty_background_ratio)
+			[ "$b" != 0 ] && u="$u vm.dirty_background_bytes=$b" ||
+				u="$u vm.dirty_background_ratio=$r" ;;
+		*) u="$u $k=$(cat "/proc/sys/${k//.//}")" ;;
+		esac
+	done
+	echo "$u"
+}
 cleanup() {
+	[ -z "$SYSCTL_UNDO" ] || sysctl_set "$SYSCTL_UNDO"
+	[ -z "$TI" ] || { echo 0 > "$TI/tracing_on"; rmdir "$TI" 2>/dev/null; }
 	[ "$RESERVED" = 0 ] || echo 0 > /proc/sys/vm/nr_hugepages
 	[ -z "$SHRINK" ] || { echo 0 > $TR/function_profile_enabled; echo > $TR/set_ftrace_filter; }
 	[ "$KEEP_STACK" = 1 ] && return
@@ -244,13 +287,54 @@ if [ "${TORNER_RESERVE_MB:-0}" -gt 0 ]; then
 	say "holding back $RESERVED of $TORNER_RESERVE_MB MiB as hugepages while gen runs:" \
 		"MemAvailable $(awk '/^MemAvailable/ {print int($2 / 1024)}' /proc/meminfo) MiB"
 fi
+# the trace: a tracefs instance of its own, so the function profile is left alone
+TMARK=""
+if [ "${TORNER_TRACE:-1}" = 1 ] && ! fs_is_zfs "$FS"; then
+	[ -d $TR/instances ] || mount -t tracefs nodev $TR 2>/dev/null
+	TI=$TR/instances/torner-$$
+	if mkdir "$TI" 2>/dev/null; then
+		if echo 16384 > "$TI/buffer_size_kb" &&
+		   echo 1 > "$TI/events/filemap/mm_filemap_add_to_page_cache/enable" &&
+		   echo 1 > "$TI/events/writeback/balance_dirty_pages/enable" &&
+		   echo 1 > "$TI/tracing_on"; then
+			TMARK="--trace-marker $TI/trace_marker"
+		else
+			say "no trace: an event is missing"; rmdir "$TI"; TI=""
+		fi
+	else
+		say "no trace: no tracefs instance"; TI=""
+	fi
+fi
+GEN_SYSCTL=""
+if [ -n "${TORNER_GEN_SYSCTL:-}" ]; then
+	SYSCTL_UNDO=$(sysctl_save "$TORNER_GEN_SYSCTL") || die "TORNER_GEN_SYSCTL: $TORNER_GEN_SYSCTL"
+	GEN_SYSCTL=${TORNER_GEN_SYSCTL//,/ }
+	sysctl_set "$GEN_SYSCTL" || die "cannot set $GEN_SYSCTL"
+	say "while gen runs: $GEN_SYSCTL (then back to$SYSCTL_UNDO)"
+fi
 GEN_JSON=$("$TORNER" gen --file "$MNT/torner.dat" --progress-log "$LOOP_PROG" \
 	--progress-direct --run-id "$RUN_ID" --mode "$MODE" --threads "$THREADS" \
 	--pages "$PAGES" --unit "$UNIT" --duration "$DURATION" \
 	--fsync-every "$FSYNC_EVERY" \
-	--mark-dev "$DM_NAME" --mark-every "$MARK_EVERY" $UNTORN $GEN_ARGS) \
+	--mark-dev "$DM_NAME" --mark-every "$MARK_EVERY" $UNTORN $TMARK $GEN_ARGS) \
 	|| die "torner gen failed"
+[ -z "$SYSCTL_UNDO" ] || { sysctl_set "$SYSCTL_UNDO"; SYSCTL_UNDO=""; }
 echo "$GEN_JSON"
+echo "$GEN_JSON" > "$WORKDIR/gen.json"
+FOLIO_ORDERS=""; DIRTY_PAUSES=""; TRACE_LOST=""
+if [ -n "$TI" ]; then
+	echo 0 > "$TI/tracing_on"
+	TRACE_LOST=$(cat "$TI"/per_cpu/cpu*/stats 2>/dev/null | awk '/^overrun:/ {n += $2} END {print n + 0}')
+	# major:minor and inode of the target, as the folio event prints them
+	read -r TMAJ TMIN TINO < <(stat -c '%Hd %Ld %i' "$MNT/torner.dat")
+	python3 "$HERE/gen_trace.py" "$TI/trace" "$TMAJ:$TMIN" "$TINO" "$TRACE_LOST" \
+		> "$WORKDIR/gen-trace.json"
+	rmdir "$TI" 2>/dev/null; TI=""
+	FOLIO_ORDERS=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(" ".join("%s:%d" % kv for kv in d["folio_orders"].items()))' "$WORKDIR/gen-trace.json")
+	DIRTY_PAUSES=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["dirty_pauses"])' "$WORKDIR/gen-trace.json")
+	say "during the workload: the file's new folios by order ${FOLIO_ORDERS:-none}," \
+		"gen throttled for dirty pages $DIRTY_PAUSES times, $TRACE_LOST trace events lost"
+fi
 [ "$RESERVED" = 0 ] || echo 0 > /proc/sys/vm/nr_hugepages
 SHRINK_COUNT=""; SHRINK_SCAN=""
 if [ -n "$SHRINK" ]; then
@@ -301,7 +385,8 @@ cat > "$WORKDIR/capture.json" <<EOF
  "unmount_sync":$UMOUNT_SYNC,"cmdline":"$(tr -d '"\\' < /proc/cmdline)",
  "tau_params":"${TAU_PARAMS% }","reserve_mb":$RESERVED,
  "shrink_count":"$SHRINK_COUNT","shrink_scan":"$SHRINK_SCAN",
- "gen_args":"$GEN_ARGS",
+ "gen_args":"$GEN_ARGS","gen_sysctl":"$GEN_SYSCTL",
+ "folio_orders":"$FOLIO_ORDERS","dirty_pauses":"$DIRTY_PAUSES","trace_lost":"$TRACE_LOST",
  "duration_s":$DURATION,"fsync_every":$FSYNC_EVERY,"run_id":$RUN_ID,
  "dev_size":"$DEV_SIZE","write_cache":"$WC","file":"torner.dat",
  "base_is_zero":true,

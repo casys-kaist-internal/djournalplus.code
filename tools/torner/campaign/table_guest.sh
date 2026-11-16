@@ -4,7 +4,7 @@
 # `torner gen` under dm-log-writes, explore the capture with the row's
 # strategies, and add one line to table.csv (cell_csv.py).
 #
-#   CELLS     "ext4:ow16k tau-xfs:ap2k ..."      rows: see row_args below
+#   CELLS     "ext4:ow16k tau-xfs:ap2k mx16k-t4-pr ..."   rows: see row_args below
 #   PROFILES  "quiet busy"    busy = commits and writeback from outside the write
 #   LIMIT_ATOM, LIMIT_EPOCH   states per strategy (atom-*, prefix/single-drop)
 #   PREFER_SPLIT=1   atom-* spend the budget on split writes first (witnesses)
@@ -68,10 +68,61 @@ row_args() {
 	owfull)     echo "--mode overwrite --unit 16384 --dev-size 512M --log-size 3G --pages 24000" ;;
 	owfull-f16) echo "--mode overwrite --unit 16384 --dev-size 512M --log-size 3G --pages 24000 --fsync-every 16" ;;
 	owfull-t4)  echo "--mode overwrite --unit 16384 --dev-size 512M --log-size 3G --pages 24000 --threads 4 --fsync-every 16" ;;
-	*) return 1 ;;
+	*) row_parse "$1" && echo "$RP_ARGS" ;;
 	esac
 }
-row_gen() { case "$1" in ap2k) echo "--sector 512" ;; esac; }
+row_gen() {
+	case "$1" in
+	ap2k) echo "--sector 512" ;;
+	ow4k|ow16k|ap4k|ap16k|prealloc|hole|owfull*) ;;
+	*) row_parse "$1" && echo "$RP_GEN" ;;
+	esac
+}
+# The redesign's rows (11-16): <base>[-<mod>]..., each piece a condition.
+#   base  ow<K>k overwrite, ap<K>k append, pa<K>k into fallocate()d space,
+#         ho<K>k into a hole, mx<K>k mixed chain (each write half over the last
+#         one, half an append), ma<K>k mixed aligned (no write crosses a unit)
+#   mods  t<N>   N writers on the file (each its own units; mixed: one chain,
+#                written in order, fsync()s side by side)
+#         f<N>   an fsync every N writes (a writer's own)
+#         pr     the range read 4 KiB at a time before each write (order-0
+#                folios; gen --preread, which starts on a cold cache)
+#         dc     a cold cache only: writes make their own folios (gen --drop-cache)
+#         dl<K>  vm.dirty_bytes K KiB [16], background half that, while gen runs
+#         mp<M>  M MiB of guest memory held back as hugepages while gen runs
+# e.g. ho16k-t4-pr, mx16k-t4-dl8, ow8k-t4-pr-dl.  Sets RP_ARGS (capture.sh),
+# RP_GEN (torner gen), RP_SYSCTL, RP_RESERVE; returns 1 for a name it cannot read.
+row_parse() {
+	local base=${1%%-*} rest m k
+	RP_ARGS=""; RP_GEN=""; RP_SYSCTL=""; RP_RESERVE=""
+	k=$(sed -n 's/^[a-z][a-z]\([0-9][0-9]*\)k$/\1/p' <<< "$base")
+	[ -n "$k" ] || return 1
+	case $base in
+	ow*) RP_ARGS="--mode overwrite" ;;
+	ap*) RP_ARGS="--mode append" ;;
+	pa*) RP_ARGS="--mode alloc" ;;
+	ho*) RP_ARGS="--mode delalloc" ;;
+	mx*) RP_ARGS="--mode mixed"; RP_GEN="--mixed chain" ;;
+	ma*) RP_ARGS="--mode mixed"; RP_GEN="--mixed aligned" ;;
+	*) return 1 ;;
+	esac
+	RP_ARGS="$RP_ARGS --unit $((k * 1024))"
+	[ "$base" = "$1" ] && return 0
+	rest=${1#*-}
+	for m in ${rest//-/ }; do
+		case $m in
+		t[0-9]*) RP_ARGS="$RP_ARGS --threads ${m#t}" ;;
+		f[0-9]*) RP_ARGS="$RP_ARGS --fsync-every ${m#f}" ;;
+		pr) RP_GEN="$RP_GEN --preread" ;;
+		dc) RP_GEN="$RP_GEN --drop-cache" ;;
+		dl) RP_SYSCTL="vm.dirty_bytes=16384,vm.dirty_background_bytes=8192" ;;
+		dl[0-9]*) k=${m#dl}
+			RP_SYSCTL="vm.dirty_bytes=$((k * 1024)),vm.dirty_background_bytes=$((k * 512))" ;;
+		mp[0-9]*) RP_RESERVE=${m#mp} ;;
+		*) return 1 ;;
+		esac
+	done
+}
 # busy: another file's fsync commits the shared journal, sync() and writeback of
 # the target land in the middle of a write -- what tears data=journal (2026-09-23)
 profile_gen() {
@@ -94,7 +145,7 @@ strats_of() {
 }
 row_strats() {
 	case "$1" in
-	ap*) echo "atom-order atom-reorder atom-tear prefix single-drop" ;;
+	ap*|mx*|ma*) echo "atom-order atom-reorder atom-tear prefix single-drop" ;;
 	*)   echo "atom-order atom-reorder atom-tear prefix" ;;
 	esac
 }
@@ -154,12 +205,15 @@ for cell in $CELLS; do
 	tau-xfs)  path=/mnt/scratch/bin:$SYS; mkfs=${MKFS_OPTS:--l tjsegsize=$TAU_SEG} ;;
 	*)        path=/mnt/scratch/stock/bin:$SYS; mkfs="" ;;
 	esac
+	# a redesign row's sysctls and memory hold-back, for capture.sh
+	RP_SYSCTL=""; RP_RESERVE=""; row_parse $row 2>/dev/null
+	rsys=$RP_SYSCTL; rres=${RP_RESERVE:-$CAP_RESERVE_MB}
 	for prof in $PROFILES; do
 		gen="$(row_gen $row) $(profile_gen $prof)${GEN_EXTRA:+ $GEN_EXTRA}" ||
 			{ echo "unknown profile $prof"; continue; }
 		name=$fs-$row-$prof${TAG:+-$TAG}; D=$W/cap-$name
 		sudo rm -rf $D
-		echo "===== $name capture $(date +%T)${CAP_PARAM:+  $CAP_PARAM}${EXPLORE_PARAM:+  explore $EXPLORE_PARAM}${GEN_EXTRA:+  gen $GEN_EXTRA}$([ "$CAP_RESERVE_MB" -gt 0 ] && echo "  reserve ${CAP_RESERVE_MB} MiB")"
+		echo "===== $name capture $(date +%T)${CAP_PARAM:+  $CAP_PARAM}${EXPLORE_PARAM:+  explore $EXPLORE_PARAM}${GEN_EXTRA:+  gen $GEN_EXTRA}$([ "$rres" -gt 0 ] && echo "  reserve ${rres} MiB")${rsys:+  sysctl $rsys}"
 		undo=
 		if [ -n "$CAP_PARAM" ]; then
 			undo=$(setps "$CAP_PARAM") || { echo "cell skipped"; continue; }
@@ -168,7 +222,7 @@ for cell in $CELLS; do
 		case $fs in tau-*) probes_zero; probes_sample $W/$name-probe-samples.txt & spid=$! ;; esac
 		sudo env PATH=$path MKE2FS_CONFIG=$MK TORNER_TAU_MKFS_OPTS="$mkfs" \
 			CAPTURE_NOSYNC=$CAPTURE_NOSYNC TORNER_EXT4_LAZYINIT=$TORNER_EXT4_LAZYINIT \
-			TORNER_RESERVE_MB=$CAP_RESERVE_MB $S/capture.sh --workdir $D \
+			TORNER_RESERVE_MB=$rres TORNER_GEN_SYSCTL="$rsys" $S/capture.sh --workdir $D \
 			--fs $fs --threads 1 --fsync-every 1 $args --gen-args "$gen" \
 			> $W/$name-capture.log 2>&1
 		rc=$?
@@ -182,7 +236,7 @@ for cell in $CELLS; do
 		esac
 		[ -z "$undo" ] || setps "$undo" >/dev/null
 		echo "capture rc=$rc  $(grep -m1 -oE 'mkfs.ext4=[^ ]*|mkfs.xfs=[^ ]*' $D/capture.json 2>/dev/null)"
-		grep -E "application writes|tau shrinker during gen|holding back" $W/$name-capture.log
+		grep -E "application writes|tau shrinker during gen|holding back|while gen runs|during the workload" $W/$name-capture.log
 		[ $rc = 0 ] || continue
 		# what the cell is, for cell_csv.py run again later on the host
 		printf '{"row":"%s","profile":"%s","tag":"%s","cap_param":"%s","explore_param":"%s","gen_extra":"%s"}\n' \

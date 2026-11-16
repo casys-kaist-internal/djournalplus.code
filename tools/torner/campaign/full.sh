@@ -37,7 +37,10 @@ KB=$(cd "${2:?}" && pwd) || exit 1
 OUT=$(realpath -m "${3:?}")
 mkdir -p "$OUT" || exit 1
 exec > >(tee -a "$OUT/full.log") 2>&1
-ROWS="ow4k ow16k ap2k ap4k ap16k prealloc hole"
+# ROWS, PROFILES_ALL and the baseline queues' cells can be overridden (the 11-16
+# redesign's rows: table_guest.sh row_parse); the defaults are the §6.2 table's
+ROWS=${ROWS:-"ow4k ow16k ap2k ap4k ap16k prealloc hole"}
+PROFILES_ALL=${PROFILES_ALL:-"quiet busy"}
 cells() { local fs=$1 r c=""; shift; for r in ${*:-$ROWS}; do c="$c $fs:$r"; done; echo $c; }
 export MEM=${MEM:-10G}
 
@@ -47,7 +50,7 @@ CONTROLS=${CONTROLS:-record_fua_only:cap=tau_record_fua_only=1 segmap_fua_only:c
 VARIANTS=${VARIANTS:-}
 tq() {	# <name> <port> <gdb> <fs>
 	local n=$1 p=$2 gp=$3 fs=$4 c tag f cap exp gen rows profs kind lim strats seg res
-	CELLS="$(cells $fs)" PROFILES="quiet busy" LIMIT_ATOM=${LIMIT_TAU_ATOM:-1500} \
+	CELLS="$(cells $fs)" PROFILES="$PROFILES_ALL" LIMIT_ATOM=${LIMIT_TAU_ATOM:-1500} \
 		LIMIT_EPOCH=${LIMIT_TAU_EPOCH:-2000} NAME=$n PORT=$p GDB_PORT=$gp \
 		bash $TC/table.sh "$KT" "$OUT/$n-main"
 	for c in $CONTROLS $VARIANTS; do
@@ -77,13 +80,13 @@ tq() {	# <name> <port> <gdb> <fs>
 # first; the epoch strategies get the larger budget -- an append's size can be on
 # disk before its data, and only a crash point between the two shows it
 bq() {	# <name> <port> <gdb> <cells>
-	CELLS="$4" PROFILES="quiet busy" LIMIT_ATOM=${LIMIT_BASE_ATOM:-500} \
+	CELLS="$4" PROFILES="$PROFILES_ALL" LIMIT_ATOM=${LIMIT_BASE_ATOM:-500} \
 		LIMIT_EPOCH=${LIMIT_BASE_EPOCH:-2000} PREFER_SPLIT=1 NAME=$1 PORT=$2 GDB_PORT=$3 \
 		bash $TC/table.sh "$KB" "$OUT/$1"
 }
 ZK=${ZFS_KIT:-/mnt/tau_backup/build/zfs-kit-2.2.2-0ubuntu9.5-basevm}
 zq() {	# <name> <port> <gdb> <cells>: baseline budgets, the kit installed
-	CELLS="$4" PROFILES="quiet busy" LIMIT_ATOM=${LIMIT_BASE_ATOM:-500} \
+	CELLS="$4" PROFILES="$PROFILES_ALL" LIMIT_ATOM=${LIMIT_BASE_ATOM:-500} \
 		LIMIT_EPOCH=${LIMIT_BASE_EPOCH:-2000} PREFER_SPLIT=1 MEM=${ZFS_MEM:-8G} \
 		ZFS_KIT=$ZK NAME=$1 PORT=$2 GDB_PORT=$3 bash $TC/table.sh "$KB" "$OUT/$1"
 }
@@ -100,11 +103,15 @@ pids=
 on q1 && { tq q1 5556 1236 tau-ext4 & pids="$pids $!"; sleep 20; }
 on q2 && { tq q2 5559 1239 tau-xfs & pids="$pids $!"; sleep 20; }
 # ZFS takes a baseline's VM when it is done: four VMs at most
-{ on q3 && bq q3 5560 1240 "$(cells ext4) $(cells ext4-dioread-lock ap2k ap4k ap16k) $(cells ext4-nodelalloc ap2k ap4k ap16k)"
-  on q5 && zq q5 5562 1242 "$(cells zfs-16k-tp ap2k ap4k ap16k)"; } & pids="$pids $!"
+Q3_CELLS=${Q3_CELLS:-"$(cells ext4) $(cells ext4-dioread-lock ap2k ap4k ap16k) $(cells ext4-nodelalloc ap2k ap4k ap16k)"}
+Q4_CELLS=${Q4_CELLS:-"$(cells xfs) $(cells ext4-data)"}
+Q5_CELLS=${Q5_CELLS:-"$(cells zfs-16k-tp ap2k ap4k ap16k)"}
+Q6_CELLS=${Q6_CELLS:-"$(cells zfs-16k-tp ow4k ow16k prealloc hole)"}
+{ on q3 && bq q3 5560 1240 "$Q3_CELLS"
+  on q5 && zq q5 5562 1242 "$Q5_CELLS"; } & pids="$pids $!"
 sleep 20
-{ on q4 && bq q4 5561 1241 "$(cells xfs) $(cells ext4-data)"
-  on q6 && zq q6 5563 1243 "$(cells zfs-16k-tp ow4k ow16k prealloc hole)"; } & pids="$pids $!"
+{ on q4 && bq q4 5561 1241 "$Q4_CELLS"
+  on q6 && zq q6 5563 1243 "$Q6_CELLS"; } & pids="$pids $!"
 wait $pids
 echo "===== merge $(date '+%F %T')"
 if [ -n "${MERGE:-}" ]; then

@@ -212,3 +212,122 @@ int torner_verify_prog(const struct torner_prog_rec *r, uint64_t run_id)
 		return -1;
 	return 0;
 }
+
+/* ---------------------------------------------------------------- mixed */
+
+void torner_mixed_range(const struct torner_mixed *m, uint64_t k,
+			uint64_t *off, uint32_t *len)
+{
+	if (m->aligned) {
+		*off = (k / 2) * m->unit;
+		*len = (k & 1) ? m->unit : m->unit / 2;
+	} else {
+		*off = k * m->step;
+		*len = m->unit;
+	}
+}
+
+uint64_t torner_mixed_end(const struct torner_mixed *m, uint64_t k)
+{
+	uint64_t off;
+	uint32_t len;
+
+	torner_mixed_range(m, k, &off, &len);
+	return off + len;
+}
+
+/*
+ * Chain: end(k-1) = (k-1)*step + unit >= k*step because step <= unit, so the
+ * extension starts inside write k.  Aligned: end(2j-1) = j*unit, all of write 2j;
+ * end(2j) = j*unit + unit/2, the second half of write 2j+1.
+ */
+uint64_t torner_mixed_ext(const struct torner_mixed *m, uint64_t k)
+{
+	return k ? torner_mixed_end(m, k - 1) : 0;
+}
+
+int torner_mixed_cover(const struct torner_mixed *m, uint64_t o,
+		       uint64_t *ks, uint32_t *idx, int max)
+{
+	int n = 0;
+
+	if (m->aligned) {
+		uint64_t j = o / m->unit, r = o % m->unit;
+
+		if (r < m->unit / 2 && n < max) {
+			ks[n] = 2 * j;
+			idx[n++] = (uint32_t)(r / m->sector);
+		}
+		if (n < max) {
+			ks[n] = 2 * j + 1;
+			idx[n++] = (uint32_t)(r / m->sector);
+		}
+	} else {
+		/* k covers o iff k*step <= o < k*step + unit */
+		uint64_t hi = o / m->step;
+		uint64_t k = (o >= m->unit) ? (o - m->unit) / m->step + 1 : 0;
+
+		for (; k <= hi && n < max; k++) {
+			ks[n] = k;
+			idx[n++] = (uint32_t)((o - k * m->step) / m->sector);
+		}
+	}
+	return n;
+}
+
+int torner_mixed_eof(const struct torner_mixed *m, uint64_t eof,
+		     uint64_t *k, int *exact)
+{
+	if (!eof)
+		return 0;
+	if (m->aligned) {
+		uint64_t j = eof / m->unit, r = eof % m->unit;
+
+		if (!r) {
+			*k = 2 * j - 1;		/* j >= 1: eof > 0 */
+			*exact = 1;
+		} else if (r < m->unit / 2) {
+			*k = 2 * j;
+			*exact = 0;
+		} else if (r == m->unit / 2) {
+			*k = 2 * j;
+			*exact = 1;
+		} else {
+			*k = 2 * j + 1;
+			*exact = 0;
+		}
+	} else if (eof <= m->unit) {
+		*k = 0;
+		*exact = (eof == m->unit);
+	} else {
+		/* end(k) = k*step + unit; eof in (end(k-1), end(k)] */
+		uint64_t d = eof - m->unit;
+
+		*k = (d + m->step - 1) / m->step;
+		*exact = !(d % m->step);
+	}
+	return 1;
+}
+
+uint64_t torner_mixed_last(const struct torner_mixed *m, uint64_t size)
+{
+	if (m->aligned)
+		return 2 * ((size - 1) / m->unit) + 1;
+	return (size - 1) / m->step;
+}
+
+const char *torner_mixed_bad(const struct torner_mixed *m)
+{
+	if (!m->sector || !m->unit || m->unit % m->sector)
+		return "the unit is not a whole number of sectors";
+	if (m->aligned) {
+		if ((m->unit / 2) % m->sector)
+			return "--mixed aligned needs unit/2 to be a whole number of sectors";
+		return "";
+	}
+	if (!m->step || m->step > m->unit || m->step % m->sector)
+		return "--mixed-step must be a whole number of sectors, at most the unit";
+	if ((m->unit + m->step - 1) / m->step > TORNER_MIXED_MAX_COVER)
+		return "--mixed-step too small: a sector would lie under too many writes";
+	return "";
+}

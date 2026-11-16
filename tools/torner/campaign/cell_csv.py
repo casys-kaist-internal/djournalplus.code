@@ -75,7 +75,12 @@ FIELDS = ("config", "row", "profile", "tag", "kernel", "mount_opts", "mkfs_opts"
           "i5_checked", "i5_split", "i5_split_run", "i5_partial", "i5_no_unit",
           "i2_blocks", "i2_uncovered", "i2_leads", "i3_tags", "i3_violations",
           "i4_reuses", "i4_violations",
-          "unmount_sync", "seeks", "shrink_count", "shrink_scan", "reserve_mb")
+          "unmount_sync", "seeks", "shrink_count", "shrink_scan", "reserve_mb",
+          # the conditions a capture made (the 11-16 redesign): sysctls while gen
+          # ran, the target's new folios by order and how many folios one unit
+          # spans on average, gen's sleeps for dirty pages
+          "gen_sysctl", "folio_orders", "folios_per_unit", "dirty_pauses",
+          "dirty_pause_ms", "trace_lost")
 
 
 def wilson_hi(k, n, z=1.96):
@@ -197,6 +202,21 @@ def loginv_i1(cap):
     return out
 
 
+def conditions(cap, cj):
+    """what capture.sh recorded of the conditions gen ran under (gen-trace.json)"""
+    out = {"gen_sysctl": cj.get("gen_sysctl", ""), "folio_orders": cj.get("folio_orders", ""),
+           "dirty_pauses": cj.get("dirty_pauses", ""), "trace_lost": cj.get("trace_lost", "")}
+    try:
+        t = json.load(open(os.path.join(cap, "gen-trace.json")))
+    except (OSError, ValueError):
+        return out
+    out["dirty_pause_ms"] = t.get("dirty_pause_ms", "")
+    if t.get("folios") and cj.get("unit"):
+        out["folios_per_unit"] = "%.2f" % (float(cj["unit"]) * t["folios"] /
+                                           (4096.0 * t["folio_pages"]))
+    return out
+
+
 def summarize(cap, row, profile):
     cj = json.load(open(os.path.join(cap, "capture.json")))
     try:
@@ -282,6 +302,7 @@ def summarize(cap, row, profile):
                         if targeted else ""),
                kinds=" ".join("%s=%d" % kv for kv in sorted(kinds.items())),
                witness=witness or "")
+    out.update(conditions(cap, cj))
     out.update(probes(cap, float(cj.get("duration_s", 5))))
     out.update(loginv_i1(cap))
     if row == "ap2k":

@@ -60,6 +60,7 @@ echo "torner selftest  (work=$WORK)"
 
 # ---------------------------------------------------------------- clean runs
 for mode in overwrite append alloc delalloc mixed; do
+	mx=(); [ "$mode" = mixed ] && mx=(--mixed chain)
 	f="$WORK/$mode.dat"; pl="$WORK/$mode.prog"
 	dur=0
 	[ "$mode" = overwrite ] && dur=2
@@ -70,7 +71,7 @@ for mode in overwrite append alloc delalloc mixed; do
 		--duration "$dur" --fsync-every 1 --quiet || { bad "gen $mode"; continue; }
 
 	expect_exit 0 "clean run passes P1+P2  [$mode]" \
-		"$TORNER" check --file "$f" --progress-log "$pl" --run-id "$RUN_ID"
+		"$TORNER" check --file "$f" --progress-log "$pl" --run-id "$RUN_ID" "${mx[@]}"
 done
 
 # Interference changes how the writes reach the device, never what a clean

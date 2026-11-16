@@ -249,6 +249,17 @@ torner gen --file <path> --progress-log <path> [options]
   --other-fsync-ms <n>  write + fsync() a sibling file every n ms
   --sync-ms <n>         sync() every n ms
   --writeback-ms <n>    sync_file_range(WRITE) the target every n ms
+
+  mixed mode (--pages counts writes; the file starts empty):
+  --mixed chain         write k at k*step, unit bytes long [default]
+  --mixed aligned       unit/2 appended, then that unit rewritten whole
+  --mixed-step <bytes>  chain: bytes between writes [unit/2]
+
+  page cache (writeback can split a write only between folios):
+  --drop-cache          the workload starts on a cold cache (prefill dropped)
+  --preread             --drop-cache, readahead off, and each write's range read
+                        4 KiB at a time first: order-0 folios under every write
+  --trace-marker <path> tracefs trace_marker: torner:begin / torner:end
 ```
 
 Modes map onto the tauJournal operation classes:
@@ -259,7 +270,7 @@ Modes map onto the tauJournal operation classes:
 | `append` | empty | grows `i_size` (Data-Inode) |
 | `alloc` | `fallocate`d | unwritten → written extent conversion |
 | `delalloc` | sparse (`ftruncate`) | delayed allocation at writeback |
-| `mixed` | prefilled | rewrite and allocation interleaved |
+| `mixed` | empty | half over the last write's data, half past EOF (below) |
 
 Page ownership is partitioned across threads (`page_id % threads == tid`) so a
 page's version is only ever advanced by one writer. Without that, two writers
@@ -273,11 +284,36 @@ can complete out of order and leave transient holes past `i_size`. That is the
 harder case and the intended one, but it is not the same workload as a
 single-threaded `write()`-at-EOF loop.
 
+`mixed` (11-16 redesign; before it, `mixed` was `overwrite` under another name)
+is one chain of writes, each an overwrite and an append at once:
+
+- `--mixed chain`: write k covers `[k*step, k*step + unit)`, step = unit/2 by
+  default.  Its first half is over write k-1's second half, its second half
+  moves EOF.  Every other write crosses a unit boundary.
+- `--mixed aligned`: write 2j appends unit/2 at `j*unit`; write 2j+1 rewrites
+  `[j*unit, (j+1)*unit)` whole, half over write 2j and half past EOF.  No write
+  crosses a unit boundary, so a file system that keeps a `unit`-sized record
+  whole (ZFS with recordsize = unit) gets each write as one record.
+
+Write k is stamped `page_id = k`, version 1.  The writes overlap, so the order
+they were applied in decides what a sector holds: gen holds one lock over claim
+and `pwrite()`, and writes the chain in order whatever `--threads` is.  The
+`fsync()`s run outside the lock, side by side -- what N writers add is another
+writer's fsync() catching a write halfway through its copy.
+
+`--preread` and `--drop-cache` change only the page cache a write lands in.  On
+XFS (large folios) a 16 KiB-aligned write into an uncached range gets one 16 KiB
+folio, which writeback cannot split; read 4 KiB at a time first (readahead off),
+the same write spans four order-0 folios.  ext4 in 6.8 has no large folios.
+`capture.sh` counts the target's new folios by order while the workload runs
+(`gen-trace.json`), so a cell shows whether the condition was made.
+
 ## `torner check`
 
 ```
 torner check --file <path> [--progress-log <path> [--progress-limit N]]
-             [--run-id <u64>] [--focus-file <path>] [--append]
+             [--run-id <u64>] [--focus-file <path>]
+             [--append [--append-writers N] | --mixed chain|aligned [--mixed-step B]]
              [--tier T2b] [--config tau-ext4] [--workload ...]
              [--run-tag ...] [--state-id ...] [--strategy ...] [--epoch N]
 ```
@@ -296,6 +332,26 @@ or later), `old` (whole at an earlier one: the write rolled back, which is
 atomic), `absent`, or listed under `torn` with the kind and the versions seen.
 The global P1 flag cannot answer this: other writes in flight at the same crash
 point may tear too.
+
+`--append-writers N` (N > 1): with several writers a unit below EOF may be
+blank because its writer was still copying when another moved EOF past it, so
+only the last unit (its own write set EOF) and a unit EOF cuts are size
+violations; other blank units are counted as `holes_below_eof`.  One writer
+keeps the old rule: every blank unit below EOF is torn.
+
+`--mixed` judges a `gen --mode mixed` file write by write.  A sector lies under
+several writes and holds the newest of them that took effect, or nothing.
+Under "every write whole, the newest wins", write k is torn exactly when its
+range shows k somewhere and something older somewhere else -- an older write's
+data (`p1_mixed_torn_older`), blank (`p1_mixed_torn_blank`) or the end of the
+file (`p1_mixed_torn_eof`: the in-place half landed, the append half did not).
+A sector showing a newer write says nothing about k.  EOF names the write that
+set it: EOF inside that write's extension is `p1_size_cut_unit`, and that
+write's extension blank below EOF is `p1_size_blank_unit`.  A write lost whole
+is not a tear (P2 sees it when an fsync made it durable; `order_gaps` counts
+such writes below the one that set EOF).  A damaged sector is charged once, to
+the newest write over it.  `tests/mixed_test.sh` shows each case firing, and
+the legal ones not.
 
 Exit: `0` pass, `2` violation, `1` error.
 
@@ -782,6 +838,55 @@ Three things the harness learned the hard way and now handles:
   filter; one that falls before the first mark is judged without P2, since no
   `fsync` had returned to hold it to.
 
+## Conditions as rows (the 11-16 redesign of the §6.2 table)
+
+The §6.2 table ran one writer per file, aligned units, an fsync after every
+write, quiet or busy.  The redesign looks, write operation by write operation,
+for the conditions under which the baselines (EXT4, XFS, EXT4 data=journal,
+ZFS) tear, and runs τ under the same ones.  The conditions are ones a running
+machine can reach without a kernel change: the workload, the page cache, sysctls.
+A tear needs the write split somewhere -- the device (a request partly written:
+the crash states, as before), writeback (the write's folios in different
+writebacks), or the file system's transactions (its metadata in different
+commits) -- and each condition aims at one of those.
+
+`table_guest.sh` reads a row name as `<base>[-<mod>]...`:
+
+| piece | meaning | made by |
+|---|---|---|
+| `ow<K>k` `ap<K>k` `pa<K>k` `ho<K>k` | overwrite, append, into fallocate()d space, into a hole; K KiB units | `--mode overwrite/append/alloc/delalloc --unit` |
+| `mx<K>k`, `ma<K>k` | mixed chain, mixed aligned | `--mode mixed --mixed chain/aligned` |
+| `t<N>` | N writers on the file (mixed: one chain in order, fsyncs side by side) | `--threads N` |
+| `f<N>` | an fsync every N writes | `--fsync-every N` |
+| `pr` | each write's range read 4 KiB at a time first: order-0 folios | gen `--preread` |
+| `dc` | a cold cache: writes make their own folios | gen `--drop-cache` |
+| `dl<K>` | `vm.dirty_bytes` K KiB (16 by default), background half that, while gen runs | `TORNER_GEN_SYSCTL` |
+| `mp<M>` | M MiB of guest memory held back as hugepages while gen runs | `TORNER_RESERVE_MB` |
+
+The old row names (`ow4k ow16k ap2k ap4k ap16k prealloc hole owfull*`) mean
+what they did.  Each capture records what it made: `gen.json` (gen's own
+report: writes, prereads), `gen-trace.json` and in `capture.json`
+`folio_orders` (the target's new folios by order during the workload),
+`dirty_pauses` (gen put to sleep for dirty pages) and `gen_sysctl`;
+`cell_csv.py` adds `folios_per_unit`, `dirty_pauses`, `dirty_pause_ms`.
+
+`full.sh` takes `ROWS`, `PROFILES_ALL` and the baseline queues' cells
+(`Q3_CELLS` .. `Q6_CELLS`) from the environment; the defaults are the §6.2
+table's.  `campaign/explore_rows.py` draws rows for the search (`--all`: the
+216 combinations of operation × unit × writers × cache × dirty limit).
+
+```sh
+# the quick check (question 4): EXT4, a hole, four writers; XFS cold vs preread
+QUEUES="q3 q4" Q3_CELLS="ext4:ho16k-t4 ext4:ho16k-t4-pr" \
+  Q4_CELLS="xfs:ho16k-dc xfs:ho16k-pr xfs:ow16k-dc xfs:ow16k-pr" PROFILES_ALL=quiet \
+  LIMIT_BASE_ATOM=200 LIMIT_BASE_EPOCH=400 full.sh <tau tree> <basevm tree> <out>
+# the search on the baselines
+R="$(campaign/explore_rows.py --n 24 --seed 1)"
+QUEUES="q3 q4 q6" Q3_CELLS="$(for r in $R; do echo ext4:$r; done)" \
+  Q4_CELLS="$(for r in $R; do echo xfs:$r ext4-data:$r; done)" \
+  Q6_CELLS="$(for r in $R; do echo zfs-16k-tp:$r; done)" full.sh ...
+```
+
 ## Epoch-based persistence models, and why there are two
 
 `single-drop` and friends assume any subset of *bios* may persist. That is the
@@ -867,3 +972,8 @@ trips P2 *without* tripping P1 (so the oracle is not collapsing every fault
 into one answer). For the size rule, `--kind blank` over a whole unit and
 `--kind cut` (EOF n sectors into the page) must pass without `--append` and be
 torn with it.
+
+For mixed files, `--mixed chain|aligned [--mixed-step B] --write <k>` replaces
+`--page`, and `--kind older` writes over each chosen sector what the next older
+write covering it left there (blank where none does); `--from-end` damages the
+write's last sectors instead of its first.

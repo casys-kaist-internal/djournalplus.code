@@ -109,15 +109,21 @@ UNIT="$(jnum unit)"
 SECTOR="$(sed -n 's/.*"gen_args":"[^"]*--sector \([0-9]*\).*/\1/p' "$CAPTURE/capture.json" | head -1)"
 [ -n "$SECTOR" ] || SECTOR=4096		# torner gen's default
 WORKLOAD="torner:$MODE:t$THREADS"
-# the size rule (check --append) holds for one writer's appends only: with
-# several, a concurrent extend leaves legal holes below EOF
+# the size rule (check --append): with one writer a blank unit below EOF is torn;
+# with several a concurrent extend leaves legal holes below EOF, and only the
+# last unit (whose write set EOF) and a unit EOF cuts are (--append-writers)
 SIZEARGS=()
 if [ "$MODE" = append ]; then
-	if [ "$THREADS" = 1 ]; then
-		SIZEARGS=(--append)
-	else
-		echo "explore: append with $THREADS threads: the size rule is off" >&2
-	fi
+	SIZEARGS=(--append)
+	[ "${THREADS:-1}" -gt 1 ] 2>/dev/null && SIZEARGS+=(--append-writers "$THREADS")
+fi
+# mixed: the chain's layout comes from gen's own options (default chain, unit/2)
+if [ "$MODE" = mixed ]; then
+	GA="$(sed -n 's/.*"gen_args":"\([^"]*\)".*/\1/p' "$CAPTURE/capture.json" | head -1)"
+	MIXED="$(sed -n 's/.*--mixed \(chain\|aligned\).*/\1/p' <<< "$GA")"
+	SIZEARGS=(--mixed "${MIXED:-chain}")
+	MSTEP="$(sed -n 's/.*--mixed-step \([0-9]*\).*/\1/p' <<< "$GA")"
+	[ -n "$MSTEP" ] && SIZEARGS+=(--mixed-step "$MSTEP")
 fi
 BASE_ZERO="$(sed -n 's/.*"base_is_zero":\(true\|false\).*/\1/p' "$CAPTURE/capture.json" | head -1)"
 [ -n "$BASE_ZERO" ] || BASE_ZERO=false
