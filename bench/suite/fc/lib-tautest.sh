@@ -52,7 +52,31 @@ fc_boot_check() {
 	vm_boot_tested 9>&- > "$FC_OUT/boot-check.log" 2>&1 || { fc_case "$1/boot/kernel" FAIL "no boot (boot-check.log)"; return 0; }
 	fc_guest_check "$SSH_PORT" "$1" "" "$TAUFS_KERNEL" >> "$FC_OUT/boot-check.log"
 	fc_guest_taint_w "$SSH_PORT" "$1/boot"
+	[ "${FC_LOCKDEP:-0}" = 1 ] && fc_debug_locks_live "$1/boot/debug_locks"
 	vm_kill 9>&-
+}
+
+# lockdep kernels (FC2, FC_LOCKDEP=1): lockdep turns itself off after its first report, or
+# quietly on some taints, and a run with it off tests no lock order. Two checks:
+# fc_debug_locks_live <case>: the running guest's /proc/lockdep_stats says debug_locks 1
+fc_debug_locks_live() {
+	local v
+	v=$(vm_ssh "sudo awk '/debug_locks:/ {print \$2}' /proc/lockdep_stats" 2>/dev/null)
+	if [ "$v" = 1 ]; then fc_case "$1" PASS "debug_locks 1"; else fc_case "$1" FAIL "debug_locks '${v:-unreadable}'"; fi
+}
+# fc_debug_locks_span <case> <console line from>: every boot in the console since that line
+# started lockdep, and none turned it off
+fc_debug_locks_span() {
+	local s boots ld off
+	s=$(tail -n +"$2" "$VM_LOG" 2>/dev/null)
+	boots=$(grep -ac 'Linux version' <<< "$s")
+	ld=$(grep -ac 'Lock dependency validator' <<< "$s")
+	off=$(grep -aiE 'Disabling lock debugging|turning off the locking correctness validator|lockdep is turned off|debug_locks.*off' <<< "$s" | head -3 | tr '\n' ' ')
+	if [ "$boots" -gt 0 ] && [ "$boots" = "$ld" ] && [ -z "$off" ]; then
+		fc_case "$1" PASS "$boots boots, lockdep on in each, never turned off"
+	else
+		fc_case "$1" FAIL "boots $boots, lockdep started $ld${off:+, off: $off}"
+	fi
 }
 
 # fc_run <name> <deadline s> <command...>: one tautest host script, log $FC_OUT/<name>.log,
@@ -65,6 +89,7 @@ fc_run() {
 		return 0
 	fi
 	echo "$(date '+%H:%M:%S') start $n"
+	local c0=$(( $(cat "$VM_LOG" 2>/dev/null | wc -l) + 1 ))
 	"$@" > "$f" 2>&1 9>&- &
 	pid=$!
 	end=$((SECONDS + d))
@@ -80,6 +105,8 @@ fc_run() {
 	wait $pid
 	echo "$(date '+%H:%M:%S') $n rc=$?"
 	fc_cases "$n" "$f"
+	[ "${FC_LOCKDEP:-0}" = 1 ] && fc_debug_locks_span "$n/debug_locks" "$c0"
+	return 0
 }
 
 # fc_cases <test> <log>: case lines into cases.tsv. A case is <test>/<case>/<fs>

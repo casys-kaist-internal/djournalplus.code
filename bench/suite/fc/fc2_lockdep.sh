@@ -1,11 +1,14 @@
 #!/bin/bash
 # FC2: lockdep kernel over the paths the 11-15 batch changed (b403 L-*): split twotx /
 # onetx / inplace, activation flush, frees with pending tags, frees after a publish,
-# truncate races, revoke. The splat check is fast_correct.sh's, over logs.list.
+# truncate races, revoke. The splat check is fast_correct.sh's, over logs.list; each test
+# also gets <test>/debug_locks (every boot started lockdep, none turned it off) and the
+# check boot fc2/boot/debug_locks (debug_locks 1 in /proc/lockdep_stats).
 # Env: FC_OUT FC_KDIR_LOCKDEP FC_ROOT FC_DRY. Exit 2 = harness error.
 . "$(dirname "$0")/lib-tautest.sh"
 : "${FC_KDIR_LOCKDEP:?FC_KDIR_LOCKDEP not set}"
 TAUFS_KERNEL=$FC_KDIR_LOCKDEP
+FC_LOCKDEP=1
 [ "$FC_DRY" = 1 ] && : > "$FC_OUT/plan.txt"
 fc_setup
 fc_boot_check fc2
