@@ -722,10 +722,12 @@ deleted; A, 64 MiB of 0x55, is written without `O_TAU_UNTORN` and without fsync,
 with it. The directory is fsync'd (A's name durable, not its data), the guest idles 7 s and is
 cut. Every 4 KiB block of A must be all 0x55 or all zero; 0xAA (the deleted file's old data in
 blocks the activation left to ext4 writeback without its ordering) fails. Counters `act_flush`
-(activation wrote pages first) and `act_dirty` (pages left after it, must be 0).
+(activation wrote pages first) and `act_dirty` (pages left after it): `act_dirty` above 0
+is a FAIL; A or its size missing after the cut is INCONCLUSIVE (nothing was checked).
 
 | kernel | ext4 | xfs |
 |---|---|---|
+| #401 (beta) | FAIL `act_dirty+1` (A's size 0 after the cut: the old verdict, PASS, checked nothing) | PASS, 16384 x 0x55 |
 | #403 (a30a5373) | PASS x2, `act_flush+1`, 16384 x 0x55 | PASS x2, 16384 x 0x55 |
 
 ### Blocks a tau file freed and another file reused

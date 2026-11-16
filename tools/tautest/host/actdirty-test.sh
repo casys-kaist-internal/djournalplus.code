@@ -2,6 +2,8 @@
 # Pages dirtied before activation, then a power cut (kernel taudocs/bug.md #68):
 # the file reads its data or zeroes, never a deleted file's old blocks.  From
 # #402 ext4's activation writes them home first (act_flush), as XFS since #358.
+# FAIL also when the activation left pages dirty (act_dirty, probe kernels; 0 without
+# the counter); INCONCLUSIVE when A or its size did not survive, as nothing was checked.
 #   usage: actdirty-test.sh [xfs|ext4|both] [rounds]
 # WARNING: runs mkfs on $TAU_DEV inside the guest.
 
@@ -30,7 +32,7 @@ for fs in $FSLIST; do
 			st=$(vm_ssh 'cat ~/actdirty-status 2>/dev/null')
 			[ -n "$st" ] && break
 		done
-		if [ "$st" != ARMED ]; then
+		if [ "${st%% *}" != ARMED ]; then
 			echo "RESULT[$tag]: SKIP (not armed: $st)"
 			summary+="$tag: SKIP\n"; rc=1
 			kill $writer 2>/dev/null; vm_crash; continue
@@ -38,12 +40,22 @@ for fs in $FSLIST; do
 		vm_crash || { rc=1; break 2; }
 		kill $writer 2>/dev/null
 		vm_boot_tested || { rc=1; break 2; }
-		if vm_ssh "~/tautest/guest/actdirty-verify.sh $fs"; then
-			echo "RESULT[$tag]: PASS"; summary+="$tag: PASS\n"
+		vm_ssh "~/tautest/guest/actdirty-verify.sh $fs"
+		v=$?
+		dirty=${st#*dirty=}
+		if [ "$v" -eq 1 ]; then
+			r="FAIL (a block not A's data or zero)"
+		elif [ "$dirty" != 0 ]; then
+			r="FAIL (activation left pages dirty: act_dirty+$dirty)"
+		elif [ "$v" -eq 3 ]; then
+			r="INCONCLUSIVE (A or its size not durable: nothing checked)"
+		elif [ "$v" -eq 0 ]; then
+			r=PASS
 		else
-			echo "RESULT[$tag]: FAIL"; summary+="$tag: FAIL\n"
-			vm_console_faults; rc=1
+			r="FAIL (verify rc $v)"
 		fi
+		echo "RESULT[$tag]: $r"; summary+="$tag: $r\n"
+		[ "$r" = PASS ] || { vm_console_faults; rc=1; }
 	done
 done
 

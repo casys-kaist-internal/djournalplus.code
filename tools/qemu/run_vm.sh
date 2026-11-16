@@ -31,7 +31,8 @@ fi
 [ -n "${VM_QEMU_DIR:-}" ] && PATH="$VM_QEMU_DIR:$PATH"
 # VM_IMAGE overrides the guest disk image (default vm_imgs/qemu-image.qcow2).
 # VM_INITRD overrides the initrd (default the tau kernel's), e.g. for a guest
-# booted on the baseline kernel.
+# booted on the baseline kernel; "none" boots without one (the tau test kernels
+# have the guest's disk, network and root FS drivers built in).
 # VM_KCMDLINE_EXTRA appends to the guest kernel command line. Built-in module
 # parameters take "<module>.<param>=<value>" there, which is how a setting can
 # be held across the reboots a crash test performs -- writing to
@@ -68,9 +69,12 @@ else
 	TESTDEV_ARGS="-device vfio-pci,host=$NVME_PCIE_ADDR"
 fi
 
+INITRD_ARGS=(-initrd "${VM_INITRD:-/boot/initrd.img-6.8.0tjournal+}")
+[ "${VM_INITRD:-}" = none ] && INITRD_ARGS=()
+
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then # script is executed directly.
 	qemu-system-x86_64	-kernel $TAUFS_KERNEL/arch/x86/boot/bzImage \
-				-initrd "${VM_INITRD:-/boot/initrd.img-6.8.0tjournal+}" \
+				"${INITRD_ARGS[@]}" \
 				-cpu host \
 				$SMP_ARGS \
 				$NUMA_ARGS \

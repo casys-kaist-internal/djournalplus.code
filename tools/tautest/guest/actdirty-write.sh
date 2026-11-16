@@ -31,12 +31,13 @@ os.close(fd)' "$TAU_MNT/a" || die "A failed"
 echo "== A opened with O_TAU_UNTORN =="
 sudo python3 -c 'import os, sys
 os.close(os.open(sys.argv[1], os.O_RDWR | 0o40000000))' "$TAU_MNT/a" || die "activation failed"
-echo "  act_flush+$(( $(probe act_flush) - f0 )) act_dirty+$(( $(probe act_dirty) - d0 ))"
+DIRTY=$(( $(probe act_dirty) - d0 ))
+echo "  act_flush+$(( $(probe act_flush) - f0 )) act_dirty+$DIRTY"
 sudo dmesg | grep -a "becomes a tau file with pages dirty" | tail -2 | sed 's/^/  /'
 echo "== fsync of the directory: A's name durable, not its data =="
 sudo python3 -c 'import os, sys
 fd = os.open(sys.argv[1], os.O_RDONLY); os.fsync(fd); os.close(fd)' "$TAU_MNT" || die "dir fsync failed"
 echo "== idle 7 s: the host commits A's allocation =="
 sleep 7
-status ARMED
+status "ARMED dirty=$DIRTY"
 sleep 600
