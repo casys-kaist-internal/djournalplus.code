@@ -75,15 +75,26 @@ nohup setsid env VERSION=beta bench/suite/fast_perf.sh > /dev/null 2>&1 < /dev/n
 python3 bench/suite/fast_report.py report <out> --prev <out> --baselines bench/suite/baselines_libra09.csv
 ```
 
-### beta-fast (the first run)
+### Booting into a version and starting the run (final_tau phase F)
 
-#1982 is still installed as `/boot/vmlinuz-6.8.0tjournal+` (md5 0f059813... = the tree's 11-11 bzImage, banner #1982,
-`/lib/modules/6.8.0tjournal+`), so a one-shot boot is enough: `sudo grub-reboot "Advanced options for Ubuntu>Ubuntu,
-with Linux 6.8.0tjournal+"`, reboot, then the command above. GRUB's saved default stays base+, so the next plain
-reboot returns to it. To start without anyone at the console, the @reboot route of final_tau (`reboot.sh` + `at_boot.sh`)
-needs a phase that runs this script; not added yet (the run needs the user's approval first).
+`VERSION=<v> [TIMERS=warn|hold] [GUARD=strict|device] final_tau/reboot.sh F [--dry-run|--arm]` checks that
+`/boot/vmlinuz-<UNAME_R>` is the version's (md5 and banner) and that GRUB has its entry, then `grub-reboot`s once into
+`BOOT_ENTRY` and adds the one-shot `@reboot` line. At boot `at_boot.sh F` brings tmux session 0 and the Claude
+sessions back and, 90 s later, starts `final_tau/phaseF.sh` = `fast_perf.sh` with that VERSION (log
+`final_tau/logs/phaseF_<UTC>.log`, and the run's own `fast.log`). No reboot follows; the next plain reboot returns to
+base+ (GRUB's saved default). reboot.sh prints "reboot requested" when `systemctl reboot` returns 0 at once.
 
-## Kernel names (survey for the user's decision; nothing changed)
+beta: #1982 is still installed as `/boot/vmlinuz-6.8.0tjournal+` (md5 0f059813... = the tree's 11-11 bzImage, banner
+#1982, `/lib/modules/6.8.0tjournal+`), so `VERSION=beta final_tau/reboot.sh F` is all it takes (the user's approval
+first). `--dry-run` checked on 11-16: it would add `@reboot VERSION='beta' TIMERS='hold' bash .../at_boot.sh F`.
+
+### Timers
+
+`TIMERS=warn` (default) only reports the timers due within the run's window and those that ran. `TIMERS=hold`
+(tau-ops' suggestion, the user's decision) stops the active ones of apt-daily, apt-daily-upgrade, fwupd-refresh and
+motd-news timers for the run and starts them again at its end (also on an early exit; a reboot restarts them anyway).
+
+## Kernel names (survey of 11-16; the v1.0 name is decided, see below)
 
 Today the τ release is `6.8.0tjournal+`: `EXTRAVERSION = tjournal` in the τ tree's top Makefile (commit f40bd8fde7c3)
 plus `make LOCALVERSION=+` (final_tau/prep.sh). Code that depends on the name:
@@ -103,8 +114,21 @@ plus `make LOCALVERSION=+` (final_tau/prep.sh). Code that depends on the name:
   FS name), `run_pgvector.sh` (`*6.8.0*`), `common.sh`, `set_env.sh`, `host_setup.sh`, killtest.py.
 - Cosmetic: `bench/machines/kernel/config-6.8.0tjournal+`, the inventory's kernel list, READMEs.
 
-Suggestion: keep "tjournal" and add the version, `make LOCALVERSION=-v1.0` → `6.8.0tjournal-v1.0` (with LOCALVERSION
-set, setlocalversion adds no "+"), leaving beta installed as `6.8.0tjournal+` (#1982; renaming beta would mean a
-rebuild, a different binary from the measured one). Then only the exact-name and initrd sites need a release
-parameter; the substring tests keep working. Better still, test τ by `/sys/module/tau_journal` (as fast_perf.sh does)
-rather than by name. /boot has 776 MB free; a τ kernel takes ~110 MB (83 MB of it the initrd).
+Decided (11-16, the user via tau-ops, per-version names as the default plan): v1.0 = `make LOCALVERSION=-v1.0`
+-> `6.8.0tjournal-v1.0` (with LOCALVERSION set, setlocalversion adds no "+"); beta stays #1982 = `6.8.0tjournal+`
+(renaming it would mean a rebuild, a different binary from the measured one). On the fast-test path, final_tau
+`prep.sh` (KSRC, LV, CONFIG_FROM, STAGES; defaults = #1982's recipe), `reboot.sh` (phase F) and `at_boot.sh`
+(VERSION, TIMERS, GUARD) take the release as a parameter; the scripts of the beta measurements (phaseA/B, m4_chain)
+are unchanged. The VM initrd sites go to libra08 (tau-ops). /boot has 776 MB free; a τ kernel takes ~110 MB (83 MB of
+it the initrd).
+
+### v1.0 build (11-16, not installed)
+
+A detached worktree of the kernel repository at cc3d37bc in `/mnt/tau_backup/build/linux-tau-v1.0` (the submodule
+tree stays at fd8c6936 with #1982's bzImage), built by
+`KSRC=/mnt/tau_backup/build/linux-tau-v1.0 LV=-v1.0 CONFIG_FROM=/boot/config-6.8.0tjournal+ STAGES="config build" prep.sh cc3d37bc`
+with gcc 9.5.0 as #1982. Installing it (`STAGES=install`, then `BOOT_ENTRY` in versions/v1.0.env) waits for the
+user's approval. Between beta and v1.0, fs/ and include/ change in 7 files (65+/37-): recovery's tail message,
+ext4 activation writing dirty pages home first, the atoz rule for copies of two transactions, the checkpoint policy,
+a test control; no on-disk definition changes (no __le/__be/_disk/MAGIC lines), so the `_seg16m` images should stay
+valid (libra08:develop to confirm).

@@ -37,11 +37,13 @@
 # tracked bench/results/<host>/SUMMARY.md at its end; this script puts it back after each TPC-C run.
 # During the run a kernel oops or soft lockup reboots the host (kernel.panic=30, panic_on_oops=1, softlockup_panic=1,
 # as phase A; AUTOREBOOT=0 leaves them); STATUS then stays "running" and the report says the run did not finish.
+# TIMERS=hold (default warn): stop apt-daily, apt-daily-upgrade, fwupd-refresh and motd-news timers (those active)
+# for the run and start them again at its end (tau-ops' suggestion of 11-16; the user decides whether to use it).
 # DRY=1: the kernel and host checks are made and reported (a mismatch is reported, not fatal), every command is
 # printed, nothing is run that writes, starts a database or changes a setting, and no output directory is made.
 #
-# Usage: VERSION=<v> [PREV_VERSION=<v>] [REF_VERSION=beta] [GUARD=strict|device] [STEPS="fp0 ..."] [FP1_SYNC1_T1=0]
-#        [DRY=1] bench/suite/fast_perf.sh            (from anywhere; nohup setsid ... & for a real run)
+# Usage: VERSION=<v> [PREV_VERSION=<v>] [REF_VERSION=beta] [GUARD=strict|device] [TIMERS=warn|hold] [STEPS="fp0 ..."]
+#        [FP1_SYNC1_T1=0] [DRY=1] bench/suite/fast_perf.sh            (from anywhere; nohup setsid ... & for a real run)
 # Parsed whole first.
 {
 set -u
@@ -50,8 +52,10 @@ cd "$ROOT" || exit 1
 VERSION=${VERSION:?set VERSION: beta, v1.0, ...}
 DRY=${DRY:-0} STEPS=${STEPS:-fp0 fp1 fp2 fp3 fp4} REF_VERSION=${REF_VERSION:-beta} GUARD=${GUARD:-strict}
 FP1_SYNC1_T1=${FP1_SYNC1_T1:-1} AUTOREBOOT=${AUTOREBOOT:-1} PREV_VERSION=${PREV_VERSION:-}
+TIMERS=${TIMERS:-warn}
 PM1735="SAMSUNG MZPLJ3T2HBJR-00007"
-TIMERS="apt-daily.timer apt-daily-upgrade.timer man-db.timer e2scrub_all.timer fwupd-refresh.timer mdcheck_start.timer
+HOLD_UNITS="apt-daily.timer apt-daily-upgrade.timer fwupd-refresh.timer motd-news.timer"   # TIMERS=hold
+TIMER_UNITS="apt-daily.timer apt-daily-upgrade.timer man-db.timer e2scrub_all.timer fwupd-refresh.timer mdcheck_start.timer
   mdcheck_continue.timer update-notifier-download.timer snapd.snap-repair.timer dpkg-db-backup.timer logrotate.timer
   motd-news.timer"
 PRE=()   # the lines before the output directory exists; they open fast.log
@@ -59,6 +63,7 @@ say() { local l; l="===== $* $(date -u --rfc-3339=seconds)"; echo "$l"; PRE+=("$
 die() { echo "===== FAILED: $* $(date -u --rfc-3339=seconds)"; exit 2; }
 for s in $STEPS; do [[ " fp0 fp1 fp2 fp3 fp4 " == *" $s "* ]] || die "no step '$s' (fp0 fp1 fp2 fp3 fp4)"; done
 [[ $GUARD == strict || $GUARD == device ]] || die "GUARD is strict or device"
+[[ $TIMERS == warn || $TIMERS == hold ]] || die "TIMERS is warn or hold"
 [[ $DRY == 1 ]] && say "DRY run: checks and commands only, nothing is run or written"
 
 # 1. The running kernel must be VERSION's
@@ -118,13 +123,17 @@ done
 EST=(fp0:32 fp1:$(( FP1_SYNC1_T1 == 1 ? 61 : 44 )) fp2:112 fp3:61 fp4:3)
 ETA=0; for x in "${EST[@]}"; do [[ " $STEPS " == *" ${x%%:*} "* ]] && ETA=$(( ETA + ${x#*:} )); done
 now=$(date +%s); tw=()
-for t in $TIMERS; do
+for t in $TIMER_UNITS; do
   nx=$(systemctl show "$t" -p NextElapseUSecRealtime --value 2> /dev/null)
   [[ -n $nx && $nx != n/a ]] || continue
   e=$(date -d "$nx" +%s 2> /dev/null) || continue
-  (( e >= now && e <= now + ETA * 60 )) && tw+=("$t at $(TZ=Asia/Seoul date -d @$e '+%m-%d %H:%M KST')")
+  (( e >= now && e <= now + ETA * 60 )) \
+    && tw+=("$t at $(TZ=Asia/Seoul date -d @$e '+%m-%d %H:%M KST')$([[ $TIMERS == hold && " $HOLD_UNITS " == *" $t "* ]] && echo ' (held)')")
 done
-say "plan: $STEPS, about $ETA min (ends ~$(TZ=Asia/Seoul date -d @$(( now + ETA * 60 )) '+%m-%d %H:%M KST')), test device ${TAU_DEVICE:-none}, guard $GUARD against $REF_VERSION"
+for u in apt-daily.service apt-daily-upgrade.service; do
+  systemctl is-active -q "$u" && say "warning: $u is running now"
+done
+say "plan: $STEPS, timers $TIMERS, about $ETA min (ends ~$(TZ=Asia/Seoul date -d @$(( now + ETA * 60 )) '+%m-%d %H:%M KST')), test device ${TAU_DEVICE:-none}, guard $GUARD against $REF_VERSION"
 (( ${#tw[@]} )) && say "warning: timers due within the run: ${tw[*]}"
 if (( ${#hbad[@]} )); then
   for b in "${hbad[@]}"; do say "host check: $b"; done
@@ -255,13 +264,22 @@ RAW2=(sudo fio --name=write_qd1 --filename="${TAU_DEVICE:-/dev/null}" --direct=1
   --bs=16k --size=64g --time_based --runtime=60 --ramp_time=5 --output-format=json
   --output="$OUT/raw_fio/write_qd1.json")
 TIMER_START=$(date '+%F %T')
+HELD=""
+restore_timers() {  # TIMERS=hold: start again what this run stopped
+  local u
+  [[ -n $HELD ]] || return 0
+  for u in $HELD; do sudo systemctl start "$u" || echo "===== FAILED to start $u again"; done
+  echo "===== timers started again:$HELD"; HELD=""
+}
+on_exit() { declare -F restore_panic > /dev/null && restore_panic; restore_timers; }
+[[ $DRY == 1 ]] || trap on_exit EXIT
 finish() {  # <status>: FP4's records, metrics and REPORT.md, STATUS
   [[ $DRY == 1 ]] && { echo "+ python3 bench/suite/fast_report.py report $OUT --prev ${PREVD:-<none>} --baselines bench/suite/baselines_$TAU_HOST.csv"; exit 0; }
   local s ran="" u
   s=$(smart)
   echo "$s" > "$OUT/checks/smart_after.txt"
   journalctl -k -b 0 --no-pager -o short-iso > "$OUT/checks/kernel_log.txt" 2>&1
-  for u in $TIMERS; do
+  for u in $TIMER_UNITS; do
     journalctl --since "$TIMER_START" -u "${u%.timer}.service" --no-pager -o short-iso 2> /dev/null | grep -q 'Start' \
       && ran+="${u%.timer}.service "
   done
@@ -279,7 +297,7 @@ timers_ran=${ran% }
 summary_md_restored=$SUMRESTORED
 EOF
   echo "$1" > "$OUT/STATUS"
-  declare -F restore_panic > /dev/null && restore_panic
+  on_exit
   python3 "$SUITE/fast_report.py" report "$OUT" ${PREVD:+--prev "$PREVD"} --baselines "$SUITE/baselines_$TAU_HOST.csv"
   say "fast test $VERSION: $1; report $OUT/REPORT.md"
   exit 0
@@ -290,6 +308,7 @@ if [[ $DRY == 1 ]]; then
   echo "+ manifest > $OUT/MANIFEST.txt   (kernel, τ mkfs, PG/mysqld md5, umbrella HEAD and uncommitted paths, images, device, host)"
   echo "+ bash bench/scripts/host_setup.sh apply && bash bench/scripts/host_setup.sh check"
   echo "+ sudo sysctl -w kernel.panic=30 kernel.panic_on_oops=1 kernel.softlockup_panic=1   (AUTOREBOOT=$AUTOREBOOT)"
+  [[ $TIMERS == hold ]] && echo "+ sudo systemctl stop <the active ones of: $HOLD_UNITS>   (started again at the end)"
   echo "+ sudo nvme smart-log $TAU_DEVICE > checks/smart_before.txt; PM1735 temperature every 30 s > checks/temps.txt"
 else
   manifest > "$OUT/MANIFEST.txt" 2>&1
@@ -303,8 +322,13 @@ else
       read -r a b c <<< "$OLD_PANIC"; OLD_PANIC=
       sudo sysctl -q -w kernel.panic=$a kernel.panic_on_oops=$b kernel.softlockup_panic=$c && echo "===== panic sysctls back to $a $b $c"
     }
-    trap restore_panic EXIT
     say "auto-reboot on oops/soft lockup: kernel.panic=30 panic_on_oops=1 softlockup_panic=1 (were $OLD_PANIC)"
+  fi
+  if [[ $TIMERS == hold ]]; then
+    for u in $HOLD_UNITS; do
+      systemctl is-active -q "$u" && sudo systemctl stop "$u" && HELD+=" $u"
+    done
+    say "timers held for the run:${HELD:- none were active}"
   fi
   s=$(smart); echo "$s" > "$OUT/checks/smart_before.txt"
   read -r hpball hpb <<< "$(hugepages)"
@@ -316,6 +340,8 @@ discards_before=$(discards)
 hugepages_before=$hpb
 linger_before=$lg
 timers_window=${tw[*]:-none}
+timers_mode=$TIMERS
+timers_held=${HELD# }
 EOF
   ( while kill -0 $$ 2> /dev/null; do echo "$(date -u +%T) $(sval temperature "$(smart)")"; sleep 30; done ) > "$OUT/checks/temps.txt" &
 fi
