@@ -1,0 +1,16 @@
+# Expected FAILs of version beta: kernel #401 = new_main fccc4abd, pinned at
+# /mnt/tau_backup/torner/kernels/tau-401 (probe) and tau-401-lockdep (lockdep #57, rebuilt 11-16)
+# -- the tau code of #400 (d48cb635) plus the test switch tau_segmap_fua_only (default 0);
+# libra09's #1982 (81f4707b) has the same tau code. Seen failing on #401 on 11-16 (develop,
+# ~/soak-268/fc/beta-smoke; root, FC6 trial /mnt/tau_backup/fast/smoke/beta).
+# A case listed here that FAILs is XFAIL. One that PASSes is XPASS, and one that never ran is
+# FAIL: both fail the run. One case id per line, so that each file system is seen failing.
+# Format: <item> <case id or glob> <reason>
+FC1 split/twotx/ext4   bug.md #80: an all-in-place write whose before-images sit in two txs tears; fixed by 53826e51 (#403)
+FC1 split/twotx/xfs    bug.md #80, as above
+FC1 actdirty/ext4      bug.md #68: ext4 activation leaves pages dirtied before it (act_dirty+1); fixed by a30a5373 (#403)
+FC2 L-split/twotx/ext4   bug.md #80, in the lockdep set
+FC2 L-split/twotx/xfs    bug.md #80, in the lockdep set
+FC2 L-actdirty/ext4      bug.md #68, in the lockdep set
+FC6 r3/ext4/truncate-res1g/home-call   B1 (435978dd, #403): before it a 1 GiB truncate writes ~10 MiB home during the call (REMOVED checkpoint policy)
+FC6 r3/xfs/truncate-res1g/home-call    B1, as above (~15-22 MiB on XFS)

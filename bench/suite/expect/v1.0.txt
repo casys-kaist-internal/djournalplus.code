@@ -1,0 +1,3 @@
+# Expected FAILs of version v1.0: kernel new_main cc3d37bc (code 157b5750; builds probe #403,
+# pinned at /mnt/tau_backup/torner/kernels/tau-403, and lockdep #58, tau-403-lockdep). None.
+# Format: <item> <case glob> <reason>
