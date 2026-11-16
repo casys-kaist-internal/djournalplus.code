@@ -293,7 +293,7 @@ if [ "${TORNER_TRACE:-0}" = 1 ] && ! fs_is_zfs "$FS"; then
 	[ -d $TR/instances ] || mount -t tracefs nodev $TR 2>/dev/null
 	TI=$TR/instances/torner-$$
 	if mkdir "$TI" 2>/dev/null; then
-		if echo 16384 > "$TI/buffer_size_kb" &&
+		if echo 4096 > "$TI/buffer_size_kb" &&
 		   echo 1 > "$TI/events/filemap/mm_filemap_add_to_page_cache/enable" &&
 		   echo 1 > "$TI/events/writeback/balance_dirty_pages/enable" &&
 		   echo 1 > "$TI/tracing_on"; then
@@ -326,7 +326,7 @@ if [ -n "$TI" ]; then
 	echo 0 > "$TI/tracing_on"
 	TRACE_LOST=$(cat "$TI"/per_cpu/cpu*/stats 2>/dev/null | awk '/^overrun:/ {n += $2} END {print n + 0}')
 	# major:minor and inode of the target, as the folio event prints them
-	read -r TMAJ TMIN TINO < <(stat -c '%Hd %Ld %i' "$MNT/torner.dat")
+	read -r TMAJ TMIN TINO < <(python3 -c 'import os, sys; s = os.stat(sys.argv[1]); print(os.major(s.st_dev), os.minor(s.st_dev), s.st_ino)' "$MNT/torner.dat")
 	python3 "$HERE/gen_trace.py" "$TI/trace" "$TMAJ:$TMIN" "$TINO" "$TRACE_LOST" \
 		> "$WORKDIR/gen-trace.json"
 	rmdir "$TI" 2>/dev/null; TI=""
