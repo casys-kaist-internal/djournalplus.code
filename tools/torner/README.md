@@ -865,8 +865,9 @@ commits) -- and each condition aims at one of those.
 
 The old row names (`ow4k ow16k ap2k ap4k ap16k prealloc hole owfull*`) mean
 what they did.  Each capture records what it made: `gen.json` (gen's own
-report: writes, prereads), `gen-trace.json` and in `capture.json`
-`folio_orders` (the target's new folios by order during the workload),
+report: writes, prereads), `gen-trace.json` and in `capture.json` (redesign rows only, or
+`TORNER_TRACE=1`: the §6.2 table's rows run as before) `folio_orders` (the
+target's new folios by order during the workload),
 `dirty_pauses` (gen put to sleep for dirty pages) and `gen_sysctl`;
 `cell_csv.py` adds `folios_per_unit`, `dirty_pauses`, `dirty_pause_ms`.
 

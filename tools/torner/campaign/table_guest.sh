@@ -205,8 +205,13 @@ for cell in $CELLS; do
 	tau-xfs)  path=/mnt/scratch/bin:$SYS; mkfs=${MKFS_OPTS:--l tjsegsize=$TAU_SEG} ;;
 	*)        path=/mnt/scratch/stock/bin:$SYS; mkfs="" ;;
 	esac
-	# a redesign row's sysctls and memory hold-back, for capture.sh
-	RP_SYSCTL=""; RP_RESERVE=""; row_parse $row 2>/dev/null
+	# a redesign row's sysctls and memory hold-back, for capture.sh; its captures
+	# also trace the page cache (TORNER_TRACE), the §6.2 table's rows do not
+	RP_SYSCTL=""; RP_RESERVE=""; rtrace=${TORNER_TRACE:-0}
+	case $row in
+	ow4k|ow16k|ap2k|ap4k|ap16k|prealloc|hole|owfull*) ;;
+	*) row_parse $row 2>/dev/null && rtrace=1 ;;
+	esac
 	rsys=$RP_SYSCTL; rres=${RP_RESERVE:-$CAP_RESERVE_MB}
 	for prof in $PROFILES; do
 		gen="$(row_gen $row) $(profile_gen $prof)${GEN_EXTRA:+ $GEN_EXTRA}" ||
@@ -222,7 +227,8 @@ for cell in $CELLS; do
 		case $fs in tau-*) probes_zero; probes_sample $W/$name-probe-samples.txt & spid=$! ;; esac
 		sudo env PATH=$path MKE2FS_CONFIG=$MK TORNER_TAU_MKFS_OPTS="$mkfs" \
 			CAPTURE_NOSYNC=$CAPTURE_NOSYNC TORNER_EXT4_LAZYINIT=$TORNER_EXT4_LAZYINIT \
-			TORNER_RESERVE_MB=$rres TORNER_GEN_SYSCTL="$rsys" $S/capture.sh --workdir $D \
+			TORNER_RESERVE_MB=$rres TORNER_GEN_SYSCTL="$rsys" TORNER_TRACE=$rtrace \
+			$S/capture.sh --workdir $D \
 			--fs $fs --threads 1 --fsync-every 1 $args --gen-args "$gen" \
 			> $W/$name-capture.log 2>&1
 		rc=$?

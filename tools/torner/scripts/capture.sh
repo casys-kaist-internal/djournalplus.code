@@ -31,7 +31,7 @@
 #                        takes what it has copied).  vm.dirty_bytes and
 #                        vm.dirty_ratio replace each other; both pairs come back
 #                        as they were.
-#   TORNER_TRACE [1]     count, while gen's workload runs (between its trace
+#   TORNER_TRACE [0]     1: count, while gen's workload runs (between its trace
 #                        markers), the target file's new page cache folios by
 #                        order and the times a gen thread was throttled for dirty
 #                        pages (scripts/gen_trace.py): gen-trace.json, and
@@ -289,7 +289,7 @@ if [ "${TORNER_RESERVE_MB:-0}" -gt 0 ]; then
 fi
 # the trace: a tracefs instance of its own, so the function profile is left alone
 TMARK=""
-if [ "${TORNER_TRACE:-1}" = 1 ] && ! fs_is_zfs "$FS"; then
+if [ "${TORNER_TRACE:-0}" = 1 ] && ! fs_is_zfs "$FS"; then
 	[ -d $TR/instances ] || mount -t tracefs nodev $TR 2>/dev/null
 	TI=$TR/instances/torner-$$
 	if mkdir "$TI" 2>/dev/null; then
