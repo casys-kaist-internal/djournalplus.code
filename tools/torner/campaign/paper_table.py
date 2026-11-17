@@ -8,10 +8,15 @@ cell is violated (x) when any judged crash state broke a write -- content, size
 or durability -- and holds (v) otherwise, with n = states judged and the
 per-write Wilson 95% upper bound of the atom-* writes.  Below the grid, every
 violated cell's first witness, and the counts behind each cell.
+
+The redesign's condition rows (table_guest.sh row_parse: ow16k-t4-pr-dl, ...)
+get a grid of their own per condition, one line per write operation; the
+fixed grid above is left out when no row of it was run.
 """
 import argparse
 import csv
 import math
+import re
 import sys
 
 # ap2k is one 2 KiB append workload: odd pages land inside the block the page
@@ -24,6 +29,35 @@ ROWS = (("ow4k", "Overwrite, single block"), ("ow16k", "Overwrite, multi-block")
 COLS = (("ext4", "EXT4"), ("xfs", "XFS"), ("zfs-16k-tp", "ZFS"),
         ("ext4-data", "EXT4_Data"), ("tau-ext4", "τ-EXT4"), ("tau-xfs", "τ-XFS"),
         ("ext4-dioread-lock", "EXT4 dioread_lock"), ("ext4-nodelalloc", "EXT4 nodelalloc"))
+# condition rows: <op><K>k[-mod]..., in this order
+OPS = (("ow", "Overwrite"), ("ap", "Append"), ("pa", "Preallocated write"),
+       ("ho", "Write to a hole"), ("mx", "Mixed (chain)"), ("ma", "Mixed (aligned)"))
+
+
+def cond_row(rk):
+    """(op order, write name, condition) of a condition row; None for any other"""
+    base, _, rest = rk.partition("-")
+    m = re.fullmatch(r"([a-z]{2})(\d+)k", base)
+    ops = [o for o, _ in OPS]
+    if not m or m.group(1) not in ops:
+        return None
+    cond = ["%s KiB writes" % m.group(2)]
+    for mod in rest.split("-") if rest else ():
+        if re.fullmatch(r"t\d+", mod):
+            cond.append("%s writers" % mod[1:])
+        elif re.fullmatch(r"f\d+", mod):
+            cond.append("fsync every %s writes" % mod[1:])
+        elif mod == "pr":
+            cond.append("preread")
+        elif mod == "dc":
+            cond.append("cold cache")
+        elif re.fullmatch(r"dl\d*", mod):
+            cond.append("dirty limit %s KiB" % (mod[2:] or "16"))
+        elif re.fullmatch(r"mp\d+", mod):
+            cond.append("%s MiB held back" % mod[2:])
+        else:
+            return None
+    return ops.index(m.group(1)), dict(OPS)[m.group(1)], ", ".join(cond)
 
 
 def wilson_hi(k, n, z=1.96):
@@ -121,21 +155,39 @@ def main():
         grid[("ap2k:in", ck)] = split_ap2k(grid[(rk, ck)], "in")
         grid[("ap2k:new", ck)] = split_ap2k(grid[(rk, ck)], "new")
         del grid[(rk, ck)]
+    fixed = {rk for rk, _ in ROWS}
+    conds = {}
+    for rk in sorted({k[0] for k in grid} - fixed):
+        c = cond_row(rk)
+        if c:
+            conds.setdefault(c[2], []).append((c[0], rk, c[1]))
+    tables = []
+    if any(k[0] in fixed for k in grid) or not conds:
+        tables.append(("", ROWS))
+    for cond, rs in sorted(conds.items()):
+        tables.append((cond, [(rk, rn) for _, rk, rn in sorted(rs)]))
     if a.latex:
-        print("\\begin{tabular}{l%s}" % ("c" * len(cols)))
-        print(" & ".join(["Write"] + [c[1] for c in cols]) + " \\\\ \\hline")
-        for rk, rn in ROWS:
-            ms = [grid.get((rk, c[0])) for c in cols]
-            print(" & ".join([rn] + ["--" if m is None else
-                                     ("\\xmark" if m["bad"] else "\\cmark") for m in ms]) + " \\\\")
-        print("\\end{tabular}")
+        for cond, rows in tables:
+            if cond:
+                print("%% %s" % cond)
+            print("\\begin{tabular}{l%s}" % ("c" * len(cols)))
+            print(" & ".join(["Write"] + [c[1] for c in cols]) + " \\\\ \\hline")
+            for rk, rn in rows:
+                ms = [grid.get((rk, c[0])) for c in cols]
+                print(" & ".join([rn] + ["--" if m is None else
+                                         ("\\xmark" if m["bad"] else "\\cmark") for m in ms]) + " \\\\")
+            print("\\end{tabular}")
         return
-    w = max(len(rn) for _, rn in ROWS)
-    print("| %s | %s |" % ("write".ljust(w), " | ".join(c[1] for c in cols)))
-    print("|%s|%s|" % ("-" * (w + 2), "|".join("-" * (len(c[1]) + 2) for c in cols)))
-    for rk, rn in ROWS:
-        print("| %s | %s |" % (rn.ljust(w), " | ".join(mark(grid.get((rk, c[0]))) for c in cols)))
-    print()
+    for cond, rows in tables:
+        if cond:
+            print("%s:" % cond)
+            print()
+        w = max(len(rn) for _, rn in rows)
+        print("| %s | %s |" % ("write".ljust(w), " | ".join(c[1] for c in cols)))
+        print("|%s|%s|" % ("-" * (w + 2), "|".join("-" * (len(c[1]) + 2) for c in cols)))
+        for rk, rn in rows:
+            print("| %s | %s |" % (rn.ljust(w), " | ".join(mark(grid.get((rk, c[0]))) for c in cols)))
+        print()
     for (rk, ck), m in sorted(grid.items()):
         # p3: fsck found something new; n/a: states that would not unmount,
         # never fsck'd (shown when there are some)
