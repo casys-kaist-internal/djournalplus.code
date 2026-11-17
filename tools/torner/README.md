@@ -888,6 +888,86 @@ QUEUES="q3 q4 q6" Q3_CELLS="$(for r in $R; do echo ext4:$r; done)" \
   Q6_CELLS="$(for r in $R; do echo zfs-16k-tp:$r; done)" full.sh ...
 ```
 
+## Why ZFS tears the mixed rows (the ZIL, by design)
+
+`zfs-16k-tp` (recordsize 16K, compression off, `logbias=throughput`: the
+performance baselines' ZFS) tears only writes that straddle or share a record.
+In the 11-17 final run (`/mnt/tau_backup/torner/2026-11-17-redesign-final`,
+rows `<op>16k-t4-pr-dl`, quiet) overwrite, append, prealloc and hole have
+0/650, 0/1006, 0/572 and 0/555 bad states -- 0 in every condition the search
+tried -- and the chain mixed row 417/2359.  All 417 are `p1_mixed_torn_eof`: a
+write's first half (its overwrite of the write before) is in the file, its
+second half (its append) is past EOF.  In none of them had the torn write's
+`fsync()` returned, so no durability promise is broken, and in both paths
+ZFS does what its comments say it means to.  They come from the ZIL, along two
+paths (OpenZFS
+2.2.2, the guest's 2.2.2-0ubuntu9.5; line numbers are the upstream tag
+`zfs-2.2.2`, Ubuntu's patches not checked).
+
+At `logbias=throughput` every write is `WR_INDIRECT` (zfs_log.c:626), and
+`zfs_log_write()` cuts it at record boundaries (zfs_log.c:659): one `TX_WRITE`
+per record, each pointing at a copy of the whole record that `dmu_sync()`
+writes for the commit (`zfs_get_data()`, zfs_vnops.c).  The commit sends the
+log block and those data blocks in one flush window, in no order among them.
+
+1. **The log ends at a block that is not there.**  A chain write (step =
+   unit/2) crosses a record boundary every other write: two `TX_WRITE`s, two
+   data blocks.  If a crash keeps the log block but not the second record's
+   data block, `zil_claim_write()` ends the log at that record (zil.c:602-622):
+   "This can happen in normal operation when a log block is written to disk
+   before some of the dmu_sync() blocks it points to.  In this case, the
+   transaction cannot have been committed to anyone (we would have waited for
+   all writes to be stable first), so it is semantically correct to declare
+   this the end of the log" (zil.c:610-615).  The first record is replayed --
+   the write's first half is in the file -- and EOF stays at the record
+   boundary.  One writer is enough: round 3's one-writer `mx16k-pr-dl`, 41/980.
+2. **A record's block carries later writes' bytes.**  `dmu_sync()` copies the
+   record as its dbuf holds it when the commit gets there, so with several
+   writers the copy can hold writes this commit does not log.  A write to a
+   record already being synced is logged as `TX_WRITE2`, with no block of its
+   own (`dmu_sync()` returns `EALREADY`, dmu.c:1860-1868; zfs_vnops.c:945-955).
+   Replay writes a `TX_WRITE`'s whole block and cuts EOF back to that record's
+   end (zfs_replay.c:822-844); a `TX_WRITE2` only moves EOF out to its own end
+   (zfs_replay.c:852-900).  Once a logged write has moved EOF over them, the
+   bytes of an unlogged one that rode along in the block are in the file.  In
+   a chain they are the next write's first half; its second half is in the
+   next record and is not.  No reordering is needed -- the commits' own
+   flushes give it, so it shows in `prefix` states.  The aligned mixed row,
+   where no write crosses a record, tears only this way: 45/810 with four
+   writers (round 2, `ma16k-t4-pr-dl`), 0/719 with one (round 3).
+
+Both in the final run's `q6/cap-zfs-16k-tp-mx16k-t4-pr-dl-quiet`, decoded with
+`scripts/zlog.py <cap dir> --entries A-B` (write k covers
+`[k*0x2000, k*0x2000 + 0x4000)`):
+
+```
+# path 1: single-drop epoch<=63,drop=[753] -> EOF 0x108000, write 131 torn
+752 data  record 0x104000: write 130, 131's first half
+753 data  record 0x108000: write 132                (dropped)
+754 ZIL   TX_WRITE  0x104000+0x4000 -> 752  seq 195  write 130
+          TX_WRITE2 0x106000+0x2000         seq 196  write 131, first half
+          TX_WRITE  0x108000+0x2000 -> 753  seq 197  write 131, second half: end of log
+          TX_WRITE2 0x108000+0x4000         seq 198  write 132
+755 FLUSH
+# path 2: prefix epoch<=109 -> EOF 0x22c000, write 277 torn
+962 data  record 0x228000: write 276, 277's first half
+963 ZIL   TX_WRITE  0x228000+0x2000 -> 962  seq 413  write 275, second half: EOF 0x22a000
+          TX_WRITE2 0x228000+0x4000         seq 414  write 276: EOF 0x22c000
+964 FLUSH
+966 ZIL   TX_WRITE2 0x22a000+0x2000         seq 415  write 277, first half  (epoch 110)
+          TX_WRITE  0x22c000+0x2000 -> 965  seq 416  write 277, second half
+```
+
+The EOF each state recovered is the one these records give, here and in the
+earlier rounds' witnesses (`2026-11-17-redesign-r3`, `-dl`).  Neither path goes
+through the page cache -- ZFS keeps file data in per-record dbufs -- so another
+page size (a 16 KiB-page arm64 kernel) should leave both as they are; what
+decides them is the write's alignment to the record, `logbias`, and how many
+writers share a record.  At the `latency` default a 16 KiB write is copied into
+the log instead, and ZFS tears another way, a `WR_NEED_COPY` record split across
+log blocks (openzfs/zfs#17879, tools/killtest/results/libra09/SUMMARY.md §3.3),
+which is why the baselines run `throughput`.
+
 ## Epoch-based persistence models, and why there are two
 
 `single-drop` and friends assume any subset of *bios* may persist. That is the
@@ -955,7 +1035,9 @@ model", and **these numbers cannot tell those apart**. Two things would:
 - whether the original observation came from a real power cut rather than a
   replay.
 
-Do not cite the zeros above as "ZFS does not tear".
+Do not cite the zeros above as "ZFS does not tear".  The redesign's mixed rows
+do tear `zfs-16k-tp`, through the ZIL rather than the device: see "Why ZFS
+tears the mixed rows" above.
 
 ## `torner tear`
 
