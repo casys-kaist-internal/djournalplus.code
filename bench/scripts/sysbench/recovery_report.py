@@ -7,6 +7,12 @@ recovery), database start until it accepts connections, and their sum; from the
 restart log, PG's WAL replay (range, elapsed) and end-of-recovery checkpoint,
 or InnoDB's redo scan range and the time from "Starting crash recovery" to the
 last applied batch. Seconds; GB = 10^9 bytes. Then the mean per configuration.
+Application-crash trials (run_recovery_vm.sh CRASH_MODE=app: no unmount or mount,
+"db start" is the whole recovery) add four columns: killed (s from the SIGKILL until
+no process of the server was left), cut writes (writes the kill cut short,
+kill_trace.py), innochk bad (InnoDB tablespaces innochecksum failed) and restart
+errors (PANIC/FATAL/ERROR lines in the restart log); per configuration these are
+summed, not averaged.
 
 Usage: recovery_report.py <result dir>...
 """
@@ -117,6 +123,13 @@ def num(x):
         return None
 
 
+def count(x):
+    try:
+        return int(x)
+    except (TypeError, ValueError):
+        return None
+
+
 def rows(d):
     out = []
     for t in sorted(Path(d).glob("*.times")):
@@ -138,12 +151,20 @@ def rows(d):
             r["end ckpt"] = rs.get("ckpt_total")
         else:
             r["redo elapsed"] = rs.get("apply_s")
+        if v.get("crash_mode") == "app":
+            r["app"] = True
+            r["killed"] = num(v.get("gone_s"))
+            r["cut writes"] = count(v.get("cut_writes"))
+            r["innochk bad"] = count(v.get("innochk_bad"))
+            r["restart errors"] = count(v.get("restart_errors"))
         out.append(r)
     return out
 
 
 COLS = ["run", "tps before", "redo at crash GB", "replayed GB", "umount", "mount", "db start",
         "mount + start", "redo elapsed", "end ckpt"]
+APP_COLS = ["killed", "cut writes", "innochk bad", "restart errors"]
+SUMMED = {"cut writes", "innochk bad", "restart errors"}
 
 
 def cell(v):
@@ -154,17 +175,23 @@ def cell(v):
 
 def main():
     all_rows = [r for d in sys.argv[1:] for r in rows(d)]
-    print("| " + " | ".join(COLS) + " |")
-    print("|---|" + "---:|" * (len(COLS) - 1))
+    app = any(r.get("app") for r in all_rows)
+    cols = COLS + APP_COLS if app else COLS
+    print("| " + " | ".join(cols) + " |")
+    print("|---|" + "---:|" * (len(cols) - 1))
     for r in all_rows:
-        print("| " + " | ".join(cell(r.get(c)) for c in COLS) + " |")
-    print("\nMean per configuration:\n")
-    print("| config | trials | " + " | ".join(COLS[1:]) + " |")
-    print("|---|---:|" + "---:|" * (len(COLS) - 1))
+        print("| " + " | ".join(cell(r.get(c)) for c in cols) + " |")
+    print("\nMean per configuration%s:\n" % (" (" + ", ".join(sorted(SUMMED)) + ": sums)" if app else ""))
+    print("| config | trials | " + " | ".join(cols[1:]) + " |")
+    print("|---|---:|" + "---:|" * (len(cols) - 1))
     for cfg in sorted({r["config"] for r in all_rows}):
         rs = [r for r in all_rows if r["config"] == cfg]
         cells = []
-        for c in COLS[1:]:
+        for c in cols[1:]:
+            if c in SUMMED:
+                xs = [r[c] for r in rs if isinstance(r.get(c), int)]
+                cells.append(str(sum(xs)) if xs else "")
+                continue
             xs = [r[c] for r in rs if isinstance(r.get(c), float)]
             cells.append(cell(statistics.mean(xs)) if xs else "")
         print("| %s | %d | %s |" % (cfg, len(rs), " | ".join(cells)))

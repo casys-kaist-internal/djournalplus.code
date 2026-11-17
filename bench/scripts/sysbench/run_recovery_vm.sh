@@ -26,8 +26,21 @@
 # console log; summary.md (recovery_report.py). Never `timeout` around guest work:
 # long guest steps run detached and the host polls their markers with its own
 # deadline.
+# CRASH_MODE=app (default vm, all of the above): an application crash instead. Steps 1
+# and 2 as above up to the kill, which is a SIGKILL of the whole server inside the guest
+# (PG: the postmaster's process group in one kill(2); MySQL: mysqld); the guest, its
+# kernel and the mount stay, the page cache stays warm. Then, timed as above, the DB start
+# on the same mount (PG finds the killed server's postmaster.pid stale itself), and a
+# check: InnoDB's tablespaces with innochecksum after a clean shutdown (PG's images have
+# no data checksums). APP_TRACE=1 (default): kprobes on the file system's write_iter,
+# TRACE_LEAD (3) s before the kill until all of the server is gone, show which writes the
+# kill cut short (kill_trace.py; the offsets they need come from pahole on the guest
+# kernel's vmlinux). Results in $TAU_RESULTS/recovery_app/<db>/<ts>/, labels
+# <db>_appcrash_..., per trial also <label>.kill.txt, .kill.trace.zst, .kill_trace.txt
+# and, MySQL, .innochk.txt.
 # Usage: [FS_GROUPS=ext4 FS_FPWON=ext4 FS_FPWOFF=] [CRASH_TIMES="300 304 308"]
 #        [WARMUP_TIME=600] [WORKLOAD=oltp_write_only] [IMAGE_KEY=t16_r32000000]
+#        [CRASH_MODE=vm|app] [APP_TRACE=1] [TRACE_LEAD=3]
 #        run_recovery_vm.sh <postgres|mysql>
 set -e
 DBMS="${1:-}"
@@ -40,6 +53,10 @@ CRASH_TIMES="${CRASH_TIMES:-300 304 308}"
 WARMUP_TIME=${WARMUP_TIME:-600}
 WORKLOAD=${WORKLOAD:-oltp_write_only}
 THREADS=64
+CRASH_MODE=${CRASH_MODE:-vm}
+APP_TRACE=${APP_TRACE:-1}
+TRACE_LEAD=${TRACE_LEAD:-3}
+[[ "$CRASH_MODE" == vm || "$CRASH_MODE" == app ]] || { echo "CRASH_MODE is vm or app"; exit 1; }
 source "$TAUFS_BENCH/scripts/common.sh"
 source "$TAUFS_BENCH/scripts/$DBMS/api.sh"
 set +e   # the api scripts set -e; failures are handled per step below
@@ -69,13 +86,24 @@ for FS in $FS_GROUPS; do
   [[ "$FS" != *tau* || -f "$TAU_INITRD" ]] || { echo "❌ no τ initrd $TAU_INITRD"; exit 1; }
 done
 [[ "$(cat /sys/bus/pci/devices/$BDF/device 2>/dev/null)" ]] || { echo "❌ no PCI device $BDF"; exit 1; }
+if [[ $CRASH_MODE == vm ]]; then
 OUT="$TAU_RESULTS/recovery_vm/$DBMS/$(date +%Y%m%d_%H%M%S)"
+else
+OUT="$TAU_RESULTS/recovery_app/$DBMS/$(date +%Y%m%d_%H%M%S)"
+fi
 mkdir -p "$OUT"
 export VM_LOG=$OUT/console.log
 exec > >(tee -a "$OUT/run.log") 2>&1
 cp "$0" "$GUEST" "$OUT/"
+if [[ $CRASH_MODE == vm ]]; then
 echo "=== R2 (VM, qemu SIGKILL): $DBMS $WORKLOAD, FS $FS_GROUPS (FPW/DWB on: $FS_FPWON; off: $FS_FPWOFF)," \
   "crash at $CRASH_TIMES s, warm-up $WARMUP_TIME s, image $IMAGE_KEY $(date -u --rfc-3339=seconds)"
+else
+cp "$TAUFS_BENCH/scripts/sysbench/kill_trace.py" "$OUT/"
+echo "=== application crash (VM, SIGKILL of the server in the guest): $DBMS $WORKLOAD, FS $FS_GROUPS" \
+  "(FPW/DWB on: $FS_FPWON; off: $FS_FPWOFF), kill at $CRASH_TIMES s, warm-up $WARMUP_TIME s, image $IMAGE_KEY," \
+  "trace $APP_TRACE (lead $TRACE_LEAD s) $(date -u --rfc-3339=seconds)"
+fi
 log_env "$OUT/env.txt"
 source "$VMSH"
 set +u
@@ -125,13 +153,78 @@ wait_marker() {  # <name> <deadline s>: until the guest's sysbench marker appear
   done
 }
 
+# CRASH_MODE=app: the offsets the guest's write_iter kprobes need, from a kernel tree's
+# vmlinux: "<file.f_inode> <inode.i_ino>"; nothing (no trace) when pahole cannot tell or
+# the three the probes take as fixed moved (kiocb.ki_filp 0, kiocb.ki_pos 8, iov_iter.count 24)
+member_off() { pahole -C "$2" "$1/vmlinux" 2>/dev/null | awk -v m="$3;" '$NF == "*/" && $(NF - 4) == m {print $(NF - 2); exit}'; }
+trace_offsets() {  # <kernel tree>
+  local fi ii
+  [[ "$(member_off "$1" kiocb ki_filp) $(member_off "$1" kiocb ki_pos) $(member_off "$1" iov_iter count)" == "0 8 24" ]] || return 0
+  fi=$(member_off "$1" file f_inode); ii=$(member_off "$1" inode i_ino)
+  [[ -n "$fi" && -n "$ii" ]] && echo "$fi $ii"
+}
+if [[ $CRASH_MODE == app && $APP_TRACE == 1 ]]; then
+  TRACE_TAU=$(trace_offsets "$TAU_KERNEL") TRACE_BASE=$(trace_offsets "$BASE_KERNEL")
+  echo "write_iter probe offsets (file.f_inode inode.i_ino): τ '$TRACE_TAU' ($TAU_KERNEL), base '$TRACE_BASE' ($BASE_KERNEL)"
+fi
+until_s() {  # <s>: until <s> seconds after $s (trial's start of the load)
+  while [[ $(awk -v a="$(now)" -v b="$s" -v c="$1" 'BEGIN {print (a - b >= c) ? 1 : 0}') == 0 ]]; do sleep 0.2; done
+}
+
+# CRASH_MODE=app, after before_crash: SIGKILL of the server in the guest, its start on the
+# same kernel and mount, timed; the logs, the kill's trace, InnoDB's check; then as trial
+app_rest() {
+  local b t ino
+  t=$(now)
+  b=$(g kill_db $DBMS) || { echo "$b"; fail kill; return 1; }
+  echo "crash_epoch=$t" >> "$T"
+  echo "$b" | tail -1 | tee -a "$T"
+  [[ -n "$tp" ]] && { g trace_off | tail -1 >> "$T"; }
+  # the load ends on its lost connections
+  wait_marker load 60 > /dev/null || g sb_stop
+  echo "--> killed $(date -u +%T); DB start on the same kernel and mount"
+  echo "restart_epoch=$(now)" >> "$T"
+  b=$(db_start "~/r2/$LOGFILE.restart" crashed) || { echo "$b"; fail "db start after kill"; return 1; }
+  echo "db_start_s=$b" | tee -a "$T"
+  echo "after_restart $(db_pos)" >> "$T"
+  vm_scp jhlee@localhost:r2/warmup.log "$OUT/$LABEL.warmup.log" > /dev/null 2>&1
+  vm_scp jhlee@localhost:r2/load.log "$OUT/$LABEL.sysbench.log" > /dev/null 2>&1
+  vm_scp "jhlee@localhost:r2/$LOGFILE.0" "$OUT/$LABEL.server.log" > /dev/null 2>&1
+  vm_scp "jhlee@localhost:r2/$LOGFILE.restart" "$OUT/$LABEL.restart.log" > /dev/null 2>&1
+  vm_scp jhlee@localhost:r2/kill.txt "$OUT/$LABEL.kill.txt" > /dev/null 2>&1
+  echo "restart_errors=$(grep -cE '(PANIC|FATAL|ERROR):|\[ERROR\]' "$OUT/$LABEL.restart.log" 2>/dev/null)" >> "$T"
+  if [[ -n "$tp" ]]; then
+    for b in kill.trace.zst kill.trace.gz; do vm_scp "jhlee@localhost:r2/$b" "$OUT/$LABEL.$b" > /dev/null 2>&1; done
+    b=$(ls "$OUT/$LABEL".kill.trace.* 2>/dev/null | head -1)
+    if [[ -n "$b" ]]; then
+      python3 "$TAUFS_BENCH/scripts/sysbench/kill_trace.py" "$b" > "$OUT/$LABEL.kill_trace.txt" 2>&1
+      head -1 "$OUT/$LABEL.kill_trace.txt" | tee -a "$T"
+      ino=$(awk '$1 == "cut" || $1 == "err" || $1 == "open" {for (i = 2; i <= NF; i++) if ($i ~ /^ino=/) print substr($i, 5)}' \
+        "$OUT/$LABEL.kill_trace.txt" | sort -u)
+      [[ -n "$ino" ]] && g inopath $ino >> "$OUT/$LABEL.kill_trace.txt"
+    fi
+  fi
+  db_stop
+  if [[ $DBMS == mysql ]]; then
+    g innochk > /dev/null
+    if wait_marker innochk 3600; then
+      vm_scp jhlee@localhost:r2/innochk.txt "$OUT/$LABEL.innochk.txt" > /dev/null 2>&1
+      head -1 "$OUT/$LABEL.innochk.txt" | tee -a "$T"
+    fi
+  fi
+  cat "$T"
+  g umount
+  vm_kill; to_nvme
+  clear_fs $FS "$DEVICE" > /dev/null 2>&1
+}
+
 case "$DBMS" in
   postgres)
     SB=(--db-driver=pgsql --auto_inc=on --pgsql-host=127.0.0.1 --pgsql-port="$PG_PORT"
         --pgsql-user="$PGUSER" --pgsql-db="$DBNAME")
     # in the guest after its mount: the host (base+) cannot mount τ file systems
     db_settings() { g pg_conf full_page_writes=$FPW shared_buffers=$PG_SHARED_BUFFERS max_wal_size=$PG_MAX_WAL_SIZE; }
-    db_start() { g pg_start "$1"; }
+    db_start() { g pg_start "$1" ${2:-}; }   # 2: "crashed" keeps postmaster.pid (CRASH_MODE=app)
     db_pos() { g pos_pg "$DBNAME"; }
     db_stop() { g pg_stop; }
     LOGFILE=pg.log
@@ -151,7 +244,7 @@ esac
 SB+=(--tables=$TABLE --table-size=$ROWS --rand-type=special --threads=$THREADS --report-interval=10)
 
 trial() {  # FS FPW crash_after
-  local T="$OUT/$LABEL.times" s t b f
+  local T="$OUT/$LABEL.times" s t b f tp=
   echo "=== $LABEL: restoring ${FS}_${IMAGE_KEY} $(date -u +%T)"
   vm_kill; to_nvme || return 1
   [[ -s "$OUT/device.txt" ]] || echo "device $BDF $DEVICE vwc $(sudo nvme id-ctrl "$DEVICE" 2>/dev/null | awk '/^vwc /{print $3}')" \
@@ -163,6 +256,13 @@ trial() {  # FS FPW crash_after
   b=$(boot $FS) || { echo "$b"; fail boot; return 1; }
   echo "$b" | tee -a "$T"
   g mount $FS ~/r2/mount0 > /dev/null || { fail mount; return 1; }
+  if [[ $CRASH_MODE == app ]]; then
+    if [[ $APP_TRACE == 1 ]]; then
+      tp=$TRACE_BASE; [[ "$FS" == *tau* ]] && tp=$TRACE_TAU
+      [[ -n "$tp" ]] && { g trace_prep $FS $tp > "$OUT/$LABEL.trace_prep" 2>&1 || tp=; }
+    fi
+    echo "crash_mode=app trace=$([[ -n "$tp" ]] && echo on || echo off)" >> "$T"
+  fi
   db_settings >> "$OUT/$LABEL.settings" || { fail settings; return 1; }
   db_start "~/r2/$LOGFILE.0" > /dev/null || { fail "db start"; return 1; }
   echo "--> warm-up ${WARMUP_TIME} s $(date -u +%T)"
@@ -171,8 +271,13 @@ trial() {  # FS FPW crash_after
   echo "--> load, crash in ${CRASH_AFTER} s $(date -u +%T)"
   g sb load $WORKLOAD "${SB[*]}" --time=$((CRASH_AFTER + 600)) --rand-seed=$((2000 + CRASH_AFTER)) run > /dev/null
   s=$(now)
+  if [[ -n "$tp" ]]; then
+    until_s $((CRASH_AFTER - TRACE_LEAD))
+    g trace_on || echo "trace_on failed"
+  fi
   while [[ $(awk -v a="$(now)" -v b="$s" 'BEGIN {print (a - b >= '"$CRASH_AFTER"') ? 1 : 0}') == 0 ]]; do sleep 0.2; done
   echo "before_crash $(db_pos)" >> "$T"
+  if [[ $CRASH_MODE == app ]]; then app_rest; return; fi
   # the guest's logs so far, fetched before the kill (they stay in the guest image too)
   # (the load and server logs too: what the guest has not synced is lost in the crash)
   vm_scp jhlee@localhost:r2/warmup.log "$OUT/$LABEL.warmup.log" > /dev/null 2>&1
@@ -207,6 +312,7 @@ for FS in $FS_GROUPS; do
     fi
     for CRASH_AFTER in $CRASH_TIMES; do
       LABEL="${DBMS}_recovery_${FS}_fpw_${FPW}_t${TABLE}_c${THREADS}_x${CRASH_AFTER}"
+      [[ $CRASH_MODE == app ]] && LABEL="${DBMS}_appcrash_${FS}_fpw_${FPW}_t${TABLE}_c${THREADS}_x${CRASH_AFTER}"
       trial || echo "===== $LABEL failed, next trial $(date -u +%T)"
     done
   done
