@@ -12,7 +12,10 @@ Application-crash trials (run_recovery_vm.sh CRASH_MODE=app: no unmount or mount
 no process of the server was left), cut writes (writes the kill cut short,
 kill_trace.py), innochk bad (InnoDB tablespaces innochecksum failed) and restart
 errors (PANIC/FATAL/ERROR lines in the restart log); per configuration these are
-summed, not averaged.
+summed, not averaged. The trace keys (cut writes) are read from the first line of
+<label>.kill_trace.txt when it exists, else from .times: kill_trace.py can be rerun
+on the kept trace (2026-11-18: the run's own output counted false cut writes where
+the trace buffer had lost events; the first output was kept as .kill_trace.v1.txt).
 
 Usage: recovery_report.py <result dir>...
 """
@@ -152,6 +155,10 @@ def rows(d):
         else:
             r["redo elapsed"] = rs.get("apply_s")
         if v.get("crash_mode") == "app":
+            kt = Path(d) / (label + ".kill_trace.txt")
+            first = kt.read_text().splitlines()[:1] if kt.exists() else []
+            if first:
+                v.update(kv.partition("=")[::2] for kv in first[0].split())
             r["app"] = True
             r["killed"] = num(v.get("gone_s"))
             r["cut writes"] = count(v.get("cut_writes"))
