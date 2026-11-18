@@ -14,3 +14,9 @@ FC2 L-split/twotx/xfs    bug.md #80, in the lockdep set
 FC2 L-actdirty/ext4      bug.md #68, in the lockdep set
 FC6 r3/ext4/truncate-res1g/home-call   B1 (435978dd, #403): before it a 1 GiB truncate writes ~10 MiB home during the call (REMOVED checkpoint policy)
 FC6 r3/xfs/truncate-res1g/home-call    B1, as above (~15-22 MiB on XFS)
+FC1 killwrite/race/xfs    bug.md #81: a SIGKILL stops a multi-page write at a page boundary; fixed by f01f7633 (#404). #403, whose write path is #401's: 27 of 30 rounds torn
+FC1 killwrite/uffd/ext4   bug.md #81: the dying writer's source fault gives up after page 1 (xfs's iomap pre-faults, so xfs uffd passes). #403, whose write path is #401's: 255 blocks torn
+FC1 killwrite/race/ext4   bug.md #81, as above. #403, whose write path is #401's: 20 of 30 rounds torn
+FC2 L-killwrite/race/xfs  bug.md #81, in the lockdep set
+FC2 L-killwrite/uffd/ext4 bug.md #81, in the lockdep set
+FC2 L-killwrite/race/ext4 bug.md #81, in the lockdep set

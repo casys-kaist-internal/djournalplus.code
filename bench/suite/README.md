@@ -7,6 +7,7 @@ parallel.
 - Versions so far:
   - **beta**: every τ measurement up to 11-15.
   - **v1.0**: kernel new_main cc3d37bc (code 157b5750).
+  - **v1.1** (working name): kernel new_main f01f7633 (#81: a write SIGKILLed part way ends whole), pins tau-404 and tau-404-lockdep.
 - `fast_correct.sh` runs the items below against a pinned kernel and writes one verdict.
 - No item reboots the host, installs a kernel, rebinds 86:00.0 or writes a host device.
 
@@ -22,8 +23,8 @@ DRY=1 bash bench/suite/fast_correct.sh          # plan only: checks the kernels,
 
 | item | what | lane | time | owner |
 |---|---|---|---:|---|
-| FC1 | tautest, the #403 set: split, revoke, freetags, epoch free-*, trunc-reuse, trunc-race, crash, torn, stress | P | ~90 min | develop |
-| FC2 | tautest, the lockdep set (`KDIR_LOCKDEP`) | P | ~30 min | develop |
+| FC1 | tautest, the #403 set: split, revoke, freetags, epoch free-*, trunc-reuse, trunc-race, crash, torn, stress; from v1.1 also killwrite and shortcopy | P | ~95 min | develop |
+| FC2 | tautest, the lockdep set (`KDIR_LOCKDEP`); from v1.1 also killwrite | P | ~33 min | develop |
 | FC7 | DB counters: PostgreSQL and MySQL, 120 s × τ-EXT4 and τ-XFS; atoz_twotx, act_flush, act_dirty must be 0 | P | ~20 min | develop |
 | FC3 | CrashMonkey seq-1 | F | ~12 min | develop |
 | FC4 | Torner: the §6.2 table's main cells (7 workloads = 8 rows, quiet and busy) on τ-EXT4 and τ-XFS at a fifth of the state budget, plus the record_fua_only-fds control, which must fail | F | ~70 min | root |
@@ -96,6 +97,8 @@ Fault lines are BUG, WARNING, Oops, Call Trace, panic, the lockdep reports, susp
 For **beta** the run uses the #401 pins (fccc4abd), whose τ code is #400's. These cases fail there:
 - the twotx cases (bug.md #80, fixed in #403);
 - FC6's truncate home write (B1, #403).
+
+killwrite (FC1, FC2 from v1.1) fails on beta and v1.0 (bug.md #81, fixed in #404): race on both file systems, uffd on ext4 (XFS's iomap pre-faults the source). Both expected lists name those cases.
 
 ## Judging a finished run again (`REEVAL`)
 

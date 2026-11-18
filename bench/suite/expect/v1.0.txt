@@ -1,3 +1,10 @@
 # Expected FAILs of version v1.0: kernel new_main cc3d37bc (code 157b5750; builds probe #403,
-# pinned at /mnt/tau_backup/torner/kernels/tau-403, and lockdep #58, tau-403-lockdep). None.
+# pinned at /mnt/tau_backup/torner/kernels/tau-403, and lockdep #58, tau-403-lockdep). None
+# when it ran (11-16); killwrite (added for v1.1) fails on it, seen on #403 on 11-17 (k404 c403).
 # Format: <item> <case glob> <reason>
+FC1 killwrite/race/xfs    bug.md #81: a SIGKILL stops a multi-page write at a page boundary; fixed by f01f7633 (#404). #403: 27 of 30 rounds torn
+FC1 killwrite/uffd/ext4   bug.md #81: the dying writer's source fault gives up after page 1 (xfs's iomap pre-faults, so xfs uffd passes). #403: 255 blocks torn
+FC1 killwrite/race/ext4   bug.md #81, as above. #403: 20 of 30 rounds torn
+FC2 L-killwrite/race/xfs  bug.md #81, in the lockdep set
+FC2 L-killwrite/uffd/ext4 bug.md #81, in the lockdep set
+FC2 L-killwrite/race/ext4 bug.md #81, in the lockdep set

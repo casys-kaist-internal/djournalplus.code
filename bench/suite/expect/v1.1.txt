@@ -1,0 +1,4 @@
+# Expected FAILs of version v1.1 (working name): kernel new_main f01f7633 (#404 code; docs
+# 547b50ba), pinned at /mnt/tau_backup/torner/kernels/tau-404 (probe #404) and tau-404-lockdep
+# (lockdep #59). None.
+# Format: <item> <case glob> <reason>
