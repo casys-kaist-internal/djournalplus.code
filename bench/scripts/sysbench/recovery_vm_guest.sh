@@ -19,9 +19,10 @@
 #                              file.f_inode and inode.i_ino offsets from the host (pahole)
 #   trace_on | trace_off       on | off, the trace into ~/r2/kill.trace.zst (.gz), the
 #                              probes' hits and misses and the buffer's counts into kill.txt
-#   kill_db <postgres|mysql>   SIGKILL of the whole server at once (PG: the postmaster's
-#                              process group, mysqld), until no process of it is left;
-#                              trace markers "kill" and "gone"; prints kill_epoch, gone_s
+#   kill_db <postgres|mysql>   SIGKILL of every process of the server by pid (PG: the
+#                              postmaster stopped, its children killed, then it, and any
+#                              it forked in between; mysqld), until no process of it is
+#                              left; trace markers "kill" and "gone"; prints kill_epoch, gone_s
 #   sb_stop                    the load's sysbench killed if it still runs
 #   inopath <ino>...           paths of inodes under the mount
 #   innochk                    detached: innochecksum of every InnoDB tablespace (server
@@ -166,29 +167,46 @@ case "$cmd" in
     esac
     [[ "$pm" =~ ^[0-9]+$ ]] && kill -0 "$pm" 2> /dev/null || { echo "no $db server (pid '$pm')"; exit 1; }
     pids=$(pgrep -d ' ' -x $comm)
+    kids=$(tr ' ' '\n' <<< "$pids" | grep -vx "$pm" | tr '\n' ' ')
     pgid=$(ps -o pgid= -p "$pm" | tr -d ' ')
-    # PG: pg_ctl starts the postmaster with setsid(), so its process group is the
-    # postmaster and its children; one kill(2) on the group reaches them all before any
-    # child can exit (and the postmaster react). Anything else in the group: one by one.
-    others=$(ps -eo pgid=,comm= | awk -v g="$pgid" -v c="$comm" '$1 == g && $2 != c' | wc -l)
+    sids=$(ps -o sid= -p "$pids" | sort -u | wc -l)
     {
-      echo "server $db pid $pm pgid $pgid, $(echo $pids | wc -w) $comm processes, $(ls /proc/$pm/task | wc -l) threads in $pm, others in the group $others"
+      echo "server $db pid $pm pgid $pgid, $(echo $pids | wc -w) $comm processes in $sids sessions, $(ls /proc/$pm/task | wc -l) threads in $pm"
       echo "pids $pids"
     } > $R2/kill.txt
     sudo sh -c "echo kill > $TR/trace_marker" 2> /dev/null
     t0=$(now)
-    if [[ $db == postgres && "$pgid" == "$pm" && $others == 0 ]]; then
-      kill -KILL -- -"$pm"; how=group
+    # Every process by pid. A kill of the postmaster's process group reaches the postmaster
+    # alone: each child calls setsid() (InitPostmasterChild) and then exits only when it
+    # notices the postmaster gone, seconds later, writing until then (so every PG trial of
+    # CRASH_MODE=app up to 11-18). PG: the postmaster stopped first, so that while the
+    # children are killed one by one none of them sees it gone and exits on its own, and it
+    # forks nothing more; then the children, then the postmaster (it writes no data file).
+    # What it forked after the pgrep above is killed in the loop ("late"). mysqld: one process.
+    k0=$EPOCHREALTIME
+    if [[ $db == postgres ]]; then
+      kill -STOP "$pm"
+      kill -KILL $kids 2> /dev/null
+      kill -KILL "$pm"
+      how=each_pm_stopped
     else
-      kill -KILL $pids; how=each
+      kill -KILL $pids 2> /dev/null
+      how=each
     fi
-    while pgrep -x $comm > /dev/null; do
+    k1=$EPOCHREALTIME
+    late=0
+    while p=$(pgrep -d ' ' -x $comm); do
+      for q in $p; do
+        [[ " $pids " == *" $q "* ]] && continue
+        kill -KILL "$q" 2> /dev/null
+        pids="$pids $q" late=$((late + 1))
+      done
       [[ $(since "$t0" | cut -d. -f1) -lt 120 ]] || { echo "$comm still there 120 s after the kill"; exit 1; }
       sleep 0.01
     done
     g=$(since "$t0")
     sudo sh -c "echo gone > $TR/trace_marker" 2> /dev/null
-    echo "kill_epoch=$t0 gone_s=$g killed_processes=$(echo $pids | wc -w) kill_how=$how" | tee -a $R2/kill.txt
+    echo "kill_epoch=$t0 gone_s=$g killed_processes=$(echo $pids | wc -w) kill_how=$how late=$late kill_us=$(awk -v a="$k0" -v b="$k1" 'BEGIN {printf "%.0f", (b - a) * 1e6}')" | tee -a $R2/kill.txt
     ;;
   sb_stop)
     pkill -KILL -x sysbench 2> /dev/null
