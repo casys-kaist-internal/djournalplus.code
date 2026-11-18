@@ -38,9 +38,12 @@
 # kernel's vmlinux). Results in $TAU_RESULTS/recovery_app/<db>/<ts>/, labels
 # <db>_appcrash_..., per trial also <label>.kill.txt, .kill.trace.zst, .kill_trace.txt
 # and, MySQL, .innochk.txt.
+# MAX_WAL_SIZE (PG only, e.g. 1200MB): max_wal_size for this run instead of api.sh's
+# PG_MAX_WAL_SIZE (16GB for FPW on and off), e.g. to give FPW off FPW on's checkpoint
+# interval; the labels then end in _wal<size>.
 # Usage: [FS_GROUPS=ext4 FS_FPWON=ext4 FS_FPWOFF=] [CRASH_TIMES="300 304 308"]
 #        [WARMUP_TIME=600] [WORKLOAD=oltp_write_only] [IMAGE_KEY=t16_r32000000]
-#        [CRASH_MODE=vm|app] [APP_TRACE=1] [TRACE_LEAD=3]
+#        [CRASH_MODE=vm|app] [APP_TRACE=1] [TRACE_LEAD=3] [MAX_WAL_SIZE=<n>MB|<n>GB]
 #        run_recovery_vm.sh <postgres|mysql>
 set -e
 DBMS="${1:-}"
@@ -60,6 +63,13 @@ TRACE_LEAD=${TRACE_LEAD:-3}
 source "$TAUFS_BENCH/scripts/common.sh"
 source "$TAUFS_BENCH/scripts/$DBMS/api.sh"
 set +e   # the api scripts set -e; failures are handled per step below
+MAX_WAL_SIZE=${MAX_WAL_SIZE:-}
+WALTAG=
+if [[ -n "$MAX_WAL_SIZE" ]]; then
+  [[ $DBMS == postgres ]] || { echo "MAX_WAL_SIZE is for postgres only"; exit 1; }
+  [[ "$MAX_WAL_SIZE" =~ ^[1-9][0-9]*(MB|GB)$ ]] || { echo "MAX_WAL_SIZE is <n>MB or <n>GB, not '$MAX_WAL_SIZE'"; exit 1; }
+  PG_MAX_WAL_SIZE=$MAX_WAL_SIZE WALTAG=_wal$MAX_WAL_SIZE
+fi
 TABLE=$MAIN_TABLES
 ROWS=$MAIN_ROWS_PER_TABLE
 IMAGE_KEY=${IMAGE_KEY:-$(main_image_key)}
@@ -104,6 +114,7 @@ echo "=== application crash (VM, SIGKILL of the server in the guest): $DBMS $WOR
   "(FPW/DWB on: $FS_FPWON; off: $FS_FPWOFF), kill at $CRASH_TIMES s, warm-up $WARMUP_TIME s, image $IMAGE_KEY," \
   "trace $APP_TRACE (lead $TRACE_LEAD s) $(date -u --rfc-3339=seconds)"
 fi
+[[ $DBMS == postgres ]] && echo "max_wal_size $PG_MAX_WAL_SIZE${MAX_WAL_SIZE:+ (MAX_WAL_SIZE, not the api.sh default)}"
 log_env "$OUT/env.txt"
 source "$VMSH"
 set +u
@@ -252,7 +263,7 @@ trial() {  # FS FPW crash_after
   restore_filesystem $FS "$IMAGE_KEY" "$BACKUP_DIR" > "$OUT/$LABEL.restore.log" 2>&1 || { fail restore; return 1; }
   DBW=OFF; [[ "$FPW" == on ]] && DBW=ON
   to_vfio || { fail vfio; return 1; }
-  echo "fs=$FS fpw=$FPW crash_after_s=$CRASH_AFTER threads=$THREADS warmup_s=$WARMUP_TIME workload=$WORKLOAD" > "$T"
+  echo "fs=$FS fpw=$FPW crash_after_s=$CRASH_AFTER threads=$THREADS warmup_s=$WARMUP_TIME workload=$WORKLOAD${MAX_WAL_SIZE:+ max_wal_size=$MAX_WAL_SIZE}" > "$T"
   b=$(boot $FS) || { echo "$b"; fail boot; return 1; }
   echo "$b" | tee -a "$T"
   g mount $FS ~/r2/mount0 > /dev/null || { fail mount; return 1; }
@@ -311,8 +322,8 @@ for FS in $FS_GROUPS; do
       continue
     fi
     for CRASH_AFTER in $CRASH_TIMES; do
-      LABEL="${DBMS}_recovery_${FS}_fpw_${FPW}_t${TABLE}_c${THREADS}_x${CRASH_AFTER}"
-      [[ $CRASH_MODE == app ]] && LABEL="${DBMS}_appcrash_${FS}_fpw_${FPW}_t${TABLE}_c${THREADS}_x${CRASH_AFTER}"
+      LABEL="${DBMS}_recovery_${FS}_fpw_${FPW}_t${TABLE}_c${THREADS}_x${CRASH_AFTER}${WALTAG}"
+      [[ $CRASH_MODE == app ]] && LABEL="${DBMS}_appcrash_${FS}_fpw_${FPW}_t${TABLE}_c${THREADS}_x${CRASH_AFTER}${WALTAG}"
       trial || echo "===== $LABEL failed, next trial $(date -u +%T)"
     done
   done
