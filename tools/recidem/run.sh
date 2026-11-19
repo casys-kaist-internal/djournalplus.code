@@ -23,7 +23,7 @@
 #        SEGSIZE (16m: τ journal segments; empty = the mkfs default, 128 MiB),
 #        KD (the umbrella's codes/djournalplus-kernel.code: the kernel tree the guest boots)
 # Guest: an overlay on vm_imgs/cm-guest-ubuntu.qcow2 per boot, the tree's bzImage and the initrd of
-# its build (vm_imgs/initrd.img-6.8.0tjournal+-<build>). Parsed whole first.
+# its build (vm_imgs/initrd.img-6.8.0tjournal+-<build>; INITRD=none boots without one). Parsed whole first.
 {
 R=$(cd "$(dirname "$(realpath "$0")")/../.." && pwd); T=$R/tools/recidem; V=$R/tools/qemu/vm_imgs
 cd $R || exit 1
@@ -49,7 +49,7 @@ O="-i $HOME/.ssh/tau_vm_ed25519 -o IdentitiesOnly=yes -o BatchMode=yes -o Strict
    -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=5 -o ServerAliveInterval=10"
 g() { ssh -p $PORT $O jhlee@localhost "$@"; }
 die() { echo "recidem: $*"; exit 1; }
-[ -f "$INITRD" ] || die "no initrd $INITRD for build #$BUILD"
+[ "$INITRD" = none ] || [ -f "$INITRD" ] || die "no initrd $INITRD for build #$BUILD (INITRD=none boots without one)"
 [ -x "$AW" ] || gcc -O2 -Wall -pthread -o "$AW" "$R/bench/scripts/micro/atomicw.c" || die "atomicw"
 pgrep -f "hostfwd=tcp::$PORT-:22" > /dev/null && die "a VM on port $PORT is running"
 mkdir -p "$OUT" || exit 1

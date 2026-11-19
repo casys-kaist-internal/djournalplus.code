@@ -9,7 +9,7 @@
 # STOCK=1 runs CrashMonkey's stock types (ext4, xfs) instead, as results-libra09-1980/run_stock.sh:
 # the guest's stock mkfs/fsck, no CM_* environment, no tjournal mount (τ compiled in, inactive).
 # Guest: an overlay on vm_imgs/cm-guest-ubuntu.qcow2, the tree's bzImage, the initrd of its build.
-#   run_seq2.sh <sample dir> [out dir]   env BASE, INITRD (vm_imgs/), FSES ("ext4 xfs"), DEADLINE_MIN (720),
+#   run_seq2.sh <sample dir> [out dir]   env BASE, INITRD (vm_imgs/; none = no initrd), FSES ("ext4 xfs"), DEADLINE_MIN (720),
 #                                         STOCK=1, SUMMARY_ONLY=1 (only the table, from a finished run),
 #                                         KD (the kernel tree), OVDIR (vm_imgs: the overlays and scratch disks)
 # Exit 0 when every variant ran all its tests with no failure and no fault line. Parsed whole first.
@@ -23,7 +23,7 @@ BN=$(echo "$KV" | grep -oE '#[0-9]+' | tr -d '#'); [ -n "$BN" ] || die "no tau b
 S=$(realpath "${1:?sample dir}"); OUT=$(realpath -m "${2:-$S/run-$BN}")
 FSES=${FSES:-ext4 xfs}; DEADLINE_MIN=${DEADLINE_MIN:-720}; VS=tau; [ -n "${STOCK:-}" ] && VS=stock
 BASE=${BASE:-$V/cm-guest-ubuntu.qcow2}; INITRD=${INITRD:-$V/initrd.img-6.8.0tjournal+-$BN}
-[ -f "$INITRD" ] || die "no initrd $INITRD"
+[ "$INITRD" = none ] || [ -f "$INITRD" ] || die "no initrd $INITRD (INITRD=none boots without one)"
 N=$(ls "$S"/so/*.so 2>/dev/null | wc -l); [ "$N" -gt 0 ] || die "no workloads in $S/so"
 # build/ against this tree, as run_tau_suite.sh checks
 rel=$(cat "$KD/include/config/kernel.release")

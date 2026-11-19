@@ -32,8 +32,8 @@
 #       plus run.sh's DISK_GB FILES DATA_GB JOURNAL_GB THREADS BATCH LOAD_S KILL_MIN_S IMGDIR SEGSIZE KD;
 #       KEEP=1 keeps each crash image (with the recovery's log in its last LOG_GB) as IMGDIR/kept-<out>-<fs>.s<n>.crash;
 #       a state with a FAIL keeps it without KEEP, unless that would leave IMGDIR under 1 TiB free
-# Guest: an overlay on vm_imgs/cm-guest-ubuntu.qcow2, the tree's bzImage and the initrd of its build.
-# Parsed whole first.
+# Guest: an overlay on vm_imgs/cm-guest-ubuntu.qcow2, the tree's bzImage and the initrd of its build
+# (INITRD=none boots without one). Parsed whole first.
 {
 SELF=$(realpath "$0")
 R=$(cd "$(dirname "$(realpath "$0")")/../.." && pwd); T=$R/tools/recidem; V=$R/tools/qemu/vm_imgs
@@ -62,7 +62,7 @@ O="-i $HOME/.ssh/tau_vm_ed25519 -o IdentitiesOnly=yes -o BatchMode=yes -o Strict
    -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=5 -o ServerAliveInterval=10"
 g() { ssh -p $PORT $O jhlee@localhost "$@"; }
 die() { echo "nth: $*"; exit 1; }
-[ -f "$INITRD" ] || die "no initrd $INITRD for build #$BUILD"
+[ "$INITRD" = none ] || [ -f "$INITRD" ] || die "no initrd $INITRD for build #$BUILD (INITRD=none boots without one)"
 [ -x "$AW" ] || gcc -O2 -Wall -pthread -o "$AW" "$R/bench/scripts/micro/atomicw.c" || die "atomicw"
 ( cd $R/tools/torner && make -s ) || die "torner build"
 $TORNER replay --help 2>&1 | grep -q state-spec || die "torner"
