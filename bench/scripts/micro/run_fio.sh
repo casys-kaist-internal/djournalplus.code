@@ -43,7 +43,13 @@
 #   r1     EVAL_PLAN R1, atomicw only: overwrite at TOP_T threads on R1_FILES
 #          files (TOTAL_GB split evenly, laid out with atomicw --prepare), an
 #          fdatasync every R1_FSYNC_N (1) writes; then R1_OPEN "F:N" cases, F
-#          files open and only N written (atomicw --write-files)
+#          files open and only N written (atomicw --write-files). Opt-in (2026-11-20, the
+#          R1 redesign): R1_IDLE=sparse lays out an "F:N" case's N written files at
+#          TOTAL_GB/N each, whatever F is, and its F - N other files sparse at that size
+#          (ftruncate, no data), so only the open count changes with F; R1_MEM=1 records
+#          per r1 run the tau files alive (bpftrace on alloc_tau / free_tau, each second,
+#          <label>.taucount) and /proc/meminfo + the tau, buffer_head, kmalloc-4k and
+#          inode slabs at the start, the ramp's end and the window's end (<label>.mem)
 # Runs: REPS_TOP at TOP_T (e1) and for e2, sync1, zoned, kcheck, r1; REPS at the
 # other thread counts; bytes and gate once.
 #
@@ -108,6 +114,18 @@ if [[ " $EXPS " == *" r1 "* ]]; then
   (( $(ulimit -n) > r1_max + 1024 )) || { echo "❌ r1 opens $r1_max files, but the open-file limit is $(ulimit -n)"; exit 1; }
 fi
 R1_FSYNC_N=${R1_FSYNC_N:-1}
+R1_IDLE=${R1_IDLE:-}   # sparse: see r1 above; empty: R1_OPEN's F files of TOTAL_GB/F each, as before
+R1_MEM=${R1_MEM:-0}    # 1: the tau files and memory of every r1 run (see r1 above)
+[[ -z $R1_IDLE || $R1_IDLE == sparse ]] || { echo "❌ R1_IDLE is sparse or empty"; exit 1; }
+r1_key() {  # <F> <N>: an r1 case's layout: <F>, or <F>w<N> for an R1_IDLE=sparse case with N < F
+  if [[ $R1_IDLE == sparse ]] && (( $2 < $1 )); then echo "$1w$2"; else echo "$1"; fi
+}
+r1_mem() {  # <start|ramp|end> <out prefix>: R1_MEM's snapshot
+  { echo "== $1 $(date -u +%s.%N)"; cat /proc/meminfo
+    sudo grep -E '^(tau_|buffer_head |kmalloc-4k |ext4_inode_cache |xfs_inode |dentry |filp )' /proc/slabinfo
+  } >> "$2.mem" 2>&1
+  return 0   # a missing slab line must not stop the run (set -e)
+}
 
 has() { [[ " $1 " == *" $2 "* ]]; }
 
@@ -316,13 +334,25 @@ layout_e2() {  # <dir> <files>
 
 layout_r1() {  # <dir> <files>: atomicw's own layout (fio cannot run 10^5 jobs)
   mkdir -p "$1"
+  if [[ $2 == *w* ]]; then   # <F>w<N> (R1_IDLE=sparse): N files written at TOTAL_GB/N, then F - N sparse ones
+    "$AW" --prepare --dir "$1" --files "${2#*w}" --total "${TOTAL_GB}g" --file-fmt 'r1.%d' > /dev/null || return 1
+    python3 - "$1" "${2#*w}" "${2%w*}" "$(stat -c %s "$1/r1.0")" <<'PY' || return 1
+import os, sys
+d, n, f, size = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
+for i in range(n, f):
+    fd = os.open(os.path.join(d, "r1.%d" % i), os.O_WRONLY | os.O_CREAT, 0o644)
+    os.ftruncate(fd, size)
+    os.close(fd)
+PY
+    return 0
+  fi
   "$AW" --prepare --dir "$1" --files "$2" --total "${TOTAL_GB}g" --file-fmt 'r1.%d' > /dev/null
 }
 
 # the r1 run as a job text for the record; aw_args turns it into atomicw's options
-job_r1() {  # <dir> <files> <files written>
+job_r1() {  # <dir> <files> <files written> [total GiB, default TOTAL_GB]
   printf '# r1: atomicw only\n[r1]\ndirectory=%s\nfiles=%s\nwrite_files=%s\ntotal=%sg\nnumjobs=%s\nfdatasync=%s\nramp_time=%s\nruntime=%s\n' \
-    "$1" "$2" "$3" "$TOTAL_GB" "$TOP_T" "$R1_FSYNC_N" "$RAMP" "$RUNTIME"
+    "$1" "$2" "$3" "${4:-$TOTAL_GB}" "$TOP_T" "$R1_FSYNC_N" "$RAMP" "$RUNTIME"
 }
 
 # fresh file system with the overwrite layouts of the given "t<T>" / "f<F>" /
@@ -392,9 +422,10 @@ aw_args() {  # <config> <job text> <out prefix> <mode time|size>
 # the caller. The device counters are read at the start, after the ramp and
 # after the umount.
 run_fio() {  # <config> <exp> <op> <threads> <files> <fdatasync n> <dist> <rep> <mode> <dir>
-  local cfg=$1 out=$RESULT_DIR/runs/$LABEL mark t0 t1 t2 d0 d1 d2 pid ramp=0
+  local cfg=$1 out=$RESULT_DIR/runs/$LABEL mark t0 t1 t2 d0 d1 d2 pid ramp=0 memo=0 tcpid="" i
   [[ $9 != time ]] || ramp=$(grep -m1 '^ramp_time=' <<< "$JOB" | cut -d= -f2)
   ramp=${ramp:-0}
+  if [[ $R1_MEM == 1 && $2 == r1 ]]; then memo=1; fi
   fs_umount "$cfg"
   drop_caches > /dev/null
   fs_mount "$cfg"
@@ -402,6 +433,15 @@ run_fio() {  # <config> <exp> <op> <threads> <files> <fdatasync n> <dist> <rep> 
   mark="fio-run-$LABEL-$RANDOM"
   kmark "$mark"
   rm -f "$out.dramp" "$out.fds"
+  if (( memo )); then   # R1_MEM: memory before the tool starts; the tau files alive, each second, from here
+    rm -f "$out.mem" "$out.taucount"
+    r1_mem start "$out"
+    sudo bpftrace -e 'kretfunc:vmlinux:alloc_tau /retval != 0/ { @a = count(); } kfunc:vmlinux:free_tau { @f = count(); }
+      interval:s:1 { printf("t %llu\n", nsecs); print(@a); print(@f); }' > "$out.taucount" 2>&1 &
+    tcpid=$!
+    for (( i = 0; i < 60; i++ )); do grep -q '^Attaching' "$out.taucount" 2>/dev/null && break; sleep 1; done
+    sleep 1
+  fi
   d0=$(devstat); t0=$(date +%s.%N)
   if [[ $TOOL == atomicw ]]; then
     aw_args "$cfg" "$JOB" "$out" "$9"
@@ -422,6 +462,7 @@ run_fio() {  # <config> <exp> <op> <threads> <files> <fdatasync n> <dist> <rep> 
     trp=$!
   fi
   (( ramp == 0 )) || ( sleep "$ramp"; devstat > "$out.dramp" ) &
+  if (( memo && ramp )); then ( sleep "$ramp"; r1_mem ramp "$out" ) & fi
   if [[ $cfg == tau-* ]]; then   # which of fio's open files carry O_TAU_UNTORN
     ( sleep $(( ramp + 5 )); sudo env MNT="$MOUNT_DIR" P="$pid" bash -c '
         n=0; tau=0
@@ -436,6 +477,7 @@ run_fio() {  # <config> <exp> <op> <threads> <files> <fdatasync n> <dist> <rep> 
   wait "$pid"
   [[ -z $trp ]] || sudo kill -INT "$trp" 2>/dev/null || true
   t1=$(date +%s.%N); d1=$(devstat)
+  if (( memo )); then r1_mem end "$out"; sudo kill -INT "$tcpid" 2>/dev/null || true; fi
   wait
   sync -f "${10}"
   fs_umount "$cfg"
@@ -514,13 +556,15 @@ e2_runs() {  # <config> <F>
 }
 
 r1_runs() {  # <config>: R1_FILES files written, then the R1_OPEN "F:N" cases
-  local cfg=$1 f n c rep
+  local cfg=$1 f n c rep k tot
   for c in $(for f in $R1_FILES; do echo "$f:$f"; done) $R1_OPEN; do
     f=${c%%:*}; n=${c##*:}
+    k=$(r1_key "$f" "$n"); tot=$TOTAL_GB   # R1_IDLE=sparse: F files of TOTAL_GB/N each (N written, F - N sparse)
+    [[ $k == "$f" ]] || tot=$(awk -v f="$f" -v n="$n" -v g="$TOTAL_GB" 'BEGIN { printf "%.10g", f * g / n }')
     for (( rep = 1; rep <= REPS_TOP; rep++ )); do
       LABEL="r1_${cfg}_overwrite_t${TOP_T}_f${f}_w${n}_r${rep}"
-      JOB=$(job_r1 "$MOUNT_DIR/r$f" "$f" "$n")
-      run_fio "$cfg" r1 overwrite "$TOP_T" "$f" "$R1_FSYNC_N" uniform "$rep" time "$MOUNT_DIR/r$f"
+      JOB=$(job_r1 "$MOUNT_DIR/r$k" "$f" "$n" "$tot")
+      run_fio "$cfg" r1 overwrite "$TOP_T" "$f" "$R1_FSYNC_N" uniform "$rep" time "$MOUNT_DIR/r$k"
     done
   done
 }
@@ -549,7 +593,7 @@ for CONFIG in $CONFIGS; do
   has "$EXPS" e2 && for f in $FILES_LIST; do fs+=("$f"); done
   rs=()   # r1 layouts: R1_FILES and the F of every R1_OPEN case
   if has "$EXPS" r1; then
-    for f in $R1_FILES $(for c in $R1_OPEN; do echo "${c%%:*}"; done); do has "${rs[*]}" "$f" || rs+=("$f"); done
+    for f in $R1_FILES $(for c in $R1_OPEN; do r1_key "${c%%:*}" "${c##*:}"; done); do has "${rs[*]}" "$f" || rs+=("$f"); done
   fi
   if (( ${#ts[@]} + ${#fs[@]} + ${#rs[@]} )); then
     if (( per )); then

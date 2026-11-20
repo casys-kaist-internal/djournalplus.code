@@ -19,8 +19,15 @@
 # and syncs per file, sync latency per file type), the files of the mount with
 # their inode numbers at the end; results <ts>_prof-files, left out of
 # SUMMARY.md.
+# PROFILE=r3 (EVAL_PLAN R3 item 4, as run_main.sh's via profile.sh): one
+# measurement at 64 terminals (PROFILE_THREADS) with costs/r3_calls.bt from the
+# database's start to the end of that measurement: every truncate, unlink, punch
+# (and other fallocate modes) and rename over a file on the test file system;
+# phases warmup / measure / after in <block>.r3calls.marks, the count per phase
+# by costs/r3_calls_report.py in <block>.r3calls.txt. A counting run, not a
+# throughput run (NOT_THROUGHPUT); results <ts>_prof-r3, left out of SUMMARY.md.
 # Usage: [THREADS_LIST="1 8 16 32 64"] [FS_GROUPS=ext4 FS_FPWON=ext4 FS_FPWOFF=ext4]
-#        [VARIANT=ssd990] [POINT_WARMUP_TIME=60] [PROFILE=files] run_tpcc.sh <postgres|mysql> [warehouses (1100)]
+#        [VARIANT=ssd990] [POINT_WARMUP_TIME=60] [PROFILE=files|r3] run_tpcc.sh <postgres|mysql> [warehouses (1100)]
 set -e
 MODE="$1"
 WH="${2:-1100}"
@@ -66,7 +73,11 @@ case "$PROFILE" in
     done
     [[ -e /sys/kernel/btf/vmlinux ]] || { echo "❌ PROFILE needs kernel BTF"; exit 1; }
     THREADS_LIST=(${PROFILE_THREADS:-64}); LAST_POINT_RUNS=1 ;;
-  *) echo "❌ run_tpcc.sh: PROFILE=files only"; exit 1 ;;
+  r3)
+    command -v bpftrace > /dev/null || { echo "❌ PROFILE=r3 needs bpftrace"; exit 1; }
+    [[ -e /sys/kernel/btf/vmlinux || -r "${BPFTRACE_BTF:-}" ]] || { echo "❌ PROFILE=r3 needs kernel BTF or BPFTRACE_BTF"; exit 1; }
+    THREADS_LIST=(${PROFILE_THREADS:-64}); LAST_POINT_RUNS=1 ;;
+  *) echo "❌ run_tpcc.sh: PROFILE=files or r3 only"; exit 1 ;;
 esac
 KEY="tpcc_w$WH"
 BACKUP_DIR="$TAU_BACKUP_ROOT/benchbase/$MODE"
@@ -105,6 +116,37 @@ files_end() {
   sudo find "$MOUNT_DIR" -xdev -type f -printf '%i %s %p\n' > "$OUT/$1.inodes" 2>/dev/null || true
 }
 
+# PROFILE=r3 (as profile.sh's profile_r3_start / profile_r3_mark / profile_end):
+# r3_begin <block> right after the database starts, r3_mark measure|after <label>
+# around the measurement, r3_end after it
+r3_mark() {  # <phase> [label]: the phase's start, in r3_calls.bt's clock (CLOCK_MONOTONIC)
+  echo "$1 $(python3 -c 'import time; print(time.clock_gettime_ns(time.CLOCK_MONOTONIC))') $(date -u +%FT%T.%N) ${2:-}" \
+    >> "$R3_CALLS_OUT.marks"
+}
+r3_begin() {
+  local devnum=0 i
+  case "$FS" in   # the test file system's s_dev; zfs and btrfs have their own: watch all
+    zfs*|btrfs*) ;;
+    *) devnum=$(( (0x$(stat -c %t "$DEVICE") << 20) | 0x$(stat -c %T "$DEVICE") )) ;;
+  esac
+  R3_CALLS_OUT="$OUT/$1.r3calls"
+  echo "PROFILE=r3 (EVAL_PLAN R3 item 4): the runs here count truncate/unlink/punch/rename calls" \
+    "with bpftrace (costs/r3_calls.bt); not throughput runs, their numbers are not results" > "$OUT/NOT_THROUGHPUT"
+  sudo env ${BPFTRACE_BTF:+BPFTRACE_BTF=$BPFTRACE_BTF} bpftrace "$TAUFS_BENCH/scripts/costs/r3_calls.bt" \
+    "$devnum" > "$R3_CALLS_OUT" 2>&1 &
+  R3_BT_PID=$!
+  for (( i = 0; i < 60; i++ )); do
+    grep -q "^Attaching" "$R3_CALLS_OUT" 2>/dev/null && break
+    sleep 1
+  done
+  r3_mark warmup
+}
+r3_end() {
+  sudo kill -INT "$R3_BT_PID" 2>/dev/null || true
+  wait "$R3_BT_PID" 2>/dev/null || true
+  python3 "$TAUFS_BENCH/scripts/costs/r3_calls_report.py" "$R3_CALLS_OUT" > "$R3_CALLS_OUT.txt" 2>&1 || true
+}
+
 for FS in $FS_GROUPS; do
   for FPW in off on; do
     if [[ "$FPW" == off && " $FS_FPWOFF " != *" $FS "* ]] || [[ "$FPW" == on && " $FS_FPWON " != *" $FS "* ]]; then
@@ -119,6 +161,7 @@ for FS in $FS_GROUPS; do
     db_fs_settings "$FS"
     SERVER_LOG="$OUT/${BLOCK}_server.log"
     db_start
+    [[ "$PROFILE" != r3 ]] || r3_begin "$BLOCK"
     echo "--> warm-up ${WARMUP_TIME} s, $WARMUP_TERMINALS terminals $(date -u +%T)"
     TERMINALS=$WARMUP_TERMINALS
     bb_config "$OUT/${BLOCK}_warmup.xml" true "$WARMUP_TIME" 0
@@ -138,9 +181,11 @@ for FS in $FS_GROUPS; do
         prev=$TERMINALS
       fi
       echo "--> $LABEL: ${RUNNING_TIME} s $(date -u +%T)"
-      [[ -z "$PROFILE" ]] || files_begin "$LABEL"
+      [[ "$PROFILE" != files ]] || files_begin "$LABEL"
+      [[ "$PROFILE" != r3 ]] || r3_mark measure "$LABEL"
       tpcc_run "$LABEL" true "$RUNNING_TIME" 0 "$FPW"
-      [[ -z "$PROFILE" ]] || files_end "$LABEL"
+      [[ "$PROFILE" != files ]] || files_end "$LABEL"
+      [[ "$PROFILE" != r3 ]] || { r3_mark after "$LABEL"; r3_end; }
     done
     unset runs
     case "$MODE" in
