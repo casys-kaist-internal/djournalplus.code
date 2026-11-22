@@ -366,10 +366,19 @@ def main():
                 P("- %s" % line.strip())
     if a.queue and Path(a.queue).exists():
         P("- PM1735 queue reads: %s" % queue_check(a.queue)[0])
+    P("- LOST_PCT %g: m3ct_check's gate allows lost stacks (stack-map collisions) up to %g%% of a cell's CT off-CPU (the"
+      % (a.max_lost_pct, a.max_lost_pct))
+    P("  plan's condition was none, 0)%s. Each cell's lost stacks, count and %% of CT off-CPU: the Checks table."
+      % ("" if a.gate else "; this run has no gate"))
     P("- Times are per fdatasync of the cell's window (M3's counted syncs), us. Off-CPU = switch-out to switch-in; the")
     P("  wait for a CPU (rq) is wakeup to switch-in. On-CPU = M3's exclusive phase time minus its off-CPU.")
     P("")
     P("## Run quality and the CT split (us per fdatasync)")
+    P("")
+    P("dIOPS % and the ref columns are against the reference run, the same cells with the M3 tracer alone. The")
+    P("difference includes the added probes' CPU time and their maps' memory: 632 MiB preallocated")
+    P("(BPFTRACE_MAX_MAP_KEYS=100000), about 1% of the available memory (61.3 GB), as measured at the prep")
+    P("(final_tau/full/PREP_m3ct_v1.1.md).")
     P("")
     P("| config | op | T | IOPS | ref IOPS | dIOPS % | syncs | sync | ref sync | CT | ref CT | CT on | CT off | "
       "CT sleep | CT rq | JIO | JIO off | REC | REC off | sw/sync CT | sw/sync JIO | sw/sync REC | off in sync |")
