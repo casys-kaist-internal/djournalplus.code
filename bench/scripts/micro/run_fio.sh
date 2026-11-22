@@ -67,6 +67,10 @@
 #        CHECK_ONLY=1: stop after the kernel and experiment checks
 #        M3_TRACE=1: trace every run's fsync phases after the ramp (m3_phases.bt,
 #        <run>.m3; m3_report.py tables), EVAL_PLAN M3
+#        M3_OFFCPU=1 (opt-in, with M3_TRACE=1 on the tau kernel): m3_offcpu_tau.bt goes into
+#        the same tracer, after m3_phases_tau.bt: off-CPU time per M3 phase and sleep site,
+#        on-CPU samples, the tau commits' revoke path (m3_offcpu_report.py tables;
+#        final_tau/full/PLAN_m3ct_v1.1.md). Unset or 0: the tracer is as before
 set -e
 [ -n "$TAUFS_ENV_SOURCED" ] || { echo "Do source set_env.sh first."; exit 1; }
 source "$TAUFS_BENCH/scripts/common.sh"
@@ -146,6 +150,11 @@ fi
 if [[ $TOOL == fio ]] && { has "$CONFIGS" EXT4_App || has "$CONFIGS" XFS_App; }; then
   echo "❌ App runs with atomicw only"; exit 1
 fi
+M3_OFFCPU=${M3_OFFCPU:-0}
+[[ $M3_OFFCPU == 0 || $M3_OFFCPU == 1 ]] || { echo "❌ M3_OFFCPU is 0 or 1"; exit 1; }
+if [[ $M3_OFFCPU == 1 ]] && { [[ ${M3_TRACE:-0} != 1 ]] || (( ! TAU_KERNEL )); }; then
+  echo "❌ M3_OFFCPU=1 needs M3_TRACE=1 on the tau kernel"; exit 1
+fi
 [[ "${CHECK_ONLY:-0}" == 0 ]] || { echo "checks passed: $CONFIGS | $EXPS | $KERNEL"; exit 0; }
 if [[ "${HOST_CHECK:-1}" != 0 ]]; then
   bash "$TAUFS_BENCH/scripts/host_setup.sh" check || { echo "❌ run bench/scripts/host_setup.sh apply"; exit 1; }
@@ -172,6 +181,10 @@ cp "$0" "$HERE/tau_preload.c" "$HERE/atomicw.c" "$HERE/fio_report.py" "$HERE/m3_
 if [[ "${M3_TRACE:-0}" == 1 ]]; then
   M3_BT=$(bt_for_kernel "$HERE/m3_phases.bt" "$RESULT_DIR/m3_phases.kernel.bt")
   if (( TAU_KERNEL )); then cat "$HERE/m3_phases_tau.bt" >> "$M3_BT"; fi
+  if [[ $M3_OFFCPU == 1 ]]; then   # one program: the off-CPU probes read M3's phase maps
+    cat "$HERE/m3_offcpu_tau.bt" >> "$M3_BT"
+    cp "$HERE/m3_offcpu_tau.bt" "$HERE/m3_offcpu_report.py" "$RESULT_DIR/"
+  fi
 fi
 CSV=$RESULT_DIR/results.csv
 python3 "$HERE/fio_report.py" header > "$CSV"
@@ -186,6 +199,7 @@ log_env "$RESULT_DIR/env.txt"
   echo "zfs_arc_max: $(cat /sys/module/zfs/parameters/zfs_arc_max 2>/dev/null)"
   echo "TOOL=$TOOL CONFIGS=$CONFIGS EXPS=$EXPS OPS=$OPS THREADS_LIST=$THREADS_LIST FILES_LIST=$FILES_LIST REPS=$REPS REPS_TOP=$REPS_TOP RAMP=$RAMP RUNTIME=$RUNTIME TOTAL_GB=$TOTAL_GB SETTLE=$SETTLE FSYNC_N=$FSYNC_N FIRST_MODE=$FIRST_MODE FRESH_PER=$FRESH_PER TAU_JOURNAL_GB=$TAU_JOURNAL_GB BW_LOG=$BW_LOG TOP_T=$TOP_T ZONED_CONFIGS=$ZONED_CONFIGS ZONED_DIST=$ZONED_DIST R1_FILES=$R1_FILES R1_OPEN=$R1_OPEN R1_FSYNC_N=$R1_FSYNC_N M3_TRACE=${M3_TRACE:-0}"
 } >> "$RESULT_DIR/env.txt"
+[[ $M3_OFFCPU != 1 ]] || echo "M3_OFFCPU=1: m3_offcpu_tau.bt $(md5sum < "$HERE/m3_offcpu_tau.bt" | cut -c1-8) in the M3 tracer (m3_phases.kernel.bt)" >> "$RESULT_DIR/env.txt"
 echo "=== fio: $RESULT_DIR ($CONFIGS | $EXPS | $OPS | threads $THREADS_LIST | files $FILES_LIST | $KERNEL) $(date -u --rfc-3339=seconds)"
 
 fs_make() {
