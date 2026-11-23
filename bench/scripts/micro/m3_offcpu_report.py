@@ -18,10 +18,12 @@ a function that has kretfunc probes shows as "f+N, <trampoline>, f+5" (the body,
 signatures drop the bpf frames and repeats. The full stacks go to m3ct_stacks.txt.
 
 Usage: m3_offcpu_report.py <result dir> --ref <reference result dir> [--manifest <MANIFEST.txt>] [--queue <file>]
-       [--gate [--cells N] [--max-lost-pct P]]
+       [--gate [--cells N] [--max-lost-pct P] [--min-burden B]]
 Writes <result dir>/m3ct.md (also printed) and m3ct_stacks.txt. --gate: the m3ct_check gate (plan section 7, step 2);
 exit status 2 if it fails. --cells: the cells the gate expects (default 2). --max-lost-pct: the lost-stack share of CT
-off-CPU the gate allows (default 0: none).
+off-CPU the gate allows (default 0: none). --min-burden: the tracer's IOPS burden the gate allows, in points (default
+-5): ours/ref over the counted window minus ours/ref over seconds 2-9, before the tracer starts (runs/<label>.tl of
+both runs; cells with a 10-s ramp only).
 """
 import argparse
 import csv
@@ -53,11 +55,16 @@ class M3:
         self.stk = defaultdict(list)
         self.hist = defaultdict(dict)
         self.notes = []
+        self.wbegin = self.wend = None                          # M3's gate and END, ns
         lines = path.read_text(errors="replace").splitlines()
         i = 0
         while i < len(lines):
             line = lines[i]
             i += 1
+            if line.startswith("window_begin_ns "):
+                self.wbegin = int(line.split()[1])
+            elif line.startswith("window_end_ns "):
+                self.wend = int(line.split()[1])
             if not line.startswith("@"):
                 if line.strip() and not line.startswith(("Attaching", "window_", "[")):
                     self.notes.append(line.strip())
@@ -200,6 +207,26 @@ def md5(p):
     return hashlib.md5(p.read_bytes()).hexdigest()[:8] if p.exists() else "absent"
 
 
+def timeline(path):
+    """atomicw's runs/<label>.tl: (warm-up s, {second: pages})."""
+    if not path.exists():
+        return None, {}
+    warm, v = None, {}
+    for line in path.read_text().splitlines():
+        if line.startswith("#"):
+            m = re.search(r"warm-up (\d+) s", line)
+            warm = int(m.group(1)) if m else warm
+        elif line.split() and len(line.split()) == 2:
+            a, b = line.split()
+            v[int(a)] = int(b)
+    return warm, v
+
+
+def mean_of(v, secs):
+    xs = [v[s] for s in secs if s in v]
+    return sum(xs) / len(xs) if xs else None
+
+
 def cell_rows(rdir, ref, args):
     res, refres = csv_rows(rdir), csv_rows(ref)
     refcells = cells(ref)
@@ -217,6 +244,37 @@ def cell_rows(rdir, ref, args):
         c["iops"] = float(r["write_iops"]) if r.get("write_iops") else None
         c["ref_iops"] = float(rr["write_iops"]) if rr.get("write_iops") else None
         c["d_iops"] = pct(c["iops"] - c["ref_iops"], c["ref_iops"]) if c["iops"] and c["ref_iops"] else None
+        # the counted window: from @oc_on (the first counted sync seen here) to M3's END
+        on = m.get("oc_on")
+        c["delay_s"] = (on - m.wbegin) / 1e9 if on and m.wbegin else None
+        c["counted_s"] = (m.wend - on) / 1e9 if on and m.wend else None
+        # the tracer's IOPS burden: ours/ref in the counted window against ours/ref before the tracer (s2-9)
+        warm, tl = timeline(rdir / "runs" / (label + ".tl"))
+        _, rtl = timeline(ref / "runs" / (label + ".tl"))
+        c["warm"] = warm
+        c["pre"] = c["cnt"] = c["burden"] = None
+        c["window_est"] = False
+        if tl and not c["counted_s"]:                               # no @oc_on (runs before 11-23): estimate
+            fs = int(inf.get("fdatasync_n", 64) or 64)                 # it from M3's syncs, back from the end
+            need, last = n * fs, max(tl)
+            sec = last - 1
+            while sec >= 0 and need > tl.get(sec, 0):
+                need -= tl.get(sec, 0)
+                sec -= 1
+            if sec >= 0 and tl.get(sec):
+                c["counted_s"] = last - sec - need / tl[sec]
+                c["window_est"] = True
+        if tl and rtl and c["counted_s"]:
+            last = max(tl)                                          # the partial second at the end
+            cs = [x for x in range(int(last - c["counted_s"]) + 1, last) if x in tl and x in rtl]
+            ps = [x for x in range(2, 10) if x in tl and x in rtl] if (warm or 0) >= 10 else []
+            c["cnt_secs"] = (cs[0], cs[-1]) if cs else None
+            if cs:
+                c["cnt"] = (mean_of(tl, cs), mean_of(rtl, cs))
+            if ps:
+                c["pre"] = (mean_of(tl, ps), mean_of(rtl, ps))
+            if c["cnt"] and c["pre"]:
+                c["burden"] = 100.0 * (c["cnt"][0] / c["cnt"][1] - c["pre"][0] / c["pre"][1])
         c["sync"] = us(m.get("sync_ns"))
         rn = rm.get("sync_n") if rm else 0
         c["ref_sync"] = rm.get("sync_ns") / rn / 1000.0 if rn else None
@@ -345,6 +403,7 @@ def main():
     ap.add_argument("--gate", action="store_true")
     ap.add_argument("--cells", type=int, default=2)
     ap.add_argument("--max-lost-pct", type=float, default=0.0)
+    ap.add_argument("--min-burden", type=float, default=-5.0)
     a = ap.parse_args()
     rdir, ref = Path(a.rdir), Path(a.ref)
     rows = cell_rows(rdir, ref, a)
@@ -370,6 +429,12 @@ def main():
       % (a.max_lost_pct, a.max_lost_pct))
     P("  plan's condition was none, 0)%s. Each cell's lost stacks, count and %% of CT off-CPU: the Checks table."
       % ("" if a.gate else "; this run has no gate"))
+    P("- Gate IOPS condition, changed 11-23 after the 11-22 check run failed it: was \"IOPS at least 90% of m3check's")
+    P("  cell\", now \"the tracer's IOPS burden at least %+g points\" (ours/ref over the counted window minus ours/ref"
+      % a.min_burden)
+    P("  over seconds 2-9, before the tracer starts). On 11-22 the T1 cell was already at 89.3% of the reference in")
+    P("  seconds 2-9, before the tracer started. The IOPS and dIOPS % against the reference stay in the table as")
+    P("  information.")
     P("- Times are per fdatasync of the cell's window (M3's counted syncs), us. Off-CPU = switch-out to switch-in; the")
     P("  wait for a CPU (rq) is wakeup to switch-in. On-CPU = M3's exclusive phase time minus its off-CPU.")
     P("")
@@ -393,6 +458,29 @@ def main():
             fnum(c["CT_off"]), fnum(c["CT_sleep"]), fnum(c["CT_rq"]), fnum(c["JIO"]), fnum(c["JIO_off"]),
             fnum(c["REC"]), fnum(c["REC_off"]), fnum(c["CT_sw"], "%.2f"), fnum(c["JIO_sw"], "%.2f"),
             fnum(c["REC_sw"], "%.2f"), fnum(c["insync_off"])]) + " |")
+    P("")
+    P("## The counted window and the tracer's IOPS burden")
+    P("")
+    P("The counting starts at the first counted sync the new probes see (@oc_on): M3's vfs_fsync_range kfunc, which")
+    P("opens the counted syncs, is the last probe bpftrace attaches. Pages per second from runs/<label>.tl (atomicw's")
+    P("timeline), ours and the reference over the same seconds: before the tracer (s2-9, in the 10-s ramp) and in the")
+    P("counted window. Burden = ours/ref counted minus ours/ref before, in points.")
+    P("")
+    P("| config | op | T | gate to counting, s | counted, s | counted secs | before ours / ref | counted ours / ref | "
+      "ours/ref before % | ours/ref counted % | burden, points | ours counted/before % | ref counted/before % |")
+    P("|---|---|---:|" + "---:|" * 2 + "---|" + "---:|" * 7)
+    for c in rows:
+        if not c["n"]:
+            continue
+        pre, cnt = c.get("pre"), c.get("cnt")
+        P("| %s | %s | %d | " % c["key"] + " | ".join([
+            fnum(c["delay_s"], "%.2f"), fnum(c["counted_s"], "%.2f") + (" (estimated)" if c["window_est"] else ""),
+            "%d-%d" % c["cnt_secs"] if c.get("cnt_secs") else "",
+            "%.0f / %.0f" % pre if pre else "n/a (no ramp)" if (c["warm"] or 0) < 10 else "",
+            "%.0f / %.0f" % cnt if cnt else "",
+            fnum(pre and 100.0 * pre[0] / pre[1]), fnum(cnt and 100.0 * cnt[0] / cnt[1]),
+            fnum(c["burden"], "%+.1f"),
+            fnum(pre and cnt and 100.0 * cnt[0] / pre[0]), fnum(pre and cnt and 100.0 * cnt[1] / pre[1])]) + " |")
     P("")
     P("## CT off-CPU by what it waited on (us per fdatasync; % of CT off-CPU)")
     P("")
@@ -517,8 +605,9 @@ def main():
         cp = c["chk"]["CT"][2]
         if cp is None or not 90.0 <= cp <= 110.0:
             why.append("CT sampled/derived %s%%" % fnum(cp))
-        if c["d_iops"] is None or c["d_iops"] < -10.0:
-            why.append("IOPS %s%% of the reference" % fnum(100 + c["d_iops"] if c["d_iops"] is not None else None))
+        if c["burden"] is None or c["burden"] < a.min_burden:
+            why.append("tracer IOPS burden %s" % (fnum(c["burden"], "%+.1f points") if c["burden"] is not None
+                                                   else "unknown (no timeline or no counted window)"))
         for k in (3, 2, 1):
             x = (c["rv%d" % k], c["c742_%d" % k], c["c1003_%d" % k])
             if max(x) - min(x) > TOL:
@@ -548,9 +637,9 @@ def main():
         ok = all(g[1] for g in gate)
         P("## Gate (m3ct_check): %s" % ("PASS" if ok else "FAIL"))
         P("")
-        P("Both cells: the new maps present, @oc_anom 0, %s, CT sampled/derived 90-110%%, IOPS at least 90%% of the "
-          "reference, check 5." % ("no lost stack" if a.max_lost_pct <= 0 else
-                                   "lost stacks at most %.2f%% of CT off-CPU" % a.max_lost_pct))
+        P("Both cells: the new maps present, @oc_anom 0, %s, CT sampled/derived 90-110%%, the tracer's IOPS burden at "
+          "least %+g points, check 5." % ("no lost stack" if a.max_lost_pct <= 0 else
+                                          "lost stacks at most %.2f%% of CT off-CPU" % a.max_lost_pct, a.min_burden))
         P("")
         for k, g, why in gate:
             P("- %s %s T%d: %s (%s)" % (k + ("pass" if g else "FAIL", why)))

@@ -4,6 +4,14 @@
  * @gate, @s and @ph and never writes them. No BEGIN or END: the program has M3's, whose END clears @gate,
  * which also stops the counting here. Report: m3_offcpu_report.py.
  *
+ * The counting starts with M3's (11-23, after the 11-22 check run): at @oc_on, the time a probe here first sees a
+ * thread in a counted sync (@s), not at M3's 2-s gate. bpftrace v0.20.2 attaches the kretfuncs, then the
+ * tracepoints and profile, then the kfuncs in reverse file order, so M3's vfs_fsync_range kfunc, which opens the
+ * counted syncs, is the last; under load it came 2.6-3.9 s after the gate. Counting from the gate, the switch-outs
+ * were recorded before finish_task_switch was attached (@oc_anom), and commits in flight when M3's kfunc on the
+ * commit function was attached lost their kretfunc (the kernel's trampoline update skips the fexit progs of calls
+ * in flight: @rc_nest). From @oc_on on, every probe is attached and no trampoline changes. @oc_on: ns.
+ *
  * Off-CPU of the traced process ($1), one interval per switch-out and switch-in. The switch-out
  * (sched_switch, in prev's context) notes the time, prev_state and the bucket. The switch-in
  * (finish_task_switch, in the context of the thread that resumes) adds the interval, so its kernel stack is
@@ -19,7 +27,7 @@
  *   @oc_smp[b]               profile samples at 999 Hz with a thread of $1 current (the on-CPU estimate)
  *   @oc_anom                 a switch-out while one is pending (a missed switch-in): expected none
  *   @oc_nowake               a sleep (not runnable, not preempted) with no wakeup seen
- * Tau commits after the gate, any thread, and the revoke path (commit.c 732, 742 and 1003 at 547b50ba). Class
+ * Tau commits from @oc_on, any thread, and the revoke path (commit.c 732, 742 and 1003 at 547b50ba). Class
  * k: 3 the process in a counted sync (the commits in M3's CT), 2 the process outside one, 1 other threads.
  *   @rc_n[k, rv]             commits; rv 1: the transaction carries revoke blocks at entry (the test at 732)
  *   @rc_c[742, k]            filemap_fdatawrite_wbc calls in a commit with line 742's wbc (WB_SYNC_ALL,
@@ -34,8 +42,9 @@
  * still out or in a call at the end. m3_report.py reads none of these keys.
  */
 
-tracepoint:sched:sched_switch /pid == $1 && @gate && nsecs > @gate/
+tracepoint:sched:sched_switch /pid == $1 && @gate && (@oc_on || @s[tid])/
 {
+	if (!@oc_on) { @oc_on = nsecs; }
 	if (@oc_t0[tid]) { @oc_anom = count(); }
 	@oc_t0[tid] = nsecs;
 	@oc_st[tid] = args.prev_state;
@@ -73,14 +82,16 @@ kfunc:vmlinux:finish_task_switch /pid == $1 && @oc_t0[tid]/
 	delete(@oc_wk[tid]);
 }
 
-profile:hz:999 /pid == $1 && @gate && nsecs > @gate/
+profile:hz:999 /pid == $1 && @gate && (@oc_on || @s[tid])/
 {
+	if (!@oc_on) { @oc_on = nsecs; }
 	@oc_smp[@s[tid] ? @ph[tid] : 12] = count();
 }
 
 /* one pair per function: this bpftrace cannot attach one block to functions with different arguments */
-kfunc:vmlinux:tau_bh_commit_transaction /@gate && nsecs > @gate/
+kfunc:vmlinux:tau_bh_commit_transaction /@gate && (@oc_on || (pid == $1 && @s[tid]))/
 {
+	if (!@oc_on) { @oc_on = nsecs; }
 	if (@rc_in[tid]) { @rc_nest = count(); }
 	$k = pid == $1 ? (@s[tid] ? 3 : 2) : 1;
 	@rc_in[tid] = $k;
@@ -92,8 +103,9 @@ kretfunc:vmlinux:tau_bh_commit_transaction /@rc_in[tid]/
 	delete(@rc_in[tid]);
 }
 
-kfunc:vmlinux:tau_io_commit_transaction /@gate && nsecs > @gate/
+kfunc:vmlinux:tau_io_commit_transaction /@gate && (@oc_on || (pid == $1 && @s[tid]))/
 {
+	if (!@oc_on) { @oc_on = nsecs; }
 	if (@rc_in[tid]) { @rc_nest = count(); }
 	$k = pid == $1 ? (@s[tid] ? 3 : 2) : 1;
 	@rc_in[tid] = $k;
