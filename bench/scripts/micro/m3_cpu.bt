@@ -1,0 +1,78 @@
+/*
+ * EVAL_PLAN M3 at one thread: where the fdatasync's CPU goes (final_tau/full/PLAN_m3cpu_t1.md). Appended after
+ * m3_phases.bt (and m3_phases_tau.bt on the tau kernel) by run_fio.sh M3_CPU=1; no tau symbol here, so it loads
+ * on both kernels (v1.1 and base+). It reads M3's maps @gate, @s and @ph and never writes them; no BEGIN or END
+ * (M3's END clears @gate, which stops the counting here). The stacks of the on-CPU time come from perf record
+ * (run_fio.sh M3_PERF=1), not from here. Report: m3_cpu_report.py.
+ *
+ * The window: from @cp_on, the time a probe here first sees a thread in a counted sync (@s). bpftrace v0.20.2
+ * attaches M3's vfs_fsync_range kfunc, which opens the counted syncs, last, so every probe is attached by then.
+ * To @cp_end, the first exit of a thread of $1 (the workload's end; M3's window_end_ns comes 2-3 s after the
+ * SIGINT). There is no kretfunc here: a trampoline update cannot drop one (11-22).
+ *
+ * Off-CPU of the traced process ($1), as m3_offcpu_tau.bt: one interval per switch-out and switch-in, the bucket
+ * b at the switch-out (the M3 phase @ph if the thread is in a counted sync, else 12), prev_state (0 runnable,
+ * 0x100 preempted, 1 S, 2 D, 0x80 I) and the kernel stack at the switch-in (the sleep site).
+ *   @cp_x[b]              stats: count and total ns of the intervals
+ *   @cp_r[b]              sum: their wait for a CPU (wakeup to switch-in; all of it when runnable or preempted)
+ *   @cp_stk[b, st, kstack]   stats per sleep site; @cp_stkr the same keys, the wait for a CPU
+ *   @cp_h[b]              log2 histogram of the intervals, us
+ * On-CPU samples, profile at 999 Hz while a thread of $1 is current (no stack: the time-based estimate for the
+ * check against M3's time minus the off-CPU):
+ *   @cp_smp[b]            per bucket
+ *   @cp_slc[b, s]         per bucket and 5-s slice s since @cp_on
+ *   @cp_anom              a switch-out while one is pending (a missed switch-in): expected none
+ *   @cp_nowake            a sleep with no wakeup seen
+ *   @cp_on, @cp_end       ns
+ * The per-thread helpers (@cp_t0, @cp_st, @cp_b, @cp_wk) keep the entries of the threads still out at the end.
+ * m3_report.py reads none of these keys.
+ */
+
+tracepoint:sched:sched_process_exit /pid == $1 && @cp_on && !@cp_end/
+{
+	@cp_end = nsecs;
+}
+
+tracepoint:sched:sched_switch /pid == $1 && @gate && !@cp_end && (@cp_on || @s[tid])/
+{
+	if (!@cp_on) { @cp_on = nsecs; }
+	if (@cp_t0[tid]) { @cp_anom = count(); }
+	@cp_t0[tid] = nsecs;
+	@cp_st[tid] = args.prev_state;
+	@cp_b[tid] = @s[tid] ? @ph[tid] : 12;
+	delete(@cp_wk[tid]);
+}
+
+tracepoint:sched:sched_wakeup /@cp_t0[args.pid] && !@cp_wk[args.pid]/
+{
+	@cp_wk[args.pid] = nsecs;
+}
+
+kfunc:vmlinux:finish_task_switch /pid == $1 && @cp_t0[tid]/
+{
+	$now = nsecs;
+	$d = $now - @cp_t0[tid];
+	$b = @cp_b[tid];
+	$st = @cp_st[tid];
+	$w = @cp_wk[tid];
+	$rq = $w ? $now - $w : (($st == 0 || $st == 0x100) ? $d : 0);
+	if (!$w && $st != 0 && $st != 0x100) { @cp_nowake = count(); }
+	$k = kstack;
+	@cp_x[$b] = stats($d);
+	@cp_r[$b] = sum($rq);
+	@cp_stk[$b, $st, $k] = stats($d);
+	@cp_stkr[$b, $st, $k] = sum($rq);
+	@cp_h[$b] = hist($d / 1000);
+	delete(@cp_t0[tid]);
+	delete(@cp_st[tid]);
+	delete(@cp_b[tid]);
+	delete(@cp_wk[tid]);
+}
+
+profile:hz:999 /pid == $1 && @gate && !@cp_end && (@cp_on || @s[tid])/
+{
+	if (!@cp_on) { @cp_on = nsecs; }
+	$b = @s[tid] ? @ph[tid] : 12;
+	@cp_smp[$b] = count();
+	@cp_slc[$b, (nsecs - @cp_on) / 5000000000] = count();
+}

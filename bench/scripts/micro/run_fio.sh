@@ -71,6 +71,12 @@
 #        the same tracer, after m3_phases_tau.bt: off-CPU time per M3 phase and sleep site,
 #        on-CPU samples, the tau commits' revoke path (m3_offcpu_report.py tables;
 #        final_tau/full/PLAN_m3ct_v1.1.md). Unset or 0: the tracer is as before
+#        M3_CPU=1 (opt-in, with M3_TRACE=1, either kernel): m3_cpu.bt goes into the tracer instead:
+#        off-CPU per phase, on-CPU samples per phase, the counted window; M3_PERF=1 (needs
+#        M3_CPU=1) also records the run's kernel stacks with perf (PERF_BIN, from the ramp's end
+#        or 3 s, until the tool exits: <run>.perf.data). M3_IO=1 (opt-in, with M3_TRACE=1, either
+#        kernel): m3_io.bt instead, the bios and requests per fdatasync. M3_OFFCPU, M3_CPU and
+#        M3_IO exclude each other (m3_cpu_report.py tables; final_tau/full/PLAN_m3cpu_t1.md)
 set -e
 [ -n "$TAUFS_ENV_SOURCED" ] || { echo "Do source set_env.sh first."; exit 1; }
 source "$TAUFS_BENCH/scripts/common.sh"
@@ -155,6 +161,17 @@ M3_OFFCPU=${M3_OFFCPU:-0}
 if [[ $M3_OFFCPU == 1 ]] && { [[ ${M3_TRACE:-0} != 1 ]] || (( ! TAU_KERNEL )); }; then
   echo "❌ M3_OFFCPU=1 needs M3_TRACE=1 on the tau kernel"; exit 1
 fi
+M3_CPU=${M3_CPU:-0} M3_IO=${M3_IO:-0} M3_PERF=${M3_PERF:-0}
+for v in M3_CPU M3_IO M3_PERF; do
+  [[ ${!v} == 0 || ${!v} == 1 ]] || { echo "❌ $v is 0 or 1"; exit 1; }
+done
+if (( M3_CPU + M3_IO + M3_OFFCPU > 1 )); then echo "❌ M3_OFFCPU, M3_CPU and M3_IO exclude each other"; exit 1; fi
+if (( M3_CPU + M3_IO )) && [[ ${M3_TRACE:-0} != 1 ]]; then echo "❌ M3_CPU and M3_IO need M3_TRACE=1"; exit 1; fi
+if [[ $M3_PERF == 1 ]]; then
+  [[ $M3_CPU == 1 ]] || { echo "❌ M3_PERF=1 needs M3_CPU=1"; exit 1; }
+  PERF_BIN=${PERF_BIN:-$HOME/codes/linux-6.8.0plus-build/tools/perf/perf}
+  [[ -x $PERF_BIN ]] || { echo "❌ no perf at $PERF_BIN"; exit 1; }
+fi
 [[ "${CHECK_ONLY:-0}" == 0 ]] || { echo "checks passed: $CONFIGS | $EXPS | $KERNEL"; exit 0; }
 if [[ "${HOST_CHECK:-1}" != 0 ]]; then
   bash "$TAUFS_BENCH/scripts/host_setup.sh" check || { echo "❌ run bench/scripts/host_setup.sh apply"; exit 1; }
@@ -185,6 +202,11 @@ if [[ "${M3_TRACE:-0}" == 1 ]]; then
     cat "$HERE/m3_offcpu_tau.bt" >> "$M3_BT"
     cp "$HERE/m3_offcpu_tau.bt" "$HERE/m3_offcpu_report.py" "$RESULT_DIR/"
   fi
+  if [[ $M3_CPU == 1 || $M3_IO == 1 ]]; then   # PLAN_m3cpu_t1.md: in the same program, either kernel
+    M3_X=$HERE/m3_cpu.bt; [[ $M3_IO == 1 ]] && M3_X=$HERE/m3_io.bt
+    cat "$M3_X" >> "$M3_BT"
+    cp "$M3_X" "$HERE/m3_cpu_report.py" "$RESULT_DIR/"
+  fi
 fi
 CSV=$RESULT_DIR/results.csv
 python3 "$HERE/fio_report.py" header > "$CSV"
@@ -200,6 +222,7 @@ log_env "$RESULT_DIR/env.txt"
   echo "TOOL=$TOOL CONFIGS=$CONFIGS EXPS=$EXPS OPS=$OPS THREADS_LIST=$THREADS_LIST FILES_LIST=$FILES_LIST REPS=$REPS REPS_TOP=$REPS_TOP RAMP=$RAMP RUNTIME=$RUNTIME TOTAL_GB=$TOTAL_GB SETTLE=$SETTLE FSYNC_N=$FSYNC_N FIRST_MODE=$FIRST_MODE FRESH_PER=$FRESH_PER TAU_JOURNAL_GB=$TAU_JOURNAL_GB BW_LOG=$BW_LOG TOP_T=$TOP_T ZONED_CONFIGS=$ZONED_CONFIGS ZONED_DIST=$ZONED_DIST R1_FILES=$R1_FILES R1_OPEN=$R1_OPEN R1_FSYNC_N=$R1_FSYNC_N M3_TRACE=${M3_TRACE:-0}"
 } >> "$RESULT_DIR/env.txt"
 [[ $M3_OFFCPU != 1 ]] || echo "M3_OFFCPU=1: m3_offcpu_tau.bt $(md5sum < "$HERE/m3_offcpu_tau.bt" | cut -c1-8) in the M3 tracer (m3_phases.kernel.bt)" >> "$RESULT_DIR/env.txt"
+(( ! M3_CPU && ! M3_IO )) || echo "M3_CPU=$M3_CPU M3_IO=$M3_IO M3_PERF=$M3_PERF: $(basename "$M3_X") $(md5sum < "$M3_X" | cut -c1-8) in the M3 tracer (m3_phases.kernel.bt)$([[ $M3_PERF == 1 ]] && echo "; $PERF_BIN $("$PERF_BIN" --version 2> /dev/null) record -e cycles:k -F 999 --call-graph fp -k mono -p <tool>")" >> "$RESULT_DIR/env.txt"
 echo "=== fio: $RESULT_DIR ($CONFIGS | $EXPS | $OPS | threads $THREADS_LIST | files $FILES_LIST | $KERNEL) $(date -u --rfc-3339=seconds)"
 
 fs_make() {
@@ -469,11 +492,16 @@ run_fio() {  # <config> <exp> <op> <threads> <files> <fdatasync n> <dist> <rep> 
     fio --output-format=json --output="$out.json" "$out.fio" 2> "$out.err" &
   fi
   pid=$!
-  local trp=""
+  local trp="" perfp=""
   if [[ "${M3_TRACE:-0}" == 1 ]]; then   # EVAL_PLAN M3: the run's fsync phases, after the ramp
     ( sleep "$ramp"; exec sudo env BPFTRACE_MAX_MAP_KEYS=100000 bpftrace "$M3_BT" "$pid" "$DEVT" ) \
       > "$out.m3" 2>&1 &
     trp=$!
+  fi
+  if [[ ${M3_PERF:-0} == 1 ]]; then   # the kernel stacks; perf ends when the tool exits
+    ( sleep $(( ramp > 3 ? ramp : 3 )); exec sudo "$PERF_BIN" record -e cycles:k -F 999 --call-graph fp -k mono \
+        -p "$pid" -o "$out.perf.data" ) > "$out.perf.log" 2>&1 &
+    perfp=$!
   fi
   (( ramp == 0 )) || ( sleep "$ramp"; devstat > "$out.dramp" ) &
   if (( memo && ramp )); then ( sleep "$ramp"; r1_mem ramp "$out" ) & fi
@@ -490,6 +518,7 @@ run_fio() {  # <config> <exp> <op> <threads> <files> <fdatasync n> <dist> <rep> 
   fi
   wait "$pid"
   [[ -z $trp ]] || sudo kill -INT "$trp" 2>/dev/null || true
+  [[ -z $perfp ]] || sudo kill -INT "$perfp" 2>/dev/null || true
   t1=$(date +%s.%N); d1=$(devstat)
   if (( memo )); then r1_mem end "$out"; sudo kill -INT "$tcpid" 2>/dev/null || true; fi
   wait

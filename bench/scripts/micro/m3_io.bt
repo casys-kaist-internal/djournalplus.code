@@ -1,0 +1,68 @@
+/*
+ * EVAL_PLAN M3 at one thread, the I/O pass (final_tau/full/PLAN_m3cpu_t1.md): the bios and requests a fdatasync
+ * makes. Appended after m3_phases.bt (and m3_phases_tau.bt on the tau kernel) by run_fio.sh M3_IO=1; no tau
+ * symbol, so it loads on both kernels. It reads M3's maps @gate, @s and @ph and never writes them; no BEGIN or
+ * END. A probe per bio costs time, so this pass runs apart from the CPU pass (m3_cpu.bt) and only its counts are
+ * used. Report: m3_cpu_report.py --io.
+ *
+ * The window: from @io_on, the first bio a thread of $1 submits in a counted sync (M3 counts by then), to
+ * @io_end, the first exit of a thread of $1. Context c of an event, from the thread that runs it: the M3 phase
+ * @ph for a thread of $1 in a counted sync, 12 for a thread of $1 outside one, 13 for any other thread (its comm
+ * in the @io_*comm maps).
+ *   @io_bio[c, rwbs, nr_sector]       bios queued on the test device ($2: the namespace head, where bios enter)
+ *   @io_merge[c, kind]                bios merged into a request (1 back, 2 front), by the merging thread
+ *   @io_rq[dev, c, rwbs, nr_sector]   requests issued to a driver, by device and issuing thread; the PM1735's
+ *                                     are on its multipath path (nvme0c0n1), whose dev @io_pathdev is taken
+ *                                     from the remap of a test-device bio (block_bio_remap, old_dev == $2): a
+ *                                     path disk is hidden and has no dev in sysfs
+ *   @io_rqins[dev, c]                 requests inserted into a queue (not issued straight from the plug)
+ *   @io_rqc[dev]                      requests completed
+ *   @io_biocomm[comm], @io_rqcomm[comm]   the other threads' bios and requests on the test device
+ *   @io_on, @io_end                   ns
+ * m3_report.py reads none of these keys.
+ */
+
+tracepoint:sched:sched_process_exit /pid == $1 && @io_on && !@io_end/
+{
+	@io_end = nsecs;
+}
+
+tracepoint:block:block_bio_queue /args.dev == $2 && @gate && !@io_end && (@io_on || (pid == $1 && @s[tid]))/
+{
+	if (!@io_on) { @io_on = nsecs; }
+	$c = pid == $1 ? (@s[tid] ? @ph[tid] : 12) : 13;
+	@io_bio[$c, args.rwbs, args.nr_sector] = count();
+	if ($c == 13) { @io_biocomm[comm] = count(); }
+}
+
+tracepoint:block:block_bio_remap /args.old_dev == $2 && !@io_pathdev/
+{
+	@io_pathdev = args.dev;
+}
+
+tracepoint:block:block_bio_backmerge /@io_on && !@io_end/
+{
+	@io_merge[pid == $1 ? (@s[tid] ? @ph[tid] : 12) : 13, 1] = count();
+}
+
+tracepoint:block:block_bio_frontmerge /@io_on && !@io_end/
+{
+	@io_merge[pid == $1 ? (@s[tid] ? @ph[tid] : 12) : 13, 2] = count();
+}
+
+tracepoint:block:block_rq_insert /@io_on && !@io_end/
+{
+	@io_rqins[args.dev, pid == $1 ? (@s[tid] ? @ph[tid] : 12) : 13] = count();
+}
+
+tracepoint:block:block_rq_issue /@io_on && !@io_end/
+{
+	$c = pid == $1 ? (@s[tid] ? @ph[tid] : 12) : 13;
+	@io_rq[args.dev, $c, args.rwbs, args.nr_sector] = count();
+	if ($c == 13) { @io_rqcomm[comm] = count(); }
+}
+
+tracepoint:block:block_rq_complete /@io_on && !@io_end/
+{
+	@io_rqc[args.dev] = count();
+}
