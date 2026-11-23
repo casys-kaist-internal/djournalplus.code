@@ -16,12 +16,16 @@ Per run of the CPU pass, from runs/<label>.m3, .tl, .info, results.csv, <label>.
 A cell is the median of its runs, with the range; every run has its own rows too.
 
 Usage: m3_cpu_report.py <CPU pass dir>... [--ref <dir>...] [--notrace <dir>...] [--io <dir>...] [--pathdev MAJ:MIN]
-         [--manifest <file>...] [--host <file>...] [-o <md>] [--folded <dir>] [--gate [--min-burden B]]
+         [--manifest <file>...] [--host <file>...] [--ksyms <file>...] [-o <md>] [--folded <dir>]
+         [--gate [--min-burden B]]
   --ref: M3-only runs, the burden's reference (the first run of a cell is used); --host: the wrapper's host sampler
-  files (the one of the run's kernel is used); --pathdev: the PM1735 path's dev (/proc/diskstats);
+  files (the one of the run's kernel is used); --pathdev: the PM1735 path's dev (/proc/diskstats); --ksyms: the
+  wrapper's snapshot of a boot's /proc/modules and module kallsyms (logs/ksyms_<part>.txt; the one of the run's
+  kernel is used) to name the module frames perf left unresolved;
   --gate: the check step's gate (plan section 6) on the one run given; exit status 2 if it fails.
 """
 import argparse
+import bisect
 import csv
 import fnmatch
 import gzip
@@ -72,15 +76,25 @@ GROUP_NAMES = [n for n, _ in GROUPS] + ["other"]
 #  - named: the trampoline's entry and exit, the hooks that run the programs (tracepoints, the profile's perf
 #    event), perf's PMU switching when the traced thread is switched in or out;
 #  - BPF code: perf record -p does not see the programs bpftrace loads after it starts, so their frames and the
-#    trampolines' are unresolved; perf_samples() names an unresolved frame in the module area "[bpf]". A BPF frame
-#    is the tracer's own code (a program, what it calls, or the trampoline) unless it is a trampoline that wraps a
-#    function with a kretfunc: then the function is on both sides of it (its body below, its entry +5 above), and
-#    the sample is in that function, not in the tracer.
+#    trampolines' are unresolved. perf also leaves the frames of compressed modules (nvme, nvme_core: .ko.zst on
+#    v1.1) unresolved; perf_samples() names those from the boot's snapshot (Ksyms) and names an unresolved frame in
+#    the module area that is in no module "[bpf]" (without a snapshot: every unresolved module-area frame).
+#    A function with a kretfunc runs under its trampoline: the frames read trampoline, then the function's entry
+#    (+5) above it; the frame-pointer walk loses the function's caller there, and a frameless or shrink-wrapped
+#    callee loses the function's body too. So a BPF frame is a wrapping trampoline, not the tracer's own code, if
+#    the frame above it is a function the run's tracer wraps with a kretfunc (m3_phases.kernel.bt), or the same
+#    function as below it; unless it is the leaf, the frame above it is also BPF (a program under its trampoline),
+#    or the frame below it is a BPF helper (a program's frame lost).
 TRACER = re.compile(r"^(bpf_prog_|__bpf_prog_enter|__bpf_prog_exit|trace_call_bpf$|bpf_trace_run|__bpf_trace_|"
                     r"perf_trace_run_bpf_submit$|bpf_overflow_handler$|perf_swevent_hrtimer$|"
                     r"__perf_event_task_sched_(in|out)$)")
 BPF_FRAME = "[bpf]"
 MODULES_VADDR = 0xffffffffa0000000                   # x86-64: modules and BPF JIT images from here up
+# What BPF programs call (maps, time, stacks): a sample in one of them whose program frame was lost (a frameless or
+# shrink-wrapped fast path keeps the caller's frame pointer) shows it right under a trampoline.
+BPF_HELPER = re.compile(r"^(bpf_|__bpf_|htab_|__htab_|lookup_nulls_elem_raw|lookup_elem_raw|pcpu_freelist|"
+                        r"alloc_htab_elem|free_htab_elem|percpu_array_|array_map_|stack_map_|get_perf_callchain|"
+                        r"perf_callchain|ktime_get_mono_fast_ns|ktime_get_boot_fast_ns|jhash)")
 # The plan's named functions (section 4a), inclusive; τ's write_buffer is a static function inlined into the commit
 # (not in kallsyms), so it is in the commit's self samples (SELF).
 NAMED = ["submit_bh", "submit_bio_noacct", "blk_mq_submit_bio", "blk_mq_flush_plug_list", "nvme_queue_rqs",
@@ -117,17 +131,26 @@ def is_bpf(f):
     return f == BPF_FRAME or f.startswith("bpf_trampoline_")
 
 
-def tracer_frames(frames):
+def running_bpf(frames, i, kret):
+    """True if the BPF frame frames[i] is the tracer's own code running, False if it is a wrapping trampoline."""
+    if i == 0 or i + 1 >= len(frames):
+        return True
+    up, down = frames[i + 1], frames[i - 1]
+    if is_bpf(up) or BPF_HELPER.match(down):
+        return True
+    return not (up == down or up in kret)
+
+
+def tracer_frames(frames, kret=frozenset()):
     for i, f in enumerate(frames):
         if is_tracer_fn(f):
             return True
-        if is_bpf(f):
-            if i == 0 or i + 1 >= len(frames) or frames[i + 1] != frames[i - 1]:
-                return True                           # a program or a trampoline running
+        if is_bpf(f) and running_bpf(frames, i, kret):
+            return True
     return False
 
 
-def tracer_site(frames):
+def tracer_site(frames, kret=frozenset()):
     """Which probe a tracer sample belongs to: the traced function above the BPF frames (kfunc, kretfunc), a
     tracepoint, the profile, or perf's own switching."""
     for i, f in enumerate(frames):
@@ -140,7 +163,7 @@ def tracer_site(frames):
         if is_bpf(f) or f.startswith(("bpf_prog_", "__bpf_prog_")):
             if not is_bpf(f) and not f.startswith("bpf_prog_"):
                 continue
-            if i > 0 and i + 1 < len(frames) and frames[i + 1] == frames[i - 1]:
+            if is_bpf(f) and not running_bpf(frames, i, kret):
                 continue                              # a wrapping trampoline
             j = i + 1
             while j < len(frames) and (is_bpf(frames[j]) or frames[j].startswith("bpf_prog_")):
@@ -269,9 +292,9 @@ class Trace:
 
 # ---------------------------------------------------------------- perf script output
 
-def perf_samples(path):
+def perf_samples(path, ksyms=None):
     """(time ns, [kernel function names, leaf first]) per sample of a `perf script -F comm,tid,time,ip,sym --ns`
-    output (gzip or text)."""
+    output (gzip or text). ksyms (Ksyms of the run's boot) names unresolved frames in modules."""
     if not path.exists():
         return
     op = gzip.open if path.suffix == ".gz" else open
@@ -294,7 +317,8 @@ def perf_samples(path):
             if len(parts) >= 2 and parts[0].startswith("ffff"):      # kernel frames only
                 fn = strip.sub("", parts[1].split("+")[0])
                 if fn == "[unknown]" and int(parts[0], 16) >= MODULES_VADDR:
-                    fn = BPF_FRAME
+                    nm = ksyms.name(int(parts[0], 16)) if ksyms else None
+                    fn = strip.sub("", nm) if nm else BPF_FRAME
                 frames.append(fn)
     if t is not None:
         yield t, frames
@@ -367,17 +391,54 @@ def fnum(r, k):
         return None
 
 
+class Ksyms:
+    """The wrapper's snapshot of one boot's modules (logs/ksyms_<part>.txt): '# kernel K ...', /proc/modules lines
+    ('name size refs deps state 0xbase') and the modules' /proc/kallsyms lines ('addr type name [module]'). It names
+    an address inside a module; an address in no module is not named (BPF code: programs and trampolines are gone
+    after the run)."""
+
+    def __init__(self, path):
+        self.kernel, self.mods, self.syms, self.path = None, [], defaultdict(list), path
+        for line in Path(path).read_text(errors="replace").splitlines():
+            if line.startswith("#"):
+                m = re.search(r"kernel (\S+?);", line)
+                self.kernel = m.group(1) if m else self.kernel
+                continue
+            q = line.split()
+            m = re.search(r"\s0x([0-9a-f]{16})\b", line)
+            if m and len(q) >= 6 and not re.match(r"^[0-9a-f]{16}$", q[0]):
+                base = int(m.group(1), 16)
+                self.mods.append((base, base + int(q[1]), q[0]))
+            elif len(q) >= 4 and re.match(r"^[0-9a-f]{16}$", q[0]) and q[3].startswith("["):
+                self.syms[q[3].strip("[]")].append((int(q[0], 16), q[2]))
+        for v in self.syms.values():
+            v.sort()
+
+    def name(self, addr):
+        for lo, hi, mod in self.mods:
+            if lo <= addr < hi:
+                v = self.syms.get(mod, [])
+                i = bisect.bisect_right(v, (addr, "\uffff")) - 1
+                return v[i][1] if i >= 0 else "[%s]" % mod
+        return None
+
+
 class Host:
     """The wrapper's host sampler: '# host sampler ...: kernel K; boottime-monotonic offset N ns' and then a line a
     second: '<realtime> up=<s> MemFree:<kB> ... pgscan_kswapd=N ... psi_cpu=.. psi_mem=.. psi_io=.. path_stat=..'."""
 
     def __init__(self, path):
-        self.kernel, self.off, self.rows = None, 0, []
+        self.kernel, self.off, self.rows, self.node_of = None, 0, [], {}
         for line in Path(path).read_text(errors="replace").splitlines():
             if line.startswith("#"):
                 m = re.search(r"kernel (\S+?);.*offset (-?\d+)", line)
                 if m:
                     self.kernel, self.off = m.group(1), int(m.group(2))
+                for n, lst in re.findall(r"node(\d+) ([\d,-]+)", line) if line.startswith("# nodes:") else []:
+                    for part in filter(None, lst.split(",")):
+                        a, _, b = part.partition("-")
+                        for c in range(int(a), int(b or a) + 1):
+                            self.node_of[c] = int(n)
                 continue
             m = re.search(r"\bup=([\d.]+)", line)
             if not m:
@@ -385,20 +446,23 @@ class Host:
             d = {"line": line, "up": float(m.group(1)), "f": dict(re.findall(r"(\w+)[:=](\S+)", line))}
             ps = re.search(r"path_stat=(.*)$", line)
             d["stat"] = [int(x) for x in ps.group(1).split()] if ps else []
+            # CLOCK_MONOTONIC of the line: mono= (m3cpu_sampler.py), else uptime (BOOTTIME) minus the offset
+            d["mono"] = int(d["f"]["mono"]) if d["f"].get("mono", "").isdigit() else int(d["up"] * 1e9) - self.off
+            aw = d["f"].get("aw", "-")
+            d["aw"] = [tuple(x.split(":")) for x in aw.split(";")] if aw not in ("-", "") else []
             self.rows.append(d)
 
     def at(self, mono_ns):
-        """The row nearest a CLOCK_MONOTONIC time (uptime is CLOCK_BOOTTIME: monotonic + the offset)."""
+        """The row nearest a CLOCK_MONOTONIC time."""
         if not self.rows:
             return None
-        t = (mono_ns + self.off) / 1e9
-        return min(self.rows, key=lambda d: abs(d["up"] - t))
+        return min(self.rows, key=lambda d: abs(d["mono"] - mono_ns))
 
 
 class Run:
     """One run of the CPU pass."""
 
-    def __init__(self, rdir, m3path, csvrows, ref_tl=None):
+    def __init__(self, rdir, m3path, csvrows, ref_tl=None, ksyms_of=None):
         self.dir, self.label = rdir, m3path.stem
         self.inf = info(m3path.with_suffix(".info"))
         self.key = (self.inf.get("config"), self.inf.get("op"), int(self.inf.get("threads", 0) or 0))
@@ -451,7 +515,10 @@ class Run:
         self.perf_in = self.perf_out = 0
         pt = rdir / "runs" / (self.label + ".perf.txt.gz")
         self.has_perf = pt.exists()
-        for t, frames in perf_samples(pt):
+        self.ksyms = ksyms_of(self.inf.get("kernel")) if ksyms_of else None
+        tb = rdir / "m3_phases.kernel.bt"               # the functions the run's tracer wraps with a kretfunc
+        self.kret = frozenset(re.findall(r"^kretfunc:[\w.]+:(\w+)", tb.read_text(), re.M)) if tb.exists() else frozenset()
+        for t, frames in perf_samples(pt, self.ksyms):
             if not frames:
                 continue
             if not (self.on and self.end and self.on <= t <= self.end):
@@ -461,10 +528,10 @@ class Run:
             b = phase_of(frames)
             g = group_of(frames)
             self.perf[(b, g)] += 1
-            if tracer_frames(frames):
+            if tracer_frames(frames, self.kret):
                 self.trc[b] += 1
                 self.trc_g[(b, g)] += 1
-                self.trc_site[b][tracer_site(frames)] += 1
+                self.trc_site[b][tracer_site(frames, self.kret)] += 1
             self.leaf[b][frames[0]] += 1
             if frames[0] in COMMIT:
                 self.selfc[b] += 1
@@ -543,14 +610,15 @@ def burden(r, ref_tl):
     return 100.0 * (r.counted / rc - r.before / rb) if rb and rc else None
 
 
-def runs_of(dirs, ref_of):
+def runs_of(dirs, ref_of, ksyms_of=None):
     out = []
     for d in dirs:
         d = Path(d)
         rows = csv_rows(d)
         for m3 in sorted((d / "runs").glob("*.m3")):
             inf = info(m3.with_suffix(".info"))
-            out.append(Run(d, m3, rows, ref_of((inf.get("config"), inf.get("op"), int(inf.get("threads", 0) or 0)))))
+            out.append(Run(d, m3, rows, ref_of((inf.get("config"), inf.get("op"), int(inf.get("threads", 0) or 0))),
+                           ksyms_of))
     return out
 
 
@@ -668,6 +736,7 @@ def main():
     ap.add_argument("--pathdev")
     ap.add_argument("--manifest", nargs="*", default=[])
     ap.add_argument("--host", nargs="*", default=[])
+    ap.add_argument("--ksyms", nargs="*", default=[])
     ap.add_argument("-o", "--out")
     ap.add_argument("--folded", help="directory for the folded stacks per run and phase")
     ap.add_argument("--gate", action="store_true")
@@ -688,8 +757,10 @@ def main():
         return out
     refs, untraced = tls(a.ref), tls(a.notrace)
     hosts = [Host(h) for h in a.host if Path(h).exists()]
+    ksyms = [Ksyms(k) for k in a.ksyms if Path(k).exists()]
+    ksyms_of = lambda kernel: next((k for k in ksyms if k.kernel == kernel), None)
 
-    runs = runs_of(a.dirs, lambda k: refs.get(k, (None, None))[1])
+    runs = runs_of(a.dirs, lambda k: refs.get(k, (None, None))[1], ksyms_of)
     good = [r for r in runs if r.ok]
     cells = defaultdict(list)
     for r in good:
@@ -733,8 +804,17 @@ def main():
       "the tau commit); none = in sync, other. No rule for TI: its samples are TW's.")
     P("- Groups (the plan's 16, 4a; the first that matches from the leaf up): " +
       "; ".join("%d %s: %s" % (i + 1, n, p) for i, (n, p) in enumerate(GROUP_PATS)) + "; 16 other.")
-    P("- Tracer frames (not a group; the rows 'of which tracer'): %s; or BPF code (an unresolved frame in the "
-      "module area, [bpf]) that is not a trampoline wrapping the function below it." % TRACER.pattern)
+    P("- Tracer frames (not a group; the rows 'of which tracer'): %s; or BPF code ([bpf]: an unresolved frame in "
+      "the module area that is in no module of the run's boot) running: not a trampoline that wraps a function the run's "
+      "tracer probes with a kretfunc (the function's entry is the frame above it; the frame-pointer walk loses that "
+      "function's caller, and a frameless callee loses its body too)." % TRACER.pattern)
+    for k in ksyms:
+        P("- module snapshot %s: kernel %s, %d modules, %d module symbols; unresolved module frames are named from it"
+          % (k.path, k.kernel, len(k.mods), sum(len(v) for v in k.syms.values())))
+    nosnap = sorted({r.inf.get("kernel") for r in good if r.has_perf and not r.ksyms})
+    if nosnap:
+        P("- no module snapshot for %s: every unresolved module-area frame of those runs is counted as [bpf] (module "
+          "code such as nvme among them)" % ", ".join(str(x) for x in nosnap))
     P("")
 
     # 1. per cell
@@ -1039,6 +1119,51 @@ def main():
                          "samples, share perf/bpftrace %s, lost stacks %.2f%%, burden %s points" % (
                              fmt(r.check, "%.2f"), PHASES[b], fmt(sd), r.samples(b),
                              fmt(sp / sb if sp and sb else None, "%.3f"), r.lost_pct, fmt(r.burden, "%+.1f"))))
+    # 11. per second: the tool's threads and the NUMA nodes (m3cpu_sampler.py)
+    if any(any(row["aw"] for row in (host_of(r).rows if host_of(r) else [])) for k in order for r in cells[k]):
+        P("## 11. Per second: the tool's threads and the NUMA nodes (host sampler, read at about mid-second)")
+        P("")
+        P("A thread: tid@cpu/node, its migrations and non-voluntary switches since the line before. Nodes: free "
+          "memory (GB) and the change of their page cache (FilePages, MB) since the line before.")
+        P("")
+        for k in order:
+            for r in cells[k]:
+                h = host_of(r)
+                if not h or not r.tl or r.end_sec is None:
+                    continue
+                P("%s r%s (counted from second %s):" % (cols[order.index(k)], r.rep, r.cnt_secs[0] if r.cnt_secs else "?"))
+                P("")
+                P("| s | pages/s | threads | migrations | nvcsw | " + " | ".join("node%d free GB, file ΔMB" % n
+                  for n in sorted({int(x[4:x.index("_")]) for x in h.rows[0]["f"] if re.match(r"^node\d+_free$", x)})) + " |")
+                P("|---:|---:|---|---:|---:|" + "---|" * len([x for x in h.rows[0]["f"] if re.match(r"^node\d+_free$", x)]))
+                prev = None
+                for sec in sorted(r.tl):
+                    if sec >= int(r.end_sec):
+                        break
+                    row = h.at(r.mono(sec + 0.5))
+                    if row is None or (prev is not None and row is prev):
+                        continue
+                    pa = {t[0]: t for t in prev["aw"]} if prev else {}
+                    thr, mig, nv = [], 0, 0
+                    for t in row["aw"]:
+                        tid, cpu = t[0], t[1]
+                        node = h.node_of.get(int(cpu)) if cpu.isdigit() else None
+                        thr.append("%s@%s/%s" % (tid, cpu, "?" if node is None else node))
+                        if tid in pa and t[2].isdigit() and pa[tid][2].isdigit():
+                            mig += int(t[2]) - int(pa[tid][2])
+                        if tid in pa and t[3].isdigit() and pa[tid][3].isdigit():
+                            nv += int(t[3]) - int(pa[tid][3])
+                    nodes = []
+                    for x in sorted(f for f in row["f"] if re.match(r"^node\d+_free$", f)):
+                        n = x[4:x.index("_")]
+                        fr, fi = row["f"].get("node%s_free" % n, "?"), row["f"].get("node%s_file" % n, "?")
+                        dfi = (int(fi) - int(prev["f"].get("node%s_file" % n, fi))) / 1024 if prev and fi.isdigit() else None
+                        nodes.append("%s, %s" % ("%.2f" % (int(fr) / 2**20) if fr.isdigit() else "?", fmt(dfi, "%+.0f")))
+                    P("| %d | %d | %s | %s | %s | %s |" % (sec, r.tl[sec], " ".join(thr) or "-", mig if prev else "",
+                                                       nv if prev else "", " | ".join(nodes)))
+                    prev = row
+                P("")
+
     notes = [(r, r.tr.notes) for k in order for r in cells[k] if r.tr.notes]
     if notes:
         P("Lines of the tracer output that are not maps (errors, warnings):")
