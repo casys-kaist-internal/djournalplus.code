@@ -5,7 +5,11 @@
 # that the host polls, so a wedged guest never blocks an ssh call.
 #   prep <fs>                  check the device, settings that the host has (numa balancing off)
 #   pg_conf <key=value>...     PG settings into postgresql.conf, synced (the host cannot mount τ)
-#   mount <fs> <out>           mount, timed (seconds into <out>), dmesg since the mount call
+#   mount <fs> <out>           mount, timed (seconds into <out>), dmesg since the mount call;
+#                              "r2: mount <fs> start|end" in the kernel log around it, and
+#                              mount_dmesg=whole|cut in <out>: whether the log still held its
+#                              start (it is a ring: τ's recovery prints thousands of lines;
+#                              log_buf_len on the guest command line, VM_KCMDLINE_EXTRA, sizes it)
 #   pg_start <log> | my_start <log> <dblwr> <args...>   start the DB until it accepts
 #                              connections, timed (seconds on stdout)
 #   sb <name> <args...>        sysbench detached: ~/r2/<name>.log, marker ~/r2/<name>.done
@@ -64,11 +68,19 @@ case "$cmd" in
       *) echo "unknown fs $fs"; exit 1 ;;
     esac
     n=$(sudo dmesg | wc -l)
+    echo "r2: mount $fs start" | sudo tee /dev/kmsg > /dev/null
     t0=$(now)
     sudo mount "${o[@]}" $DEV $MNT || exit 1
     echo "mount_s=$(since "$t0")" > "$out"
+    echo "r2: mount $fs end" | sudo tee /dev/kmsg > /dev/null
     echo "mount_options=$(findmnt -no OPTIONS $MNT)" >> "$out"
-    sudo dmesg | tail -n +$((n + 1)) > "$out.dmesg"
+    if sudo dmesg | grep -q "r2: mount $fs start"; then
+      sudo dmesg | sed -n "/r2: mount $fs start/,\$p" > "$out.dmesg"
+      echo "mount_dmesg=whole" >> "$out"
+    else
+      sudo dmesg | tail -n +$((n + 1)) > "$out.dmesg"
+      echo "mount_dmesg=cut" >> "$out"
+    fi
     cat "$out"
     ;;
   pg_conf)   # <key=value>...: as postgres/api.sh pg_conf_set, then synced (before any crash)
