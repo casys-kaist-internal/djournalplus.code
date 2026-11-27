@@ -15,7 +15,7 @@
 	url = git@github.com:leesecre/e2fsprogs.git
 [submodule "djournalplus-kernel.code"]
 	path = codes/djournalplus-kernel.code
-	url = git@github.com:casys-kaist-internal/djournalplus-kernel.code.git
+	url = git@github.com:casys-kaist-internal/taujournal-kernel.code.git
 [submodule "bench/VectorDBBench"]
 	path = bench/VectorDBBench
 	url = https://github.com/zilliztech/VectorDBBench.git
